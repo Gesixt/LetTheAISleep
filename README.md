@@ -50,7 +50,7 @@ python install.py
 ```bash
 # 3. create a Basic Memory project (the vault) and build its vector index
 basic-memory project add <project-name> <vault-path>
-#   e.g.  basic-memory project add my-memory ~/ai-memory-vault
+#   e.g.  basic-memory project add my-memory /path/to/project/my-memory
 basic-memory reindex --embeddings -p <project-name>
 #   e.g.  basic-memory reindex --embeddings -p my-memory
 
