@@ -15,7 +15,9 @@ lts status --session "$CLAUDE_SESSION_ID"
 This prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
 
 ## 2. LTM metrics (Basic Memory)
-Read the project name from `config.toml` `[vault] project` (default `main` if unset), then run:
+Take the project name from the `lts status` output above — the `Project:` line (or the `project`
+field with `--json`). That value comes straight from this project's `config.toml`, so do not go
+hunting for the file yourself. Then run:
 ```
 basic-memory project info <project>
 ```

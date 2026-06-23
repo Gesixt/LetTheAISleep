@@ -40,6 +40,7 @@ def collect(cfg: Config, *, session_id: str, transcript_path: Path | None = None
 
     return {
         "session": session_id,
+        "project": cfg.project,
         "stm": {"lines": stm_lines, "bytes": stm_bytes, "approx_tokens": stm_tokens},
         "pending": {"snapshots": len(snaps), "bytes": pending_bytes},
         "pressure": pressure,
@@ -53,6 +54,7 @@ def render(metrics: dict) -> str:
     a = metrics["anchor"]
     lines = [
         f"Memory status — session {metrics['session']}",
+        f"  Project:      {metrics.get('project', '')}",
         f"  STM buffer:   {s['lines']} entries, {s['bytes']} B (~{s['approx_tokens']} tok)",
         f"  Sleep debt:   {p['snapshots']} pending snapshot(s), {p['bytes']} B"
         + ("  ⚠ un-slept material" if p["snapshots"] else ""),
