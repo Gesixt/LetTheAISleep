@@ -96,6 +96,28 @@ right vault automatically.
 > Without step 4 the `/sleep` and `/recall` skills cannot read or write long-term notes —
 > registering the Basic Memory MCP is **required**, not optional.
 
+## Troubleshooting (install gotchas)
+
+- **`uv: command not found`** — `uv` is optional. Either install it (`sudo snap install astral-uv`)
+  or use plain pip in every step (`python3 -m pip install --user ...`).
+- **`error: externally-managed-environment`** (Debian/Ubuntu, PEP 668) — add
+  `--break-system-packages` to user pip installs, e.g.
+  `python3 -m pip install --user --break-system-packages -e .`
+- **`-e option requires 1 argument`** — you dropped the trailing `.`. The dot is the package path;
+  run it **from inside the cloned repo** (where `pyproject.toml` is): `pip install --user -e .`
+- **`lts: command not found` after installing** — `~/.local/bin` is not on your PATH. Add
+  `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` and reopen the shell.
+- **`Error: path argument is required in local mode`** (from `basic-memory project add`) — pass the
+  vault path as the second argument: `basic-memory project add <project-name> <vault-path>`.
+- **Hooks stop firing after you move or delete the clone** — a target project's
+  `.claude/settings.json` points at the **source clone's absolute path**. Keep the clone in a stable
+  place (e.g. `~/tools/LetTheAISleep`); if you move it, re-run `install.py --target <project>`.
+- **Pulled a new version but a project still uses old skills/hooks** — re-run
+  `python install.py --target <project> --project <name>` to refresh that project's copied
+  `.claude/skills` and hook paths.
+- **Notes land in the wrong vault** — the skills pass `[vault] project` from `config.toml` to Basic
+  Memory; make sure that name matches the one you used in `basic-memory project add`.
+
 ## Usage
 
 **Daily flow**
