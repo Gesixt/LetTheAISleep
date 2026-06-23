@@ -45,12 +45,14 @@ uv venv && uv pip install -e '.'
 python install.py
 ```
 
-`install.py` prints the remaining manual steps. They are:
+`install.py` prints the remaining manual steps:
 
 ```bash
 # 3. create a Basic Memory project (the vault) and build its vector index
 basic-memory project add <project-name> <vault-path>
+#   e.g.  basic-memory project add my-memory ~/ai-memory-vault
 basic-memory reindex --embeddings -p <project-name>
+#   e.g.  basic-memory reindex --embeddings -p my-memory
 
 # 4. REGISTER the Basic Memory MCP server with Claude Code (required — the skills call its tools)
 claude mcp add basic-memory -- basic-memory mcp
@@ -61,7 +63,13 @@ claude mcp add basic-memory -- basic-memory mcp
 # 5. restart Claude Code so it loads the MCP server and the new hooks/skills
 ```
 
-Set the project name in `config.toml` (`[vault] project`) so the skills target the right vault.
+Then set the same project name in `config.toml` so the skills target the right vault:
+
+```toml
+[vault]
+mode = "per_project"
+project = "<project-name>"   # e.g. "my-memory"
+```
 
 > Without step 4 the `/sleep` and `/recall` skills cannot read or write long-term notes —
 > registering the Basic Memory MCP is **required**, not optional.
