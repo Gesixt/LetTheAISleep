@@ -7,6 +7,8 @@ description: Consolidate the current session into long-term memory (Basic Memory
 
 Goal: move everything worth keeping from this session into long-term notes with explicit `[[links]]`, preserving every number, name, and rationale — then free the STM buffer. This is **not** a lossy summary.
 
+**Target the right vault.** Read `[vault] project` from this project's `config.toml` and pass it as the `project` parameter to **every** Basic Memory tool call (`write_note`, `edit_note`, `read_note`, `search`, `build_context`). Without it the tools default to Basic Memory's `main` vault, not this project's.
+
 Run these steps in order.
 
 ## 1. Collect

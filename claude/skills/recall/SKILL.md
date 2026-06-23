@@ -7,6 +7,8 @@ description: Retrieve relevant long-term memory for the current topic, prioritiz
 
 Goal: load only what is relevant, cheaply. Prefer notes directly linked from the anchor/last session over purely semantic hits; traverse links one level only (no recursion); pull full bodies on demand.
 
+**Target the right vault.** Read `[vault] project` from this project's `config.toml` and pass it as the `project` parameter to every Basic Memory tool call (`search`, `build_context`, `read_note`) — otherwise they query the default `main` vault instead of this project's.
+
 ## Steps
 1. **Anchor first.** Read the anchor entry points:
    `lts anchor render`
