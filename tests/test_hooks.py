@@ -29,3 +29,45 @@ def test_pre_compact_missing_transcript_still_writes(tmp_path: Path):
     pre.run({"session_id": "s", "transcript_path": str(tmp_path / "nope.jsonl")}, root=tmp_path)
     snaps = list((tmp_path / ".ai_memory" / "pending_consolidation").glob("*.md"))
     assert len(snaps) == 1
+
+
+def test_session_start_injects_anchor_when_clean(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    from lts.config import load_config
+    from lts import anchor, paths
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(
+        paths.anchor_file(cfg),
+        updated="2026-06-23 15:30",
+        last_session="[[S]]",
+        active_topics=["t"],
+        active_notes=["[[N1]]"],
+    )
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "[[N1]]" in text
+    assert "finish sleeping" not in text.lower()
+
+
+def test_session_start_forces_completion_when_pending(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    from lts.config import load_config
+    from lts import paths, pending
+    cfg = load_config(tmp_path)
+    pending.dump_snapshot(paths.pending_dir(cfg), "s", "raw")
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "finish sleeping" in text.lower()
+
+
+def test_session_start_run_wraps_context(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    from lts import paths, pending
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    pending.dump_snapshot(paths.pending_dir(cfg), "s", "raw")
+    ss = _load("session_start", HOOKS / "session_start.py")
+    out = ss.run({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "finish sleeping" in out["hookSpecificOutput"]["additionalContext"].lower()
