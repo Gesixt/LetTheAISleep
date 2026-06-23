@@ -33,37 +33,49 @@ everything worth keeping into linked long-term notes **without losing a single n
 - Python 3.11+
 - Claude Code CLI
 - [Basic Memory](https://github.com/basicmachines-co/basic-memory) (AGPL-3.0), used as a separate
-  process over MCP. Install with `uv tool install basic-memory` (or `pip install --user basic-memory`).
+  process over MCP. Install with `uv tool install basic-memory`
+  (or `pip install --user basic-memory`; on Debian/Ubuntu add `--break-system-packages`).
 
 ## Install
 
+You clone this repo **once** and install `lts` **once**, then attach memory to each project you
+want it in (the project you attach to is the **target**; this repo stays the **source** of the
+hook scripts and skills).
+
 ```bash
-# 0. clone this repository and enter it
-git clone https://github.com/Gesixt/LetTheAISleep.git
-cd LetTheAISleep
+# 0. clone this repo once (anywhere stable — it stays as the source; not inside your project)
+git clone https://github.com/Gesixt/LetTheAISleep.git ~/tools/LetTheAISleep
+cd ~/tools/LetTheAISleep
 
 # 1. install this package GLOBALLY so the `lts` command is on your PATH.
 #    The skills (/sleep, /memory-status) call `lts` from shells Claude Code spawns,
 #    so it must be available outside any project virtualenv.
 uv tool install --editable .
 #   or, without uv:
-#   pip install --user -e .
+#   pip install --user -e .          # on Debian/Ubuntu: add --break-system-packages
 lts --help          # verify the command is found
-
-# 2. lay out config, sidecar, hooks and skills; set your Basic Memory project name
-python install.py --project <project-name>
-#   e.g.  python install.py --project my-memory
-#   (omit --project and install.py will prompt you for the name)
 ```
 
-`install.py` prints the remaining manual steps:
+Then, **for each project** you want memory in, attach it (this writes `config.toml`, the
+`.ai_memory/` sidecar, and `.claude/` hooks+skills into that project):
 
 ```bash
+# 2. attach memory to a target project and set its Basic Memory project name
+python ~/tools/LetTheAISleep/install.py --target /path/to/your/project --project <project-name>
+#   e.g.  python ~/tools/LetTheAISleep/install.py --target ~/code/netprint --project netprint
+#   (omit --target to use the current directory; omit --project to be prompted)
+```
+
+`install.py` prints the remaining manual steps — run them **from the target project**:
+
+```bash
+cd /path/to/your/project
+
 # 3. create a Basic Memory project (the vault) and build its vector index
 basic-memory project add <project-name> <vault-path>
-#   e.g.  basic-memory project add my-memory /path/to/project/my-memory
+#   e.g.  basic-memory project add netprint ~/code/netprint/.ai_vault
 basic-memory reindex --embeddings -p <project-name>
-#   e.g.  basic-memory reindex --embeddings -p my-memory
+#   e.g.  basic-memory reindex --embeddings -p netprint
 
 # 4. REGISTER the Basic Memory MCP server with Claude Code (required — the skills call its tools)
 claude mcp add basic-memory -- basic-memory mcp
@@ -71,8 +83,11 @@ claude mcp add basic-memory -- basic-memory mcp
 #   claude plugin marketplace add basicmachines-co/basic-memory
 #   claude plugin install basic-memory@basicmachines-co
 
-# 5. restart Claude Code so it loads the MCP server and the new hooks/skills
+# 5. restart Claude Code in the target project so it loads the MCP server, hooks and skills
 ```
+
+`install.py` also reminds you to add `.claude/settings.json`, `.ai_memory/` and `config.toml`
+to the **target project's** `.gitignore` (they contain machine-specific absolute paths).
 
 Use the **same `<project-name>`** in step 3 that you passed to `install.py` in step 2 — the
 installer already wrote it into `config.toml` (`[vault] project`), so the skills target the

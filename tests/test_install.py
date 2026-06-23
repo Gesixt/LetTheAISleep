@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -63,3 +64,26 @@ def test_resolve_project_falls_back_when_no_arg_no_tty(monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     args = argparse.Namespace(project=None)
     assert inst.resolve_project(args, "fallback") == "fallback"
+
+
+def test_main_installs_into_target_project(tmp_path: Path):
+    inst = _load_install()
+    target = tmp_path / "proj"
+    target.mkdir()
+    (target / ".git").mkdir()
+
+    rc = inst.main(["--project", "demo", "--target", str(target)])
+    assert rc == 0
+
+    # config + sidecar + skills land in the TARGET project, not the source repo
+    assert (target / "config.toml").exists()
+    assert 'project = "demo"' in (target / "config.toml").read_text(encoding="utf-8")
+    assert (target / ".ai_memory" / "stm").is_dir()
+    assert (target / ".claude" / "skills" / "sleep").exists()
+
+    settings = json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert "SessionStart" in settings["hooks"]
+    # hook command points at the SOURCE repo's hook script (where install.py lives)
+    source_root = Path(inst.__file__).resolve().parent
+    cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert str(source_root / "claude" / "hooks" / "session_start.py") in cmd
