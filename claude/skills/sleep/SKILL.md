@@ -25,6 +25,13 @@ Use Basic Memory `write_note` (or `edit_note` if today's session note exists) in
 ## 4. Link into the knowledge base
 For each distinct topic: `search` the vault. If a `_Knowledge_Base/` note exists, `edit_note` to augment it; otherwise `write_note` a new one. Place `[[links]]` both ways — in the note body **and** in the session note's frontmatter `kb_refs`. Build coherent linked prose, not a bullet list.
 
+## 4b. Rebuild embeddings so the new notes are semantically searchable
+`write_note`/`edit_note` do NOT update the vector index automatically — only full-text and graph links are live immediately. So that `/recall` can find what you just wrote by meaning, rebuild embeddings with bash:
+```
+basic-memory reindex --embeddings -p <project>
+```
+Use the project name from `config.toml` `[vault] project` (omit `-p` to use the default project). This is incremental and fast.
+
 ## 5. Self-check (anti-loss)
 Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each, confirm it appears in a written note. Append anything missing via `edit_note`. Only proceed once nothing is missing.
 

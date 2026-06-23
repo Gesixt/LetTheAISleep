@@ -264,6 +264,8 @@ Provided by **Basic Memory** — we do not build it:
 
 We only configure Basic Memory (model/project) and add the graph-priority heuristic at the skill layer. Performance targets ("3–5 s") are met by Basic Memory's SQLite search + our lazy loading.
 
+**Verified caveat (smoke test, Basic Memory 0.22.1):** `write_note`/`edit_note` update full-text and graph links immediately, but do **not** rebuild vector embeddings — those require `basic-memory reindex --embeddings -p <project>`. Consequences wired into the design: the `/sleep` skill runs a reindex after writing notes (step 4b) so semantic `/recall` sees fresh notes; `install.py` prints the reindex as a setup step. The graph path (`build_context`) needs no reindex, so a just-written note is still reachable by `[[link]]` immediately even before embeddings catch up.
+
 ---
 
 ## 9. Distribution, configuration, installation

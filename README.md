@@ -12,6 +12,10 @@ the Markdown vault, CRUD, and local hybrid full-text + vector search).
   forces an unfinished sleep to complete, `UserPromptSubmit` adds escalating sleep pressure.
 - **/recall** — graph-priority hybrid retrieval, loading only what's relevant.
 
+> **Note on semantic search:** Basic Memory serves full-text and graph links immediately on write,
+> but vector embeddings are rebuilt by `basic-memory reindex --embeddings -p <project>` (not on every
+> write). `/sleep` runs this after consolidating, and `install.py` lists it as a setup step.
+
 ## Requirements
 - Python 3.11+
 - [`uv`](https://docs.astral.sh/uv/)

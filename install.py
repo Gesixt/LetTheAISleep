@@ -79,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nNext steps (run manually):\n"
         f"  basic-memory project add {cfg.project} <vault-path>\n"
+        f"  basic-memory reindex --embeddings -p {cfg.project}   # build vector index (writes don't auto-embed)\n"
         "  claude plugin marketplace add basicmachines-co/basic-memory\n"
         "  claude plugin install basic-memory@basicmachines-co\n"
         "Then restart Claude Code and try a /sleep at the end of a session."
