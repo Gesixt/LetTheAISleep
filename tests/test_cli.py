@@ -1,8 +1,27 @@
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 from lts.cli import main
+
+
+def test_status_text(tmp_path: Path, capsys):
+    (tmp_path / ".git").mkdir()
+    main(["stm", "append", "--root", str(tmp_path), "--session", "s", "--text", "a fact"])
+    capsys.readouterr()
+    main(["status", "--root", str(tmp_path), "--session", "s"])
+    out = capsys.readouterr().out
+    assert "STM buffer" in out and "Sleep debt" in out and "Anchor" in out
+
+
+def test_status_json(tmp_path: Path, capsys):
+    (tmp_path / ".git").mkdir()
+    main(["status", "--root", str(tmp_path), "--session", "s", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["session"] == "s"
+    assert set(data) >= {"stm", "pending", "pressure", "anchor"}
+    assert data["pressure"] is None
 
 
 def test_python_m_lts_runs_as_module(tmp_path: Path):

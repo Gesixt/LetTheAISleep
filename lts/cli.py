@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from lts import anchor, paths, pending, stm, transcript
+from lts import anchor, paths, pending, status, stm, transcript
 from lts.config import load_config
 
 
@@ -42,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     p_pressure.add_argument("--root", default=None)
     p_pressure.add_argument("--transcript", required=True)
 
+    p_status = sub.add_parser("status")
+    p_status.add_argument("--root", default=None)
+    p_status.add_argument("--session", default="default")
+    p_status.add_argument("--transcript", default=None)
+    p_status.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     root = getattr(args, "root", None)
     cfg = _cfg(root)
@@ -68,6 +75,13 @@ def main(argv: list[str] | None = None) -> int:
         print(transcript.pressure_level(
             tokens, transcript.DEFAULT_WINDOW, cfg.pressure_warn, cfg.pressure_force
         ))
+    elif args.cmd == "status":
+        tp = Path(args.transcript) if args.transcript else None
+        metrics = status.collect(cfg, session_id=args.session, transcript_path=tp)
+        if args.json:
+            print(json.dumps(metrics, ensure_ascii=False, indent=2))
+        else:
+            print(status.render(metrics))
     return 0
 
 
