@@ -38,6 +38,10 @@ everything worth keeping into linked long-term notes **without losing a single n
 ## Install
 
 ```bash
+# 0. clone this repository and enter it
+git clone https://github.com/Gesixt/LetTheAISleep.git
+cd LetTheAISleep
+
 # 1. install this package GLOBALLY so the `lts` command is on your PATH.
 #    The skills (/sleep, /memory-status) call `lts` from shells Claude Code spawns,
 #    so it must be available outside any project virtualenv.
