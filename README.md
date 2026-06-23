@@ -99,7 +99,7 @@ right vault automatically.
 ## Troubleshooting (install gotchas)
 
 - **`uv: command not found`** — `uv` is optional. Either install it (`sudo snap install astral-uv`)
-  or use plain pip in every step (`python3 -m pip install --user ...`).
+  or use plain pip in every step (`python3 -m pip install --user --break-system-packages -e .`).
 - **`error: externally-managed-environment`** (Debian/Ubuntu, PEP 668) — add
   `--break-system-packages` to user pip installs, e.g.
   `python3 -m pip install --user --break-system-packages -e .`
