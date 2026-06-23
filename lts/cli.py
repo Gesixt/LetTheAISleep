@@ -69,3 +69,9 @@ def main(argv: list[str] | None = None) -> int:
             tokens, transcript.DEFAULT_WINDOW, cfg.pressure_warn, cfg.pressure_force
         ))
     return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

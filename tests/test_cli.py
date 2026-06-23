@@ -1,5 +1,25 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 from lts.cli import main
+
+
+def test_python_m_lts_runs_as_module(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    repo = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(repo)}
+    subprocess.run(
+        [sys.executable, "-m", "lts", "stm", "append",
+         "--root", str(tmp_path), "--session", "s", "--text", "module fact"],
+        check=True, env=env, capture_output=True, text=True,
+    )
+    out = subprocess.run(
+        [sys.executable, "-m", "lts", "stm", "read",
+         "--root", str(tmp_path), "--session", "s"],
+        check=True, env=env, capture_output=True, text=True,
+    ).stdout
+    assert "module fact" in out
 
 
 def test_stm_append_read_clear(tmp_path: Path, capsys):
