@@ -41,8 +41,10 @@ everything worth keeping into linked long-term notes **without losing a single n
 # 1. install this package (puts the `lts` command on PATH)
 uv venv && uv pip install -e '.'
 
-# 2. lay out config, sidecar, hooks and skills into .claude/
-python install.py
+# 2. lay out config, sidecar, hooks and skills; set your Basic Memory project name
+python install.py --project <project-name>
+#   e.g.  python install.py --project my-memory
+#   (omit --project and install.py will prompt you for the name)
 ```
 
 `install.py` prints the remaining manual steps:
@@ -63,13 +65,9 @@ claude mcp add basic-memory -- basic-memory mcp
 # 5. restart Claude Code so it loads the MCP server and the new hooks/skills
 ```
 
-Then set the same project name in `config.toml` so the skills target the right vault:
-
-```toml
-[vault]
-mode = "per_project"
-project = "<project-name>"   # e.g. "my-memory"
-```
+Use the **same `<project-name>`** in step 3 that you passed to `install.py` in step 2 — the
+installer already wrote it into `config.toml` (`[vault] project`), so the skills target the
+right vault automatically.
 
 > Without step 4 the `/sleep` and `/recall` skills cannot read or write long-term notes —
 > registering the Basic Memory MCP is **required**, not optional.

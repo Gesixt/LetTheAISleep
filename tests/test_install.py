@@ -29,3 +29,37 @@ def test_merge_settings_preserves_existing(tmp_path: Path):
     assert merged["model"] == "opus"
     assert "SessionStart" in merged["hooks"]
     assert "Stop" in merged["hooks"]  # existing hook entries kept
+
+
+def test_set_config_project_replaces_line():
+    inst = _load_install()
+    template = (
+        '[vault]\n'
+        'mode = "per_project"\n'
+        'project = "lts-default"\n'
+        '# path = "~/ai_memory_vault"\n'
+        '[sleep]\n'
+        'pressure_warn = 0.60\n'
+    )
+    out = inst.set_config_project(template, "my-memory")
+    assert 'project = "my-memory"' in out
+    assert "lts-default" not in out
+    # only the project line changes; other lines preserved
+    assert 'mode = "per_project"' in out
+    assert "pressure_warn = 0.60" in out
+
+
+def test_resolve_project_prefers_arg():
+    inst = _load_install()
+    import argparse
+    args = argparse.Namespace(project="explicit-name")
+    assert inst.resolve_project(args, "fallback") == "explicit-name"
+
+
+def test_resolve_project_falls_back_when_no_arg_no_tty(monkeypatch):
+    inst = _load_install()
+    import argparse
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    args = argparse.Namespace(project=None)
+    assert inst.resolve_project(args, "fallback") == "fallback"

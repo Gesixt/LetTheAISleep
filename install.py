@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -37,19 +39,50 @@ def merge_settings(existing: dict, hooks: dict) -> dict:
     return merged
 
 
+def set_config_project(toml_text: str, project: str) -> str:
+    """Replace the first `project = "..."` line in a config.toml with the given project name."""
+    return re.sub(
+        r'(?m)^(\s*project\s*=\s*).*$',
+        lambda m: f'{m.group(1)}"{project}"',
+        toml_text,
+        count=1,
+    )
+
+
+def resolve_project(args: argparse.Namespace, fallback: str) -> str:
+    """Project name from --project, else an interactive prompt (tty), else the fallback."""
+    if getattr(args, "project", None):
+        return args.project
+    if sys.stdin.isatty():
+        entered = input(f"Basic Memory project name [{fallback}]: ").strip()
+        return entered or fallback
+    return fallback
+
+
 def basic_memory_available() -> bool:
     return shutil.which("basic-memory") is not None
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Install Let The AI Sleep into this project.")
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Basic Memory project name to write into config.toml (otherwise prompted).",
+    )
+    args = parser.parse_args(argv)
+
     repo_root = Path(__file__).resolve().parent
     cfg = load_config(repo_root)
 
-    # 1. config.toml
+    # 1. config.toml — create from example if missing, then set the project name
     cfg_file = repo_root / "config.toml"
     if not cfg_file.exists():
         shutil.copy(repo_root / "config.example.toml", cfg_file)
-        print(f"created {cfg_file} (edit it to set your vault mode/project)")
+        print(f"created {cfg_file}")
+    project = resolve_project(args, cfg.project)
+    cfg_file.write_text(set_config_project(cfg_file.read_text(encoding="utf-8"), project), encoding="utf-8")
+    print(f"config.toml project set to '{project}'")
 
     # 2. sidecar
     paths.ensure_sidecar(cfg)
@@ -73,15 +106,14 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
     print(f"installed skills into {skills_dst}")
 
-    # 5. Basic Memory next steps
+    # 5. Basic Memory next steps (project name already written to config.toml)
     if not basic_memory_available():
         print("\n[!] basic-memory not found. Install it:\n    uv tool install basic-memory")
     print(
         "\nNext steps (run manually):\n"
-        f"  basic-memory project add {cfg.project} <vault-path>\n"
-        f"  basic-memory reindex --embeddings -p {cfg.project}   # build vector index (writes don't auto-embed)\n"
-        "  claude plugin marketplace add basicmachines-co/basic-memory\n"
-        "  claude plugin install basic-memory@basicmachines-co\n"
+        f"  basic-memory project add {project} <vault-path>\n"
+        f"  basic-memory reindex --embeddings -p {project}   # build vector index (writes don't auto-embed)\n"
+        "  claude mcp add basic-memory -- basic-memory mcp\n"
         "Then restart Claude Code and try a /sleep at the end of a session."
     )
     return 0
