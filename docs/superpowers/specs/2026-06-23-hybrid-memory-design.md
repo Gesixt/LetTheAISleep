@@ -1,8 +1,10 @@
 # Design: Hybrid Memory System for Claude + Obsidian ("Let The AI Sleep")
 
 **Date:** 2026-06-23
-**Status:** approved for implementation (v1)
+**Status:** approved for implementation (v1.1)
 **Requirements source of truth:** `task.md` (Spec #1, v0.1; kept locally, not in the repo)
+
+> **v1.1 change:** after surveying the field, the long-term store + CRUD + hybrid (full-text + vector) retrieval are delegated to **Basic Memory** (an existing local-first Obsidian/Markdown memory MCP that already uses our chosen stack: FastEmbed + SQLite). This project is now a **thin Claude Code integration layer on top of it** — the genuinely new parts (STM tier, sleep, hook-enforced homeostasis, anchor, auto-linking assist). No custom MCP server is built.
 
 ---
 
@@ -22,14 +24,14 @@ Two cross-cutting requirements follow from this goal and are wired into every mo
 | Topic | Decision |
 |---|---|
 | Runtime | **Claude Code (CLI)** |
-| Memory role | **Obsidian vault is the single store** for long-term memory; Claude Code's built-in file memory is not used |
+| Memory role | **Obsidian/Markdown vault is the single store**; Claude Code's built-in file memory is not used |
+| LTM substrate | **Build on Basic Memory** (existing MCP): store, CRUD, hybrid full-text + vector search, graph, edit-sync. Local/private, AGPL-3.0 |
+| Our package | **Claude Code integration layer**: skills + hooks + installer. **No custom MCP server** |
 | Memory tiers | **Three tiers** (context → STM buffer → LTM), like a human; STM is freed during sleep (see §3) |
-| Retrieval | **Full RAG + graph hybrid**: local embeddings (vector) + `[[link]]` traversal, 1 level |
-| Embeddings | **Local, private**: local multilingual model + local vector DB |
-| Indexer stack | **Python** |
-| Distribution | **Git-installable product**; vault path configurable (per-project / global mode) |
+| Retrieval | **Full RAG + graph hybrid** — vector + full-text via Basic Memory `search`; `[[link]]` traversal (1 level) via `build_context` |
+| Embeddings | **Local, private** — provided by Basic Memory (FastEmbed + SQLite) |
+| Distribution | **Git-installable**; depends on `basic-memory`; vault path via Basic Memory projects (per-project / global) |
 | Sleep triggers | **Full homeostasis**: manual `/sleep` + hard hooks (`PreCompact`, `SessionStart`, `UserPromptSubmit`) |
-| Architecture | **A — MCP server as the single contract** |
 
 ---
 
@@ -50,15 +52,15 @@ Prompts bias behavior strongly but do not guarantee it, and reliability drops ex
 
 Since Claude Code's built-in memory is not used, we reproduce the human three-tier scheme. Between the volatile context and the permanent graph sits the **STM buffer** — an analogue of the hippocampus: a fast intermediate store that accumulates during work and is *freed during sleep*, filing knowledge into LTM.
 
-| Tier | What | Medium | Lifetime | Indexed |
-|---|---|---|---|---|
-| **Context** | live dialogue | Claude's window | until `/compact` | no |
-| **STM** | working buffer: facts/numbers/decisions as they appear | append-only file `.ai_memory/stm/<session>.md` (outside the Obsidian graph) | until the next sleep | **no** (transient) |
-| **LTM** | linked knowledge graph | `_Knowledge_Base/` + `_Session_Memory/` | permanent | yes (embeddings) |
+| Tier | What | Medium | Owner | Lifetime | Indexed |
+|---|---|---|---|---|---|
+| **Context** | live dialogue | Claude's window | harness | until `/compact` | no |
+| **STM** | working buffer: facts/numbers/decisions as they appear | append-only file `.ai_memory/stm/<session>.md` (sidecar, outside the Basic Memory note tree) | **us** | until the next sleep | **no** (transient) |
+| **LTM** | linked knowledge graph | Markdown vault | **Basic Memory** | permanent | yes (FastEmbed + SQLite) |
 
 **Cycle:**
-- **Work** — Claude cheaply flushes key facts into STM (`stm_append`) as it goes: append-only, no linking or embeddings, instant, does not bloat context. STM is durable → survives `/compact`.
-- **Sleep** — reads the curated STM buffer (not the raw transcript) + the remaining context → files it into LTM (episode → session note, semantics → KB) with `[[links]]` → **clears STM** (`stm_clear`).
+- **Work** — Claude cheaply appends key facts into STM as it goes: append-only, no linking or embeddings, instant, does not bloat context. STM is durable → survives `/compact`.
+- **Sleep** — reads the curated STM buffer (not the raw transcript) + the remaining context → files it into LTM via Basic Memory `write_note`/`edit_note` (episode → session note, semantics → KB note) with `[[links]]` → **clears STM**.
 - **Wake-up** — `SessionStart` sees a non-empty STM (the previous session didn't finish sleeping) → triggers completion. STM is the preferred curated path; `pending_consolidation/` remains a lower-quality raw backstop.
 
 **Why a separate tier:** facts are captured at the moment they are stated (less loss risk), sleep processes a clean buffer (cheaper and more accurate, no re-derivation from the transcript), and "freeing the hippocampus during sleep" is modeled literally.
@@ -67,105 +69,105 @@ Since Claude Code's built-in memory is not used, we reproduce the human three-ti
 
 ## 4. Architecture and components
 
-The system is a git-installable package that turns a local Obsidian vault into Claude Code's long-term memory. Four layers:
+This project ships a Claude Code integration layer; Basic Memory provides the memory substrate.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Claude Code (STM — active context)                       │
-│   Hooks (hard):                                           │
-│     SessionStart     → reconcile + completion + Anchor    │
-│     PreCompact       → raw snapshot (backstop)            │
-│     UserPromptSubmit → escalating pressure 60%/80%        │
-│   Skills (soft):                                          │
-│     /sleep           → consolidation                      │
-│     /recall          → manual retrieval by topic          │
+│  Claude Code (context — active window)                    │
+│                                                           │
+│   OUR PACKAGE (skills + hooks + sidecar files):           │
+│     Hooks (hard, deterministic):                          │
+│       SessionStart    → inject Anchor; detect un-slept    │
+│                         STM/pending → force completion    │
+│       PreCompact      → dump raw transcript snapshot      │
+│       UserPromptSubmit→ escalating sleep pressure 60/80%  │
+│     Skills (soft):                                        │
+│       /sleep          → consolidation (reads STM → LTM)   │
+│       /recall         → retrieval by topic                │
+│     Sidecar files (.ai_memory/, plain files, no MCP):     │
+│       stm/<session>.md · anchor.json · pending_consol./   │
 └───────────────┬─────────────────────────────────────────┘
-                │ MCP (stdio)
+                │ MCP (stdio) — only for LTM operations
 ┌───────────────▼─────────────────────────────────────────┐
-│  memory-mcp  (Python MCP server — single contract)        │
-│   Notes layer (§4): list_notes · get_note · create_note   │
-│     · update_note · delete_note · rename_note             │
-│     · get_backlinks                                       │
-│   Retrieval layer: search_memory · get_anchor             │
-│     · update_anchor · reindex                             │
-│   STM layer: stm_append · stm_read · stm_clear            │
-└───────┬───────────────────────────┬─────────────────────┘
-        │                           │
-┌───────▼─────────┐        ┌────────▼──────────────────────┐
-│ vault_io        │        │ index (RAG engine)            │
-│ • read/write    │        │ • local embeddings             │
-│ • frontmatter   │        │ • vector DB (sqlite-vec)      │
-│ • [[linking]]   │        │ • incremental reindex          │
-│ • backlinks     │        │ • full-text fallback           │
-└───────┬─────────┘        └────────┬──────────────────────┘
-        │                           │
-┌───────▼───────────────────────────▼─────────────────────┐
-│  Obsidian Vault (LTM — Markdown + [[links]])             │
-│   _Session_Memory/ _Knowledge_Base/ _Templates/          │
-│   _Project_Memory/Main_index.md  .ai_memory/            │
+│  Basic Memory MCP (existing, AGPL-3.0) — LTM substrate     │
+│   CRUD:   write_note · read_note · edit_note               │
+│           · move_note · delete_note · list_directory      │
+│   Search: search (hybrid full-text + vector, FastEmbed)   │
+│   Graph:  build_context (link traversal) · relations      │
+│   Sync:   recent_activity · sync_status (picks up human   │
+│           edits made in Obsidian)                          │
+│   Multi:  create_memory_project / list_memory_projects    │
+└───────────────┬─────────────────────────────────────────┘
+                │
+┌───────────────▼─────────────────────────────────────────┐
+│  Markdown Vault (LTM) — owned by Basic Memory             │
+│   frontmatter + Markdown · [[links]] · SQLite index       │
+│   organized with our convention: _Session_Memory/,        │
+│   _Knowledge_Base/ (as folders/types within the project)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
+### What we build vs reuse
+
+| Concern | Provided by | Notes |
+|---|---|---|
+| Note store, CRUD | **Basic Memory** | `write_note`/`read_note`/`edit_note`/`move_note`/`delete_note` |
+| Hybrid retrieval (vector + FTS) | **Basic Memory** | `search` — our chosen stack (FastEmbed + SQLite) |
+| 1-level graph traversal | **Basic Memory** | `build_context` (depth-bounded) |
+| Pick up human edits | **Basic Memory** | auto-sync + `sync_status` (replaces our "reconcile") |
+| Per-project / global vault | **Basic Memory** | memory projects |
+| **STM buffer tier** | **us** | sidecar files + skill writes |
+| **`/sleep` consolidation** | **us** | skill |
+| **`/recall`** | **us** | skill (wraps `search` + `build_context` with graph priority) |
+| **Hook homeostasis** | **us** | `SessionStart` / `PreCompact` / `UserPromptSubmit` |
+| **Session Anchor** | **us** | `anchor.json` sidecar, hook-injected |
+| **Auto-linking assist** | **us** | skill-level prompt logic over `search` results |
+
 ### Module boundaries
 
-- **`vault_io`** — the only one that touches files and frontmatter; knows the folder structure and link format. Knows nothing about embeddings.
-- **`index`** — the only one that knows about embeddings/vector DB; takes text+id, returns ranked ids. Knows nothing about MCP or the folder structure.
-- **`memory-mcp`** — a thin layer: translates MCP calls into `vault_io`/`index`, keeps them consistent (wrote a note → reindexed it). No search business logic of its own.
-- **Claude layer** (skills + hooks) — orchestration of the sleep/wake scenarios; all the "smarts" of phrasing live in prompts, not in Python.
+- **Basic Memory** — the only component that touches the vault index and note files for LTM. We treat it as a black-box MCP contract.
+- **Sidecar (`.ai_memory/`)** — STM, anchor, pending snapshots. Plain files we own; kept **outside** the Basic Memory note tree so it does not index them. Managed by skills (via native file tools) and hooks (via thin scripts).
+- **Skills** — all the "smarts" of sleep/recall/linking phrasing live here, in prompts.
+- **Hooks** — deterministic guarantees; pure file/transcript logic, no MCP dependency.
 
 ### Key invariants
 
-- **Write consistency:** any note write through MCP atomically updates the file, the frontmatter (`last_accessed`, `session_refs`), and the vector index. This keeps RAG and the graph in sync without a separate daemon.
-- **Source of truth:** the Markdown vault is the single source of truth; `index.db`, `anchor.json`, and backlinks are derived and **always rebuildable** from the vault. A failure of derived data loses no knowledge.
+- **Source of truth:** the Markdown vault (Basic Memory) is the single source of truth for LTM; its SQLite index is derived and rebuildable. STM is transient and explicitly non-authoritative.
+- **Sidecar isolation:** `.ai_memory/` never enters the Basic Memory project directory, so STM/anchor scratch is never embedded or surfaced as a note.
 
 ---
 
-## 5. Vault structure and note format
+## 5. Vault layout and note format
+
+LTM lives in a Basic Memory project (default `~/basic-memory`, or a per-project path). We keep the Spec's taxonomy as an organizational convention via note folders/types:
 
 ```
-<vault>/
-├── _Project_Memory/
-│   └── Main_index.md             ← root navigator (Anchor entry point)
-├── _Session_Memory/
-│   └── Session_2026-06-23_1530.md ← one note per session
-├── _Knowledge_Base/
-│   └── DB_choice.md              ← permanent topical notes
-├── _Templates/
-│   ├── session.md
-│   └── knowledge.md
-└── .ai_memory/                   ← internal, not for human eyes
-    ├── index.db                  ← sqlite-vec: embeddings + metadata
-    ├── anchor.json               ← current "Session Anchor"
-    ├── stm/                      ← STM buffer: stm/<session>.md (append-only, outside graph)
-    ├── backups/                  ← versions of overwritten notes
-    └── pending_consolidation/    ← PreCompact snapshots (raw material for completion)
+<basic-memory project>/        ← owned & indexed by Basic Memory
+├── _Project_Memory/Main_index.md
+├── _Session_Memory/Session_2026-06-23_1530.md
+├── _Knowledge_Base/DB_choice.md
+└── _Templates/{session,knowledge}.md
+
+<project>/.ai_memory/          ← OUR sidecar (gitignored, NOT a Basic Memory note folder)
+├── anchor.json                ← current "Session Anchor"
+├── stm/<session>.md           ← STM buffer (append-only)
+└── pending_consolidation/     ← PreCompact raw snapshots
 ```
 
-**Topical note frontmatter** (`_Knowledge_Base/*.md`):
-```yaml
----
-tags: [project, db]
-created: 2026-06-23
-last_accessed: 2026-06-23
-session_refs: ["[[Session_2026-06-23_1530]]"]   # back-links to sessions
----
-```
-
-**Session note frontmatter** (`_Session_Memory/*.md`):
+**Session note frontmatter** (written via `write_note`):
 ```yaml
 ---
 type: session
 date: 2026-06-23 15:30
 topics: [db-choice, caching]
-kb_refs: ["[[DB_choice]]", "[[Cache_strategy]]"]   # which KB notes it links to
+kb_refs: ["[[DB_choice]]", "[[Cache_strategy]]"]
 status: consolidated        # consolidated | pending
-project: <name>             # only for global vault mode
+project: <name>             # for global mode disambiguation
 ---
 ```
+Body — coherent narrative with explicit `[[links]]` and preserved numbers (not a summary). Sections: `## Context` → `## Key decisions` → `## Open questions` → `## Links`.
 
-**Session note body** — coherent narrative with explicit `[[links]]` and preserved numbers (not a summary). Template sections: `## Context` → `## Key decisions` (with numbers/rationale) → `## Open questions` → `## Links`.
-
-**Session Anchor** (`.ai_memory/anchor.json`) — a lightweight JSON injected by the `SessionStart` hook:
+**Session Anchor** (`.ai_memory/anchor.json`) — tiny JSON injected by `SessionStart`:
 ```json
 {
   "updated": "2026-06-23 15:30",
@@ -175,145 +177,92 @@ project: <name>             # only for global vault mode
 }
 ```
 
-### Two key ideas
-
-1. **Link duplication** — `[[links]]` are stored both in the body (for the Obsidian graph and humans) and in frontmatter `kb_refs`/`session_refs` (for fast deterministic graph traversal without parsing Markdown). `vault_io` keeps them in sync.
-2. **The Anchor is a table of contents, not the contents** — tiny (names + links); note bodies are loaded *on demand* via `get_note`/`search_memory`. This keeps the context budget < 50%.
+**Two key ideas**
+1. The Anchor is a table of contents, not the contents — tiny (names + links); bodies are pulled on demand via `read_note`/`search`. Keeps the context budget < 50%.
+2. Links live in the body (Basic Memory parses relations) and are mirrored in frontmatter `kb_refs` for cheap deterministic anchor-building by our skills.
 
 ---
 
-## 6. MCP tool contract
+## 6. Integration contract (how our layer uses Basic Memory)
 
-Tool names from Spec §4 are preserved as the contract. Transport — **stdio MCP** (local process, no network).
+We do not define MCP tools; we consume Basic Memory's. Mapping of conceptual operations:
 
-### Notes layer (wrapper over `vault_io`)
-
-| Tool | Input | Output | Side effects |
-|---|---|---|---|
-| `list_notes` | `path?`, `tag?` | list of `{title, path, tags, last_accessed}` | — |
-| `get_note` | `title` | body + frontmatter | updates `last_accessed` |
-| `create_note` | `title`, `content`, `folder` | path | indexing + back-link creation |
-| `update_note` | `title`, `content` | path | reindex + link resync |
-| `delete_note` | `title` | ok | delete file + purge index + clean/mark broken links |
-| `rename_note` | `old_title`, `new_title` | new path | rename + rewrite all `[[old]]`→`[[new]]` + reindex (atomic) |
-| `get_backlinks` | `title` | notes linking here | — |
-
-Delete/rename belong to Claude (the memory is its own); the human edits only "if needed" (picked up via reconcile, see below). `append_to_session` from Spec §4 is reinterpreted as `stm_append` (see the STM layer below) — it used to "accumulate into the session note", now it accumulates into the STM buffer.
-
-### Retrieval and Anchor layer
-
-| Tool | Input | Output |
+| Our operation | Basic Memory call(s) | Notes |
 |---|---|---|
-| `search_memory` | `query`, `k?`, `traverse?=true` | ranked list of `{title, snippet, score, source}` |
-| `get_anchor` | — | contents of `anchor.json` |
-| `update_anchor` | `active_topics`, `active_notes` | updated Anchor |
-| `reindex` | `scope?` (full/partial) | reindex report |
+| create/update note | `write_note` / `edit_note` | frontmatter + body |
+| read note | `read_note` | |
+| list notes | `list_directory` / `search` | |
+| delete note | `delete_note` | |
+| rename/move note | `move_note` | **verify** relation/back-link rewrite at impl time; if incomplete, our skill patches references |
+| backlinks / neighbors | `build_context` / relations | |
+| hybrid search (RAG) | `search` | full-text + vector already built in |
+| 1-level graph traversal | `build_context` (depth=1) | graph priority applied by our skill ranking |
+| pick up human edits | auto-sync + `sync_status` | replaces a custom reconcile loop |
+| per-project / global vault | `create_memory_project` / `list_memory_projects` | |
 
-### STM layer (working buffer, see §3)
+**STM & Anchor (no MCP — plain sidecar files):**
 
-| Tool | Input | Output | Side effects |
-|---|---|---|---|
-| `stm_append` | `text` | ok | append-only write to `.ai_memory/stm/<session>.md`; **no indexing** (transient) |
-| `stm_read` | `session?` | buffer contents | — |
-| `stm_clear` | `session?` | ok | clear the buffer after successful consolidation |
+| Our operation | Mechanism |
+|---|---|
+| `stm_append(text)` | skill/hook appends a line to `.ai_memory/stm/<session>.md` |
+| `stm_read()` | read the file |
+| `stm_clear()` | truncate/rotate the file after a confirmed LTM write |
+| `get_anchor` / `update_anchor` | read/write `.ai_memory/anchor.json` |
 
-STM is **not embedded** and not part of the graph — a cheap volatile store. Appending is instant and does not bloat context.
-
-### `search_memory` — heart of the RAG+graph hybrid
-
-1. **Vector:** embeds `query`, takes top-K similar chunks from `index`.
-2. **Graph:** `active_notes` from the Anchor + `kb_refs` of the last session → adds notes 1 **level** of links deep (no recursion, the Retrieval block).
-3. **Merge and priority:** graph results get a ranking boost (direct links beat semantic proximity, the Retrieval block). Dedup, trim to `k`.
-4. **Fallback:** embeddings unavailable → degrade to full-text grep + graph (system does not crash).
-
-Returns **snippets**, not whole notes. Claude pulls the full body deliberately via `get_note` — retrieval does not bloat the context by itself.
-
-### Reconcile — robustness to human edits
-
-Approach A has no watcher daemon (the daemon is in Future). Human edits made directly in Obsidian are picked up cheaply:
-
-- `vault_io` stores `mtime`/hash of each file in `index.db`.
-- The **`SessionStart` hook** reconciles the delta on startup: `mtime` newer than index → reindex; file gone → purge; new → add.
-- Manual `reindex` (full/partial rebuild) as a last resort.
+**`/recall` ranking (graph-priority hybrid, Spec retrieval block):** call `search` for semantic candidates; pull `active_notes` from the Anchor + last-session `kb_refs`, expand 1 level via `build_context`; boost graph-linked hits over purely semantic ones; return snippets, fetch full bodies via `read_note` only when needed.
 
 ---
 
 ## 7. Data flows
 
-### Flow A — SLEEP (consolidation)
+### Flow A — SLEEP (consolidation, `/sleep` skill)
 
-Three entries converge on the `/sleep` skill:
-- **Manual:** calling `/sleep`.
-- **Pressure:** `UserPromptSubmit` at ~80% injected a hard "time to sleep" → Claude calls `/sleep`.
-- **Backstop:** `PreCompact` saved the raw material → completion on the next `SessionStart`.
+Entries: manual `/sleep`; `UserPromptSubmit` pressure at ~80%; or `PreCompact` backstop → completion next `SessionStart`.
 
-**5 steps (the Sleep block):**
 ```
-1. COLLECT   → stm_read (curated buffer) + significant remaining context;
-               for completion without STM — from pending_consolidation/ (raw)
-2. EXTRACT   → key decisions, ALL numbers, names, architectural choices, contentious points
-3. WRITE     → create_note/update_note for the session; status: pending→consolidated
-4. LINK      → topic in KB? update_note (augment) : create_note in _Knowledge_Base/.
-               Place [[links]] both ways (body + frontmatter kb_refs/session_refs)
-5. FREE STM + UPDATE ANCHOR + CLEAR → stm_clear; update_anchor(...); then /compact
+1. COLLECT → stm_read (curated buffer) + significant remaining context;
+             without STM → from pending_consolidation/ (raw)
+2. EXTRACT → key decisions, ALL numbers, names, architectural choices, contentious points
+3. WRITE   → write_note/edit_note for the session note; status: pending→consolidated
+4. LINK    → topic exists in KB? edit_note (augment) : write_note in _Knowledge_Base/.
+             Place [[links]] both ways (body + frontmatter kb_refs)
+5. FREE STM + UPDATE ANCHOR + CLEAR → stm_clear; rewrite anchor.json; then /compact
 ```
 
-Step 1 now reads the **STM buffer** as the main curated input (instead of re-deriving everything from the transcript); `pending_consolidation/` is the fallback raw input if STM wasn't kept. Step 5 **frees STM** (`stm_clear`) — an analogue of unloading the hippocampus during sleep.
+Step 1 reads the **STM buffer** as the main curated input; `pending_consolidation/` is the raw fallback. Step 5 **frees STM** — an analogue of unloading the hippocampus during sleep.
 
-**Zero-loss guarantee (Spec §6):** step 2 is extraction *with preservation*, not compression. Prompt rule: "every number, name, rationale is carried over verbatim; when in doubt, carry it over." Step 4 builds coherent linked prose, not a bullet summary.
+**Zero-loss guarantee (Spec §6):** step 2 is extraction *with preservation*, not compression — "every number, name, rationale carried over verbatim; when in doubt, carry it over." Step 4 builds coherent linked prose, not a bullet summary.
 
 **Sleep self-check:** before `/compact` (step 5) the skill cross-checks "mentioned in dialogue vs written into the note" for key entities (numbers, proper nouns); appends anything missing. Only then clears the context.
 
-### Flow B — WAKE-UP (session start)
+### Flow B — WAKE-UP (`SessionStart` hook + `/recall`)
 
-Executed by the `SessionStart` hook + `/recall` if needed:
 ```
-1. RECONCILE → reconcile the index (pick up human edits)
+1. SYNC      → Basic Memory auto-sync / sync_status picks up human edits
 2. COMPLETE  → non-empty STM or pending_consolidation/? → inject "finish sleeping this first" (Flow A).
-               STM (curated) takes priority over pending_consolidation (raw)
+               STM (curated) over pending_consolidation (raw)
 3. ANCHOR    → inject anchor.json (tiny: names + links)
-4. LAZY      → bodies NOT loaded; Claude pulls on demand (get_note by link / search_memory by topic)
+4. LAZY      → bodies NOT loaded; Claude pulls on demand (read_note by link / search by topic)
 ```
-
 **Startup budget:** only the Anchor (~a few KB) + the last session note on demand → "≤ 3–5 s" and "< 50% of window" (Spec §6).
 
-### Flow C — WORK (on-the-fly linking, the Linker block)
+### Flow C — WORK (on-the-fly linking, Spec linker block)
 
-Significant answer: topic overlaps → `search_memory` → place a `[[link]]`; new topic → `create_note` immediately with a link. The Anchor is updated on topic change (`update_anchor`). In parallel, key facts/numbers/decisions are flushed to the STM buffer (`stm_append`) as work proceeds — cheaply and immediately, so sleep has a ready curated input.
+Significant answer: topic overlaps → `search` → place a `[[link]]`; new topic → `write_note` immediately with a link. Anchor updated on topic change. In parallel, key facts/numbers/decisions are appended to the STM buffer as work proceeds — cheaply and immediately, so sleep has a ready curated input.
 
-**Symmetry:** sleep unloads knowledge into the graph and clears the context; wake-up pulls a minimum back. Between them Claude's context stays "light".
+**Symmetry:** sleep unloads knowledge into the graph and clears context; wake-up pulls a minimum back. Between them the context stays "light".
 
 ---
 
-## 8. Indexing and vector search (`index`)
+## 8. Retrieval & indexing (delegated)
 
-**Embeddings (local):**
-- Via **FastEmbed** (ONNX, lightweight) or **sentence-transformers** — final choice after a quick benchmark on the hardware (locked in the implementation plan).
-- Default model — **multilingual** (notes may be non-English): candidates `intfloat/multilingual-e5-small`, `paraphrase-multilingual-MiniLM`.
-- Provider behind an `Embedder` interface (`embed(texts) -> vectors`) — closes "local", leaves the door open for cloud (Future) without rework.
+Provided by **Basic Memory** — we do not build it:
+- **Embeddings:** local FastEmbed; index in SQLite. Default multilingual model where configurable (notes may be non-English).
+- **Hybrid ranking:** full-text + vector fusion inside `search`.
+- **Graph:** `build_context` traverses `[[links]]`/relations; we bound depth to 1 (Spec retrieval block: non-recursive).
+- **Graph priority (Spec retrieval block):** applied by our `/recall` skill — anchor/linked notes are boosted above purely semantic hits.
 
-**Vector DB:** **sqlite-vec** — a single `.ai_memory/index.db` file, zero external services, trivial to distribute and back up. Per chunk it stores: `vector`, `note_path`, `chunk_text`, `note_title`, `mtime`, `hash`.
-
-**Chunking:** by Markdown headings (`##`) with a soft size limit and small overlap — preserves semantic boundaries. Frontmatter is not embedded; `tags`/`title` are prepended to the chunk for findability.
-
-**(Re)indexing — incremental by hash:**
-```
-create/update/append → reindex ONLY this note (drop old chunks → re-chunk → embed → insert)
-delete               → drop chunks by note_path
-SessionStart reconcile → mtime changed → compare hash → differs → reindex; no file → drop
-reindex (manual)     → full rebuild
-```
-The hash check avoids embedding unchanged content (mtime may change without a content change).
-
-**Hybrid ranking** (in `search_memory`, over `index`):
-```
-score = w_vec * cosine_similarity
-      + w_graph * is_linked_from_anchor      # boost direct links (the Retrieval block)
-      + w_recency * freshness(last_accessed)
-```
-Weights are in config; default prioritizes the graph over semantics (the Retrieval block).
-
-**Performance:** incremental indexing = embed one note per write; sqlite-vec search over thousands of chunks — tens of ms. Well within "3–5 s".
+We only configure Basic Memory (model/project) and add the graph-priority heuristic at the skill layer. Performance targets ("3–5 s") are met by Basic Memory's SQLite search + our lazy loading.
 
 ---
 
@@ -322,108 +271,89 @@ Weights are in config; default prioritizes the graph over semantics (the Retriev
 ### Repository structure
 ```
 let-the-ai-sleep/
-├── memory_mcp/              ← Python package
-│   ├── server.py            ← MCP entry point (stdio)
-│   ├── vault_io.py
-│   ├── index.py
-│   ├── embedder.py
-│   └── config.py
 ├── claude/                  ← Claude Code integration (laid out by install.py)
-│   ├── skills/sleep/
-│   ├── skills/recall/
+│   ├── skills/sleep/        ← /sleep
+│   ├── skills/recall/       ← /recall
 │   └── hooks/               ← session_start.py, pre_compact.py, user_prompt_submit.py
-├── templates/               ← _Templates/session.md, knowledge.md
+├── templates/               ← _Templates/session.md, knowledge.md (bootstrap)
 ├── install.py               ← installer wizard (idempotent)
 ├── config.example.toml
-├── pyproject.toml
 └── README.md
 ```
+No `memory_mcp/` package — the server is Basic Memory.
 
-### Config — `config.toml` (personal, in `.gitignore`; repo ships `config.example.toml`)
+### Dependency
+- **Basic Memory** (`uv tool install basic-memory`), AGPL-3.0. **License note:** Basic Memory is a separate process the user installs; our package interacts with it only over MCP (no linking/embedding), so our own code can carry its own license — but this must be stated in the README and revisited if we ever vendor or fork it.
+
+### Config — `config.toml` (personal, gitignored)
 ```toml
 [vault]
 mode = "per_project"        # per_project | global
-path = "./.ai_vault"        # for per_project — relative to the project
-# global_path = "~/ai_memory_vault"   # for mode=global
-
-[embedding]
-provider = "fastembed"      # fastembed | sentence_transformers | (future) cloud
-model = "intfloat/multilingual-e5-small"
-
-[retrieval]
-k = 8
-traverse_depth = 1          # Retrieval block: non-recursive
-weights = { vec = 1.0, graph = 1.5, recency = 0.3 }
+project = "lts-<name>"      # Basic Memory project name
+# path = "~/ai_memory_vault"  # used when creating the project
 
 [sleep]
 pressure_warn = 0.60        # UserPromptSubmit: soft reminder
 pressure_force = 0.80       # hard "time to /sleep"
 ```
 
-### Vault modes
-- **`per_project`** — each project has its own `.ai_vault/` next to the code; memory isolated per project.
-- **`global`** — one shared vault for all projects; session notes are tagged with `project` to avoid mixing.
-
 ### `install.py` — idempotent wizard
 ```
-1. Check Python version, install dependencies (pyproject)
-2. Read/ask vault mode and path
-3. Bootstrap the vault: create folders + copy _Templates/
-4. Register the MCP server in .mcp.json (project-level or ~/.claude — per mode)
-5. Install skills and hooks into .claude/ (skills/, settings.json)
-6. Download the embedding model (first run) + build the index from existing notes
-7. Print "what's next" + smoke test (create_note → search_memory)
+1. Check that basic-memory is installed (offer: uv tool install basic-memory)
+2. Read/ask vault mode + path → create/select a Basic Memory project
+   (create_memory_project) and bootstrap folders + _Templates/
+3. Register Basic Memory MCP for Claude Code (claude plugin / mcp add)
+4. Install our skills + hooks into .claude/ (skills/, settings.json)
+5. Create .ai_memory/ sidecar (gitignored), outside the project note tree
+6. Smoke test: write_note → search → read_note ; STM append/clear
 ```
 
 ### Claude Code wiring
-- MCP — in `.mcp.json` (project-level) or user-level (per vault mode).
-- Hooks — in `.claude/settings.json` (`SessionStart`, `PreCompact`, `UserPromptSubmit`).
-- Skills — folders in `.claude/skills/`.
-- Everything is versioned templates in the repo; `install.py` lays them out with path substitution.
+- Basic Memory MCP registered per its docs (`claude plugin install basic-memory@basicmachines-co`).
+- Hooks in `.claude/settings.json` (`SessionStart`, `PreCompact`, `UserPromptSubmit`).
+- Skills as folders in `.claude/skills/`.
 
 ---
 
 ## 10. Error handling
 
-Principle: memory must never silently lose data and must never crash the session.
-
 | Failure | Behavior | Why |
 |---|---|---|
-| Embedding model failed to load | `search_memory` → full-text grep + graph; warning | Worse search, system alive; graph always works |
-| Index corrupted/missing | auto-`reindex` from vault on startup | Vault is the source of truth, index is derived |
-| Write conflict (human + MCP) | MCP write wins; previous version → `.ai_memory/backups/` | Spec §7: overwrite + history, no loss |
+| Basic Memory unavailable/not installed | hooks still dump to `pending_consolidation/`; skills surface a clear "install basic-memory" error | Raw capture never depends on the MCP |
+| Semantic search degraded | Basic Memory falls back to full-text; `/recall` still uses graph via `build_context` | Graph path independent of vectors |
 | `PreCompact` didn't finish/crashed | raw transcript already dumped to `pending_consolidation/` first | Hard "don't lose" guarantee |
-| `rename_note` aborted | transaction: all back-links rewritten or rolled back | Otherwise the graph breaks |
-| `/sleep` interrupted | note `status: pending`; STM **not cleared** until the write is confirmed; next `SessionStart` completes | Self-recovery; STM cleared only after success |
-| STM buffer lost/corrupted | sleep falls back to `pending_consolidation/` (raw); loss non-zero but not catastrophic | STM is transient; the backstop remains |
-| vault unavailable | MCP starts, tools return an explicit error, do not crash | Claude gets a message, not a crash |
+| `move_note` didn't rewrite a back-link | `/recall`/sleep skill detects dangling `[[link]]` and patches it | Defense in depth over the substrate |
+| `/sleep` interrupted | session note `status: pending`; STM **not cleared** until LTM write confirmed; next `SessionStart` completes | Self-recovery; STM cleared only after success |
+| STM buffer lost/corrupted | sleep falls back to `pending_consolidation/` | STM is transient; backstop remains |
+| Human edits in Obsidian | Basic Memory auto-sync + `sync_status` reconciles | We don't maintain a separate index |
 
-**Cross-cutting invariant:** the Markdown vault is the single source of truth; everything derived is rebuildable.
+**Cross-cutting invariant:** the Markdown vault is the single source of truth; the SQLite index is rebuildable; STM/anchor are scratch.
 
 ---
 
-## 11. Testing (TDD, by layers)
+## 11. Testing (TDD, our layer + integration)
 
-- **`vault_io` (unit):** CRUD; frontmatter parse/resync; back-link rewrite on rename; "body ↔ frontmatter links" sync. On a tmp vault.
-- **`index` (unit):** heading chunking; incremental reindex by hash; chunk deletion; **fake `Embedder`** (deterministic vectors) — fast, no network.
-- **`search_memory` (integration):** hybrid ranking — a direct `[[link]]` from the Anchor beats a purely semantic hit (the Retrieval block); traversal depth = 1.
-- **STM (unit):** `stm_append` (append-only, survives a "restart"), `stm_read`, `stm_clear`; STM does not enter the index/graph; `stm_clear` only after a confirmed write to LTM.
-- **Reconcile:** edit/delete a file outside MCP → correct pickup on startup.
-- **Sleep (scenario, Spec §6):** a dialogue with numbers/names → `/sleep` → all numbers/names are in the note.
-- **Wake-up (e2e, golden Sleep scenario):** DB choice → sleep → clear → new session → "why PostgreSQL?" → answer recovered via `[[link]]`.
-- **Context budget (Spec §6):** Anchor + on-demand loading stay < 50% of the window.
+We test what we build; Basic Memory is treated as a trusted dependency (smoke-tested, not unit-tested by us).
 
-The fake `Embedder` decouples search/ranking logic from the ML model — tests are deterministic and fast.
+- **STM (unit):** append-only survives a restart; `stm_read`/`stm_clear`; cleared only after a confirmed LTM write; sidecar stays outside the project tree.
+- **Anchor (unit):** `SessionStart` injects a tiny anchor; `update_anchor` round-trips; budget stays < 50% (Spec §6).
+- **Hooks (unit):** `PreCompact` always writes a snapshot before anything else; `UserPromptSubmit` escalates at the configured thresholds; `SessionStart` forces completion when STM/pending is non-empty.
+- **/recall (integration, Spec retrieval block):** with a seeded Basic Memory project, a direct `[[link]]` from the Anchor beats a purely semantic hit; traversal depth = 1.
+- **Sleep (scenario, Spec §6):** dialogue with numbers/names → STM → `/sleep` → `write_note` → all numbers/names present in the note (sleep self-check).
+- **Wake-up (e2e, golden):** DB choice → sleep → clear → new session → "why PostgreSQL?" → answer recovered via `[[link]]`.
+- **Install (smoke):** `install.py` is idempotent; project created; smoke test passes.
+
+A test Basic Memory project on a tmp path keeps integration tests hermetic and offline.
 
 ---
 
 ## 12. Explicitly deferred (Future, Spec §7)
 
-- Watcher daemon for a live index + Obsidian Local REST API integration (Approach C).
-- Cloud embedding provider (the `Embedder` interface is already ready for it).
+- Custom MCP server (only if Basic Memory proves limiting).
+- Cloud embedding provider (Basic Memory supports swapping; not needed for local/private v1).
 - Auto-updating model weights (LoRA).
-- A full graph engine (currently — 1-level traversal).
-- Version-conflict resolution beyond "overwrite + backup/Git".
+- Full graph engine beyond 1-level traversal.
+- Version-conflict resolution beyond Basic Memory's behavior + Git history.
 - Background rewriting of old notes to add cross-links (Spec §5, step 8).
 
 ---
@@ -433,8 +363,8 @@ The fake `Embedder` decouples search/ranking logic from the ML model — tests a
 | Criterion | How it's covered |
 |---|---|
 | After `/sleep`, all numbers/names/relationships preserved | Zero-loss sleep (§7) + sleep self-check + scenario test |
-| New notes auto-linked (incl. back-links) | On-the-fly linking (Flow C) + two-way links body+frontmatter |
-| Context load ≤ 3–5 s | Lazy loading (Flow B) + sqlite-vec (tens of ms) |
-| Memory tokens < 50% of window | Anchor-as-TOC + snippets in `search_memory` + budget test |
+| New notes auto-linked (incl. back-links) | On-the-fly linking (Flow C) + frontmatter mirror + Basic Memory relations |
+| Context load ≤ 3–5 s | Lazy loading (Flow B) + Basic Memory SQLite search |
+| Memory tokens < 50% of window | Anchor-as-TOC + snippets from `search` + budget test |
 
 > Note: block references (STM, LTM, Linker, Sleep, Retrieval) and numbered §4/§6/§7 point to sections of the source spec `task.md`.
