@@ -8,17 +8,20 @@ def test_defaults_when_no_config(tmp_path: Path):
     assert cfg.pressure_warn == 0.60
     assert cfg.pressure_force == 0.80
     assert cfg.project_root == tmp_path
+    assert cfg.project == DEFAULTS["project"]
+    assert cfg.vault_path is None
 
 
 def test_reads_config_toml(tmp_path: Path):
     (tmp_path / "config.toml").write_text(
-        '[vault]\nmode = "global"\nproject = "lts-demo"\n'
+        '[vault]\nmode = "global"\nproject = "lts-demo"\npath = "/some/vault"\n'
         '[sleep]\npressure_warn = 0.5\npressure_force = 0.75\n',
         encoding="utf-8",
     )
     cfg = load_config(tmp_path)
     assert cfg.vault_mode == "global"
     assert cfg.project == "lts-demo"
+    assert cfg.vault_path == "/some/vault"
     assert cfg.pressure_warn == 0.5
     assert cfg.pressure_force == 0.75
 

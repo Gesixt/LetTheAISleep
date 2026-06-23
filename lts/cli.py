@@ -13,7 +13,6 @@ def _cfg(root: str | None):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lts")
-    parser.add_argument("--root", default=None)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_stm = sub.add_parser("stm")

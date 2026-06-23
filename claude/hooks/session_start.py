@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from lts import anchor, paths, pending, stm
 from lts.config import load_config
 

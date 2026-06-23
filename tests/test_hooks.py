@@ -1,3 +1,7 @@
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import importlib.util
 
@@ -90,3 +94,31 @@ def test_user_prompt_submit_silent_when_low(tmp_path: Path):
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     assert ups.build_context({"transcript_path": str(t)}, root=tmp_path) == ""
     assert ups.run({"transcript_path": str(t)}, root=tmp_path) == {}
+
+
+def test_pre_compact_runs_as_subprocess_without_pythonpath(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("raw transcript", encoding="utf-8")
+    event = {"session_id": "s", "transcript_path": str(transcript)}
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS / "pre_compact.py")],
+        input=json.dumps(event), capture_output=True, text=True,
+        cwd=str(tmp_path), env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    snaps = list((tmp_path / ".ai_memory" / "pending_consolidation").glob("*.md"))
+    assert len(snaps) == 1
+
+
+def test_session_start_forces_completion_when_stm_present(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    from lts.config import load_config
+    from lts import paths, stm
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    stm.append(paths.stm_file(cfg, "s"), "uncommitted fact")
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "finish sleeping" in text.lower()
