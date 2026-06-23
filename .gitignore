@@ -1,0 +1,27 @@
+# IDE
+.idea/
+
+# Local configuration (personal, not for the repo)
+config.toml
+
+# Local Russian copies of specs/docs (English versions are committed)
+*.ru.md
+
+# Local-only project files (personal instructions / source compass, kept out of the repo)
+CLAUDE.md
+task.md
+
+# Memory runtime artifacts (derived, rebuildable from the vault)
+.ai_memory/
+.ai_vault/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# OS
+.DS_Store
