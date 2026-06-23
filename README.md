@@ -38,8 +38,13 @@ everything worth keeping into linked long-term notes **without losing a single n
 ## Install
 
 ```bash
-# 1. install this package (puts the `lts` command on PATH)
-uv venv && uv pip install -e '.'
+# 1. install this package GLOBALLY so the `lts` command is on your PATH.
+#    The skills (/sleep, /memory-status) call `lts` from shells Claude Code spawns,
+#    so it must be available outside any project virtualenv.
+uv tool install --editable .
+#   or, without uv:
+#   pip install --user -e .
+lts --help          # verify the command is found
 
 # 2. lay out config, sidecar, hooks and skills; set your Basic Memory project name
 python install.py --project <project-name>
