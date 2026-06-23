@@ -66,6 +66,18 @@ def test_resolve_project_falls_back_when_no_arg_no_tty(monkeypatch):
     assert inst.resolve_project(args, "fallback") == "fallback"
 
 
+def test_upsert_memory_instructions_appends_then_idempotent():
+    inst = _load_install()
+    base = "# My Project\n\nExisting guidance.\n"
+    once = inst.upsert_memory_instructions(base)
+    assert "Let The AI Sleep" in once
+    assert "Existing guidance." in once          # original content preserved
+    assert "lts stm append" in once
+    twice = inst.upsert_memory_instructions(once)
+    assert twice == once                          # idempotent
+    assert twice.count("lts:memory-instructions:start") == 1
+
+
 def test_main_installs_into_target_project(tmp_path: Path):
     inst = _load_install()
     target = tmp_path / "proj"
@@ -80,6 +92,11 @@ def test_main_installs_into_target_project(tmp_path: Path):
     assert 'project = "demo"' in (target / "config.toml").read_text(encoding="utf-8")
     assert (target / ".ai_memory" / "stm").is_dir()
     assert (target / ".claude" / "skills" / "sleep").exists()
+
+    # CLAUDE.md memory instructions written into the target
+    claude_md = (target / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "lts:memory-instructions:start" in claude_md
+    assert "lts stm append" in claude_md
 
     settings = json.loads((target / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert "SessionStart" in settings["hooks"]

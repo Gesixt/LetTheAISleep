@@ -59,6 +59,42 @@ def resolve_project(args: argparse.Namespace, fallback: str) -> str:
     return fallback
 
 
+_MEM_START = "<!-- lts:memory-instructions:start -->"
+_MEM_END = "<!-- lts:memory-instructions:end -->"
+
+
+def memory_instruction_block() -> str:
+    return f"""{_MEM_START}
+## Memory (Let The AI Sleep)
+
+This project has hybrid memory via the `lts` CLI + the Basic Memory MCP. Use it proactively —
+do not let findings evaporate:
+
+- **Capture as you work.** When a notable fact, decision, number, component/file name, or
+  architectural insight comes up, append a one-line note to the STM buffer:
+  `lts stm append --text "..."`. It is cheap and survives `/compact`.
+- **Sleep at the end of a chapter.** When a task or investigation wraps up (or context is
+  filling), run the `/sleep` skill to consolidate the STM buffer + the conversation into linked
+  long-term notes; it then clears STM. Offer `/sleep` before the user moves on.
+- **Recall before re-deriving.** When a question touches earlier work, use `/recall` first.
+- **Check load** any time with `/memory-status`.
+
+The Basic Memory project name is in `config.toml` (`[vault] project`); the skills pass it to
+Basic Memory automatically.
+{_MEM_END}"""
+
+
+def upsert_memory_instructions(existing_text: str) -> str:
+    """Insert or refresh the memory-instructions block (between markers) without duplicating it."""
+    block = memory_instruction_block()
+    if _MEM_START in existing_text and _MEM_END in existing_text:
+        start = existing_text.index(_MEM_START)
+        end = existing_text.index(_MEM_END) + len(_MEM_END)
+        return existing_text[:start] + block + existing_text[end:]
+    sep = "" if existing_text == "" else ("\n" if existing_text.endswith("\n") else "\n\n")
+    return existing_text + sep + block + "\n"
+
+
 def basic_memory_available() -> bool:
     return shutil.which("basic-memory") is not None
 
@@ -115,6 +151,12 @@ def main(argv: list[str] | None = None) -> int:
         for skill in skills_src.iterdir():
             shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
     print(f"installed skills into {skills_dst}")
+
+    # 4b. CLAUDE.md memory instructions in the target (so Claude captures memory proactively)
+    claude_md = target_root / "CLAUDE.md"
+    existing_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
+    claude_md.write_text(upsert_memory_instructions(existing_md), encoding="utf-8")
+    print(f"memory instructions written into {claude_md}")
 
     # 5. Basic Memory next steps (project name already written to config.toml)
     if not basic_memory_available():

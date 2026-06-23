@@ -57,7 +57,8 @@ lts --help          # verify the command is found
 ```
 
 Then, **for each project** you want memory in, attach it (this writes `config.toml`, the
-`.ai_memory/` sidecar, and `.claude/` hooks+skills into that project):
+`.ai_memory/` sidecar, `.claude/` hooks+skills, and a memory-instructions block in the project's
+`CLAUDE.md` so Claude captures memory proactively):
 
 ```bash
 # 2. attach memory to a target project and set its Basic Memory project name
