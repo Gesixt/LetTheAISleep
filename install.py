@@ -22,7 +22,7 @@ def render_hook_settings(repo_root: Path) -> dict:
         hooks[event] = [
             {
                 "hooks": [
-                    {"type": "command", "command": f"python3 {hooks_dir / script}"}
+                    {"type": "command", "command": f'python3 "{hooks_dir / script}"'}
                 ]
             }
         ]
@@ -68,8 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     skills_src = repo_root / "claude" / "skills"
     skills_dst = claude_dir / "skills"
     skills_dst.mkdir(exist_ok=True)
-    for skill in skills_src.iterdir():
-        shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
+    if skills_src.exists():
+        for skill in skills_src.iterdir():
+            shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
     print(f"installed skills into {skills_dst}")
 
     # 5. Basic Memory next steps
