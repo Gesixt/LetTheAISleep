@@ -23,5 +23,8 @@ venv/
 *.egg-info/
 .pytest_cache/
 
+# Tooling scratch
+.superpowers/
+
 # OS
 .DS_Store
