@@ -16,7 +16,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 | **STM** | a working buffer of facts/decisions as they happen | `.ai_memory/stm/<session>.md` | until the next sleep |
 | **LTM** | the linked knowledge graph | Basic Memory Markdown vault | permanent |
 
-- **While working** Claude appends key facts to STM (`lts stm append`) — cheap, survives `/compact`.
+- **While working** a `Stop` hook automatically captures each exchange into STM — no need to decide to remember; it survives `/compact`.
 - **`/sleep`** reads the STM buffer, writes/links long-term notes (zero loss), rebuilds embeddings, then clears STM.
 - **`/recall`** retrieves by graph priority (anchor links first) + semantic search, loading only what's relevant.
 - **`/memory-status`** shows a dashboard of both tiers and flags when to sleep or reindex.
@@ -122,7 +122,7 @@ right vault automatically.
 ## Usage
 
 **Daily flow**
-1. Work normally. When a real decision, number, or name comes up, it gets captured to the STM buffer.
+1. Work normally. Every exchange is captured to the STM buffer automatically by the `Stop` hook — like human short-term memory, you don't decide what to remember.
 2. As context fills, the `UserPromptSubmit` hook nudges you (~60%) and then insists (~80%) to sleep.
 3. Run **`/sleep`** at a natural break (or when nudged). It consolidates STM → linked long-term notes,
    rebuilds embeddings, clears STM, and you can `/compact`.

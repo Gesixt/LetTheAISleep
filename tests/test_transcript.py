@@ -1,5 +1,41 @@
+import json
 from pathlib import Path
 from lts import transcript
+
+
+def test_extract_text_from_str_and_blocks():
+    assert transcript.extract_text("hello") == "hello"
+    blocks = [
+        {"type": "thinking", "thinking": "secret"},
+        {"type": "text", "text": "visible answer"},
+        {"type": "tool_use", "name": "x"},
+    ]
+    assert transcript.extract_text(blocks) == "visible answer"
+    assert transcript.extract_text(None) == ""
+
+
+def test_read_exchanges(tmp_path: Path):
+    f = tmp_path / "t.jsonl"
+    lines = [
+        {"type": "mode", "mode": "x"},  # metadata — ignored
+        {"type": "user", "message": {"role": "user", "content": "study the cart service"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "..."},
+            {"type": "text", "text": "Cart uses Redis and 3 endpoints."},
+        ]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "noise"},
+        ]}},  # no text -> skipped
+    ]
+    f.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    ex = transcript.read_exchanges(f)
+    assert [e["role"] for e in ex] == ["user", "assistant"]
+    assert ex[0]["text"] == "study the cart service"
+    assert ex[1]["text"] == "Cart uses Redis and 3 endpoints."
+
+
+def test_read_exchanges_missing(tmp_path: Path):
+    assert transcript.read_exchanges(tmp_path / "nope.jsonl") == []
 
 
 def test_estimate_tokens_missing(tmp_path: Path):

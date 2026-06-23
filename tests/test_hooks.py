@@ -122,3 +122,30 @@ def test_session_start_forces_completion_when_stm_present(tmp_path: Path):
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert "finish sleeping" in text.lower()
+
+
+def test_stop_auto_captures_exchanges(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    t = tmp_path / "t.jsonl"
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "study the cart service"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "..."},
+            {"type": "text", "text": "Cart uses Redis; 3 endpoints; 12345 items cap."},
+        ]}},
+    ]
+    t.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    stop = _load("stop", HOOKS / "stop.py")
+
+    n = stop.capture({"transcript_path": str(t)}, root=tmp_path)
+    assert n == 2
+
+    from lts.config import load_config
+    from lts import paths, stm
+    cfg = load_config(tmp_path)
+    buf = stm.read(paths.stm_file(cfg))
+    assert "study the cart service" in buf
+    assert "12345 items cap" in buf
+
+    # idempotent: same transcript, nothing new captured
+    assert stop.capture({"transcript_path": str(t)}, root=tmp_path) == 0

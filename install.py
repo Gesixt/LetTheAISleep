@@ -14,6 +14,7 @@ HOOK_EVENTS = {
     "SessionStart": "session_start.py",
     "PreCompact": "pre_compact.py",
     "UserPromptSubmit": "user_prompt_submit.py",
+    "Stop": "stop.py",
 }
 
 
@@ -70,9 +71,9 @@ def memory_instruction_block() -> str:
 This project has hybrid memory via the `lts` CLI + the Basic Memory MCP. Use it proactively —
 do not let findings evaporate:
 
-- **Capture as you work.** When a notable fact, decision, number, component/file name, or
-  architectural insight comes up, append a one-line note to the STM buffer:
-  `lts stm append --text "..."`. It is cheap and survives `/compact`.
+- **STM fills automatically.** A `Stop` hook captures each exchange into the short-term buffer
+  after every turn — you do not need to remember to record things. (To add a deliberate highlight
+  you may still `lts stm append --text "..."`, but it is optional.)
 - **Sleep at the end of a chapter.** When a task or investigation wraps up (or context is
   filling), run the `/sleep` skill to consolidate the STM buffer + the conversation into linked
   long-term notes; it then clears STM. Offer `/sleep` before the user moves on.

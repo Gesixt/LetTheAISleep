@@ -59,7 +59,7 @@ Since Claude Code's built-in memory is not used, we reproduce the human three-ti
 | **LTM** | linked knowledge graph | Markdown vault | **Basic Memory** | permanent | yes (FastEmbed + SQLite) |
 
 **Cycle:**
-- **Work** — Claude cheaply appends key facts into STM as it goes: append-only, no linking or embeddings, instant, does not bloat context. STM is durable → survives `/compact`.
+- **Work** — STM fills **automatically**: a deterministic `Stop` hook appends each user/assistant exchange to the buffer after every turn (no model decision — like automatic encoding). The model may also add deliberate highlights via `lts stm append`, but it is optional. Append-only, no linking or embeddings, instant. STM is durable → survives `/compact`.
 - **Sleep** — reads the curated STM buffer (not the raw transcript) + the remaining context → files it into LTM via Basic Memory `write_note`/`edit_note` (episode → session note, semantics → KB note) with `[[links]]` → **clears STM**.
 - **Wake-up** — `SessionStart` sees a non-empty STM (the previous session didn't finish sleeping) → triggers completion. STM is the preferred curated path; `pending_consolidation/` remains a lower-quality raw backstop.
 
@@ -81,6 +81,7 @@ This project ships a Claude Code integration layer; Basic Memory provides the me
 │                         STM/pending → force completion    │
 │       PreCompact      → dump raw transcript snapshot      │
 │       UserPromptSubmit→ escalating sleep pressure 60/80%  │
+│       Stop            → auto-capture each exchange → STM   │
 │     Skills (soft):                                        │
 │       /sleep          → consolidation (reads STM → LTM)   │
 │       /recall         → retrieval by topic                │
