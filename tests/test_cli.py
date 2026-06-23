@@ -25,5 +25,13 @@ def test_pending_has(tmp_path: Path, capsys):
     main(["pending", "has", "--root", str(tmp_path)])
     assert capsys.readouterr().out.strip() == "no"
     main(["pending", "dump", "--root", str(tmp_path), "--session", "s", "--text", "raw"])
+    capsys.readouterr()  # clear the pending dump output
     main(["pending", "has", "--root", str(tmp_path)])
     assert capsys.readouterr().out.strip() == "yes"
+
+
+def test_pending_dump_prints_path(tmp_path: Path, capsys):
+    (tmp_path / ".git").mkdir()
+    main(["pending", "dump", "--root", str(tmp_path), "--session", "s", "--text", "raw"])
+    out = capsys.readouterr().out.strip()
+    assert out and Path(out).exists()

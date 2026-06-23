@@ -53,9 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             stm.append(f, args.text)
             print("ok")
         elif args.op == "read":
-            content = stm.read(f)
-            if content:
-                print(content, end="")
+            print(stm.read(f), end="")
         elif args.op == "clear":
             stm.clear(f)
     elif args.cmd == "anchor":
@@ -63,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "pending":
         d = paths.pending_dir(cfg)
         if args.op == "dump":
-            pending.dump_snapshot(d, args.session, args.text)
+            print(pending.dump_snapshot(d, args.session, args.text))
         elif args.op == "has":
             print("yes" if pending.has_pending(d) else "no")
     elif args.cmd == "pressure":
