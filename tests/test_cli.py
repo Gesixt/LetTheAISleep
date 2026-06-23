@@ -8,19 +8,18 @@ from lts.cli import main
 
 def test_status_text(tmp_path: Path, capsys):
     (tmp_path / ".git").mkdir()
-    main(["stm", "append", "--root", str(tmp_path), "--session", "s", "--text", "a fact"])
+    main(["stm", "append", "--root", str(tmp_path), "--text", "a fact"])
     capsys.readouterr()
-    main(["status", "--root", str(tmp_path), "--session", "s"])
+    main(["status", "--root", str(tmp_path)])
     out = capsys.readouterr().out
     assert "STM buffer" in out and "Sleep debt" in out and "Anchor" in out
 
 
 def test_status_json(tmp_path: Path, capsys):
     (tmp_path / ".git").mkdir()
-    main(["status", "--root", str(tmp_path), "--session", "s", "--json"])
+    main(["status", "--root", str(tmp_path), "--json"])
     data = json.loads(capsys.readouterr().out)
-    assert data["session"] == "s"
-    assert set(data) >= {"stm", "pending", "pressure", "anchor"}
+    assert set(data) >= {"project", "stm", "pending", "pressure", "anchor"}
     assert data["pressure"] is None
 
 
@@ -30,12 +29,11 @@ def test_python_m_lts_runs_as_module(tmp_path: Path):
     env = {**os.environ, "PYTHONPATH": str(repo)}
     subprocess.run(
         [sys.executable, "-m", "lts", "stm", "append",
-         "--root", str(tmp_path), "--session", "s", "--text", "module fact"],
+         "--root", str(tmp_path), "--text", "module fact"],
         check=True, env=env, capture_output=True, text=True,
     )
     out = subprocess.run(
-        [sys.executable, "-m", "lts", "stm", "read",
-         "--root", str(tmp_path), "--session", "s"],
+        [sys.executable, "-m", "lts", "stm", "read", "--root", str(tmp_path)],
         check=True, env=env, capture_output=True, text=True,
     ).stdout
     assert "module fact" in out
@@ -43,11 +41,11 @@ def test_python_m_lts_runs_as_module(tmp_path: Path):
 
 def test_stm_append_read_clear(tmp_path: Path, capsys):
     (tmp_path / ".git").mkdir()
-    assert main(["stm", "append", "--root", str(tmp_path), "--session", "s", "--text", "fact one"]) == 0
-    main(["stm", "read", "--root", str(tmp_path), "--session", "s"])
+    assert main(["stm", "append", "--root", str(tmp_path), "--text", "fact one"]) == 0
+    main(["stm", "read", "--root", str(tmp_path)])
     assert "fact one" in capsys.readouterr().out
-    main(["stm", "clear", "--root", str(tmp_path), "--session", "s"])
-    main(["stm", "read", "--root", str(tmp_path), "--session", "s"])
+    main(["stm", "clear", "--root", str(tmp_path)])
+    main(["stm", "read", "--root", str(tmp_path)])
     assert capsys.readouterr().out.strip() == ""
 
 

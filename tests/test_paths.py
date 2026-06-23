@@ -12,7 +12,7 @@ def test_sidecar_paths(tmp_path: Path):
     assert paths.sidecar_root(cfg) == tmp_path / ".ai_memory"
     assert paths.anchor_file(cfg) == tmp_path / ".ai_memory" / "anchor.json"
     assert paths.pending_dir(cfg) == tmp_path / ".ai_memory" / "pending_consolidation"
-    assert paths.stm_file(cfg, "sess1") == tmp_path / ".ai_memory" / "stm" / "sess1.md"
+    assert paths.stm_file(cfg) == tmp_path / ".ai_memory" / "stm" / "buffer.md"
 
 
 def test_safe_session_id():

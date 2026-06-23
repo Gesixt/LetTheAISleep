@@ -21,7 +21,6 @@ def main(argv: list[str] | None = None) -> int:
     for op in ("append", "read", "clear"):
         sp = stm_sub.add_parser(op)
         sp.add_argument("--root", default=None)
-        sp.add_argument("--session", required=True)
         if op == "append":
             sp.add_argument("--text", required=True)
 
@@ -45,7 +44,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_status = sub.add_parser("status")
     p_status.add_argument("--root", default=None)
-    p_status.add_argument("--session", default="default")
     p_status.add_argument("--transcript", default=None)
     p_status.add_argument("--json", action="store_true")
 
@@ -54,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = _cfg(root)
 
     if args.cmd == "stm":
-        f = paths.stm_file(cfg, args.session)
+        f = paths.stm_file(cfg)
         if args.op == "append":
             stm.append(f, args.text)
             print("ok")
@@ -77,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         ))
     elif args.cmd == "status":
         tp = Path(args.transcript) if args.transcript else None
-        metrics = status.collect(cfg, session_id=args.session, transcript_path=tp)
+        metrics = status.collect(cfg, transcript_path=tp)
         if args.json:
             print(json.dumps(metrics, ensure_ascii=False, indent=2))
         else:

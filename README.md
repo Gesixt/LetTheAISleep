@@ -135,16 +135,16 @@ right vault automatically.
 | `/sleep` | Consolidate the session into long-term memory without loss, then clear STM. |
 | `/recall` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
-| `lts status [--session S] [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts stm append/read/clear --session S` | Inspect or manage the STM buffer directly. |
+| `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
+| `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `basic-memory project info <project>` | LTM counts (Entities/Relations/Isolated) and embedding status. |
 
 **Checking memory load**
 
 ```bash
-lts status --session "$CLAUDE_SESSION_ID"
+lts status
 ```
-shows STM size, un-slept "sleep debt", context pressure, and anchor freshness. `/memory-status`
+shows the project, STM size, un-slept "sleep debt", context pressure, and anchor freshness. `/memory-status`
 combines this with Basic Memory's LTM stats and tells you if you should `/sleep` or reindex.
 
 ## License note

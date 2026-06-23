@@ -118,7 +118,7 @@ def test_session_start_forces_completion_when_stm_present(tmp_path: Path):
     from lts import paths, stm
     cfg = load_config(tmp_path)
     paths.ensure_sidecar(cfg)
-    stm.append(paths.stm_file(cfg, "s"), "uncommitted fact")
+    stm.append(paths.stm_file(cfg), "uncommitted fact")
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert "finish sleeping" in text.lower()

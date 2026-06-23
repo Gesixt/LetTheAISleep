@@ -17,8 +17,9 @@ def sidecar_root(cfg: Config) -> Path:
     return cfg.project_root / ".ai_memory"
 
 
-def stm_file(cfg: Config, session_id: str) -> Path:
-    return sidecar_root(cfg) / "stm" / f"{safe_session_id(session_id)}.md"
+def stm_file(cfg: Config) -> Path:
+    """Single per-project STM buffer (no session dimension — keeps hooks and skills in sync)."""
+    return sidecar_root(cfg) / "stm" / "buffer.md"
 
 
 def anchor_file(cfg: Config) -> Path:

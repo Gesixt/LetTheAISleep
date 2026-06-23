@@ -10,7 +10,7 @@ Goal: report the state of both memory tiers in one place, and flag anything that
 ## 1. STM / sidecar metrics (our layer)
 Run:
 ```
-lts status --session "$CLAUDE_SESSION_ID"
+lts status
 ```
 This prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
 

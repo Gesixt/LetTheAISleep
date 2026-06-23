@@ -20,9 +20,8 @@ _FORCE_MSG = (
 def build_context(event: dict, *, root: Path | None = None) -> str:
     cfg = load_config(root)
     paths.ensure_sidecar(cfg)
-    session_id = event.get("session_id", "default")
     pending_present = pending.has_pending(paths.pending_dir(cfg))
-    stm_present = not stm.is_empty(paths.stm_file(cfg, session_id))
+    stm_present = not stm.is_empty(paths.stm_file(cfg))
     if pending_present or stm_present:
         return _FORCE_MSG
     return anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg)))

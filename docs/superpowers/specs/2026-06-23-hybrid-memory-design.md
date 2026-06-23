@@ -55,7 +55,7 @@ Since Claude Code's built-in memory is not used, we reproduce the human three-ti
 | Tier | What | Medium | Owner | Lifetime | Indexed |
 |---|---|---|---|---|---|
 | **Context** | live dialogue | Claude's window | harness | until `/compact` | no |
-| **STM** | working buffer: facts/numbers/decisions as they appear | append-only file `.ai_memory/stm/<session>.md` (sidecar, outside the Basic Memory note tree) | **us** | until the next sleep | **no** (transient) |
+| **STM** | working buffer: facts/numbers/decisions as they appear | append-only file `.ai_memory/stm/buffer.md` (sidecar, outside the Basic Memory note tree) | **us** | until the next sleep | **no** (transient) |
 | **LTM** | linked knowledge graph | Markdown vault | **Basic Memory** | permanent | yes (FastEmbed + SQLite) |
 
 **Cycle:**
@@ -85,7 +85,7 @@ This project ships a Claude Code integration layer; Basic Memory provides the me
 │       /sleep          → consolidation (reads STM → LTM)   │
 │       /recall         → retrieval by topic                │
 │     Sidecar files (.ai_memory/, plain files, no MCP):     │
-│       stm/<session>.md · anchor.json · pending_consol./   │
+│       stm/buffer.md · anchor.json · pending_consol./   │
 └───────────────┬─────────────────────────────────────────┘
                 │ MCP (stdio) — only for LTM operations
 ┌───────────────▼─────────────────────────────────────────┐
@@ -150,7 +150,7 @@ LTM lives in a Basic Memory project (default `~/basic-memory`, or a per-project 
 
 <project>/.ai_memory/          ← OUR sidecar (gitignored, NOT a Basic Memory note folder)
 ├── anchor.json                ← current "Session Anchor"
-├── stm/<session>.md           ← STM buffer (append-only)
+├── stm/buffer.md           ← STM buffer (append-only)
 └── pending_consolidation/     ← PreCompact raw snapshots
 ```
 
@@ -204,7 +204,7 @@ We do not define MCP tools; we consume Basic Memory's. Mapping of conceptual ope
 
 | Our operation | Mechanism |
 |---|---|
-| `stm_append(text)` | skill/hook appends a line to `.ai_memory/stm/<session>.md` |
+| `stm_append(text)` | skill/hook appends a line to `.ai_memory/stm/buffer.md` |
 | `stm_read()` | read the file |
 | `stm_clear()` | truncate/rotate the file after a confirmed LTM write |
 | `get_anchor` / `update_anchor` | read/write `.ai_memory/anchor.json` |

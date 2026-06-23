@@ -13,7 +13,7 @@ Run these steps in order.
 
 ## 1. Collect
 - Read the curated STM buffer:
-  `lts stm read --session "$CLAUDE_SESSION_ID"`
+  `lts stm read`
 - If a previous session left raw material, also account for it:
   `lts pending has` → if `yes`, read the snapshots under `.ai_memory/pending_consolidation/` with your file tools.
 - Add the significant remaining conversation context (exclude noise).
@@ -40,7 +40,7 @@ Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each,
 ## 6. Free STM, update the anchor, then clear context
 - Update the anchor file `.ai_memory/anchor.json` with the latest `last_session`, `active_topics`, `active_notes` (the notes you just wrote/touched).
 - Clear the STM buffer **only after** the writes above succeeded:
-  `lts stm clear --session "$CLAUDE_SESSION_ID"`
+  `lts stm clear`
 - If you consumed pending snapshots, delete them after a successful write.
 - Then run `/compact` to clear context.
 

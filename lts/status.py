@@ -8,8 +8,8 @@ from lts import anchor, paths, pending, stm, transcript
 from lts.config import Config
 
 
-def collect(cfg: Config, *, session_id: str, transcript_path: Path | None = None) -> dict:
-    stm_text = stm.read(paths.stm_file(cfg, session_id))
+def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
+    stm_text = stm.read(paths.stm_file(cfg))
     stm_lines = len([ln for ln in stm_text.splitlines() if ln.strip()])
     stm_bytes = len(stm_text.encode("utf-8"))
     stm_tokens = len(stm_text) // 4
@@ -39,7 +39,6 @@ def collect(cfg: Config, *, session_id: str, transcript_path: Path | None = None
     }
 
     return {
-        "session": session_id,
         "project": cfg.project,
         "stm": {"lines": stm_lines, "bytes": stm_bytes, "approx_tokens": stm_tokens},
         "pending": {"snapshots": len(snaps), "bytes": pending_bytes},
@@ -53,8 +52,7 @@ def render(metrics: dict) -> str:
     p = metrics["pending"]
     a = metrics["anchor"]
     lines = [
-        f"Memory status — session {metrics['session']}",
-        f"  Project:      {metrics.get('project', '')}",
+        f"Memory status — project {metrics.get('project', '')}",
         f"  STM buffer:   {s['lines']} entries, {s['bytes']} B (~{s['approx_tokens']} tok)",
         f"  Sleep debt:   {p['snapshots']} pending snapshot(s), {p['bytes']} B"
         + ("  ⚠ un-slept material" if p["snapshots"] else ""),

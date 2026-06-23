@@ -13,15 +13,14 @@ def test_collect_reports_project(tmp_path: Path):
     (tmp_path / ".git").mkdir(exist_ok=True)
     (tmp_path / "config.toml").write_text('[vault]\nproject = "netprint"\n', encoding="utf-8")
     cfg = load_config(tmp_path)
-    m = status.collect(cfg, session_id="s")
+    m = status.collect(cfg)
     assert m["project"] == "netprint"
-    rendered = status.render(m)
-    assert "Project:" in rendered and "netprint" in rendered
+    assert "netprint" in status.render(m)
 
 
 def test_collect_empty(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    m = status.collect(cfg, session_id="s")
+    m = status.collect(cfg)
     assert m["stm"] == {"lines": 0, "bytes": 0, "approx_tokens": 0}
     assert m["pending"] == {"snapshots": 0, "bytes": 0}
     assert m["pressure"] is None
@@ -30,10 +29,10 @@ def test_collect_empty(tmp_path: Path):
 
 def test_collect_stm_and_pending(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    stm.append(paths.stm_file(cfg, "s"), "fact one")
-    stm.append(paths.stm_file(cfg, "s"), "fact two: 12345")
+    stm.append(paths.stm_file(cfg), "fact one")
+    stm.append(paths.stm_file(cfg), "fact two: 12345")
     pending.dump_snapshot(paths.pending_dir(cfg), "s", "raw snapshot body")
-    m = status.collect(cfg, session_id="s")
+    m = status.collect(cfg)
     assert m["stm"]["lines"] == 2
     assert m["stm"]["bytes"] > 0
     assert m["stm"]["approx_tokens"] >= 1
@@ -45,7 +44,7 @@ def test_collect_pressure(tmp_path: Path):
     cfg = _cfg(tmp_path)
     t = tmp_path / "t.jsonl"
     t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~85% of 200k window
-    m = status.collect(cfg, session_id="s", transcript_path=t)
+    m = status.collect(cfg, transcript_path=t)
     assert m["pressure"]["level"] == "force"
     assert m["pressure"]["window"] == 200_000
     assert 0.8 <= m["pressure"]["ratio"] <= 1.0
@@ -61,7 +60,7 @@ def test_collect_anchor(tmp_path: Path):
         active_topics=["t1", "t2"],
         active_notes=["[[N1]]", "[[N2]]", "[[N3]]"],
     )
-    m = status.collect(cfg, session_id="s")
+    m = status.collect(cfg)
     assert m["anchor"]["exists"] is True
     assert m["anchor"]["updated"] == "2026-06-23 15:30"
     assert m["anchor"]["active_notes"] == 3
@@ -70,8 +69,8 @@ def test_collect_anchor(tmp_path: Path):
 
 def test_render_contains_sections(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    stm.append(paths.stm_file(cfg, "s"), "fact")
-    text = status.render(status.collect(cfg, session_id="s"))
+    stm.append(paths.stm_file(cfg), "fact")
+    text = status.render(status.collect(cfg))
     assert "STM" in text
     assert "Sleep debt" in text
     assert "Anchor" in text
