@@ -1,0 +1,8 @@
+[vault]
+mode = "per_project"        # per_project | global
+project = "lts-default"     # Basic Memory project name
+# path = "~/ai_memory_vault" # used when creating the project
+
+[sleep]
+pressure_warn = 0.60        # UserPromptSubmit: soft reminder threshold (fraction of window)
+pressure_force = 0.80       # hard "time to /sleep" threshold
