@@ -71,3 +71,22 @@ def test_session_start_run_wraps_context(tmp_path: Path):
     out = ss.run({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "finish sleeping" in out["hookSpecificOutput"]["additionalContext"].lower()
+
+
+def test_user_prompt_submit_force_nudge(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    t = tmp_path / "t.jsonl"
+    t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~85% of 200k window
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "/sleep" in text
+    assert "now" in text.lower()
+
+
+def test_user_prompt_submit_silent_when_low(tmp_path: Path):
+    (tmp_path / ".git").mkdir()
+    t = tmp_path / "t.jsonl"
+    t.write_text("x" * 4000, encoding="utf-8")  # ~1k tokens
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    assert ups.build_context({"transcript_path": str(t)}, root=tmp_path) == ""
+    assert ups.run({"transcript_path": str(t)}, root=tmp_path) == {}
