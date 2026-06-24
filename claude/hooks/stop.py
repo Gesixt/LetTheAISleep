@@ -14,7 +14,9 @@ _MAX_CHARS = 1000
 
 
 def _cursor_file(cfg) -> Path:
-    return paths.sidecar_root(cfg) / "stm" / ".cursor"
+    # Tracks how many exchanges were already captured (avoids dup/missed turns).
+    # Named to avoid confusion with the Cursor editor's `.cursor/` convention.
+    return paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset"
 
 
 def capture(event: dict, *, root: Path | None = None) -> int:
