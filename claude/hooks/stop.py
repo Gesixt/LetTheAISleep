@@ -51,8 +51,15 @@ def capture(event: dict, *, root: Path | None = None) -> int:
 
 
 def main() -> None:
+    raw = sys.stdin.read()
+    # TEMP diagnostic: prove the hook is invoked and show the payload (cwd etc.).
     try:
-        event = json.load(sys.stdin)
+        with open("/tmp/lts-hook-trace.log", "a", encoding="utf-8") as fh:
+            fh.write("stop fired: " + raw[:600].replace("\n", " ") + "\n")
+    except Exception:
+        pass
+    try:
+        event = json.loads(raw) if raw.strip() else {}
         capture(event)
     except Exception:
         log_error("stop.py")
