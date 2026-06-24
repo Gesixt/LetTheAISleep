@@ -77,10 +77,20 @@ def test_session_start_run_wraps_context(tmp_path: Path):
     assert "finish sleeping" in out["hookSpecificOutput"]["additionalContext"].lower()
 
 
+def _usage_transcript(path: Path, ctx_tokens: int):
+    path.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "usage": {
+            "input_tokens": ctx_tokens, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}},
+    }), encoding="utf-8")
+
+
 def test_user_prompt_submit_force_nudge(tmp_path: Path):
     (tmp_path / ".git").mkdir()
+    (tmp_path / "config.toml").write_text("[sleep]\ncontext_window = 1000\n", encoding="utf-8")
     t = tmp_path / "t.jsonl"
-    t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~85% of 200k window
+    _usage_transcript(t, 900)  # 900 / 1000 = 90% -> force
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
     assert "/sleep" in text
@@ -89,8 +99,9 @@ def test_user_prompt_submit_force_nudge(tmp_path: Path):
 
 def test_user_prompt_submit_silent_when_low(tmp_path: Path):
     (tmp_path / ".git").mkdir()
+    (tmp_path / "config.toml").write_text("[sleep]\ncontext_window = 1000\n", encoding="utf-8")
     t = tmp_path / "t.jsonl"
-    t.write_text("x" * 4000, encoding="utf-8")  # ~1k tokens
+    _usage_transcript(t, 100)  # 10% -> none
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     assert ups.build_context({"transcript_path": str(t)}, root=tmp_path) == ""
     assert ups.run({"transcript_path": str(t)}, root=tmp_path) == {}

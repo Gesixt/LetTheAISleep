@@ -10,6 +10,7 @@ DEFAULTS = {
     "vault_path": None,
     "pressure_warn": 0.60,
     "pressure_force": 0.80,
+    "context_window": 1_000_000,   # model context window; override in config.toml (e.g. 200_000 for Sonnet)
 }
 
 
@@ -21,6 +22,7 @@ class Config:
     vault_path: str | None
     pressure_warn: float
     pressure_force: float
+    context_window: int
 
 
 def find_project_root(start: Path) -> Path:
@@ -56,4 +58,6 @@ def load_config(start: Path | None = None) -> Config:
             values["pressure_warn"] = float(sleep["pressure_warn"])
         if "pressure_force" in sleep:
             values["pressure_force"] = float(sleep["pressure_force"])
+        if "context_window" in sleep:
+            values["context_window"] = int(sleep["context_window"])
     return Config(project_root=root, **values)

@@ -38,6 +38,25 @@ def test_read_exchanges_missing(tmp_path: Path):
     assert transcript.read_exchanges(tmp_path / "nope.jsonl") == []
 
 
+def test_context_tokens_from_usage(tmp_path: Path):
+    f = tmp_path / "t.jsonl"
+    lines = [
+        {"type": "assistant", "message": {"role": "assistant", "usage": {
+            "input_tokens": 10, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 50}}},
+        # the LAST assistant usage wins (reflects current context)
+        {"type": "assistant", "message": {"role": "assistant", "usage": {
+            "input_tokens": 2, "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 100}}},
+    ]
+    f.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    assert transcript.context_tokens(f) == 2 + 2000 + 100
+
+
+def test_context_tokens_falls_back_to_char_estimate(tmp_path: Path):
+    f = tmp_path / "t.jsonl"
+    f.write_text("x" * 400, encoding="utf-8")  # no usage data
+    assert transcript.context_tokens(f) == 100  # 400 // 4
+
+
 def test_estimate_tokens_missing(tmp_path: Path):
     assert transcript.estimate_tokens(tmp_path / "nope.jsonl") == 0
 

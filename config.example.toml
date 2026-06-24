@@ -4,5 +4,6 @@ project = "lts-default"     # Basic Memory project name
 # path = "~/ai_memory_vault" # used when creating the project
 
 [sleep]
-pressure_warn = 0.60        # UserPromptSubmit: soft reminder threshold (fraction of window)
-pressure_force = 0.80       # hard "time to /sleep" threshold
+pressure_warn = 0.60          # UserPromptSubmit: soft reminder threshold (fraction of window)
+pressure_force = 0.80         # hard "time to /sleep" threshold
+context_window = 1000000      # model context window (default fits Opus 1M; set 200000 for Sonnet)

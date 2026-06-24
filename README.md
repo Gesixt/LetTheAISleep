@@ -118,6 +118,10 @@ right vault automatically.
   `.claude/skills` and hook paths.
 - **Notes land in the wrong vault** — the skills pass `[vault] project` from `config.toml` to Basic
   Memory; make sure that name matches the one you used in `basic-memory project add`.
+- **Wrong "context filling" warnings** — context pressure is measured against
+  `[sleep] context_window` in `config.toml` (default `1000000`, for Opus's 1M window). If you run a
+  smaller-window model, set your own value, e.g. `context_window = 200000` for Sonnet — otherwise
+  warnings fire too late (window too large) or too early (too small).
 
 ## Usage
 

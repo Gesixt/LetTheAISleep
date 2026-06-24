@@ -19,8 +19,8 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
 
     pressure = None
     if transcript_path is not None:
-        tokens = transcript.estimate_tokens(Path(transcript_path))
-        window = transcript.DEFAULT_WINDOW
+        tokens = transcript.context_tokens(Path(transcript_path))
+        window = cfg.context_window
         pressure = {
             "tokens": tokens,
             "window": window,

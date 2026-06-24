@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from lts import anchor, paths, pending, status, stm
@@ -41,12 +42,16 @@ def test_collect_stm_and_pending(tmp_path: Path):
 
 
 def test_collect_pressure(tmp_path: Path):
-    cfg = _cfg(tmp_path)
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    (tmp_path / "config.toml").write_text("[sleep]\ncontext_window = 1000\n", encoding="utf-8")
+    cfg = load_config(tmp_path)
     t = tmp_path / "t.jsonl"
-    t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~85% of 200k window
+    t.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant",
+        "usage": {"input_tokens": 850, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 0}}}), encoding="utf-8")
     m = status.collect(cfg, transcript_path=t)
-    assert m["pressure"]["level"] == "force"
-    assert m["pressure"]["window"] == 200_000
+    assert m["pressure"]["level"] == "force"      # 850 / 1000 = 85%
+    assert m["pressure"]["window"] == 1000
     assert 0.8 <= m["pressure"]["ratio"] <= 1.0
 
 

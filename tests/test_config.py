@@ -12,6 +12,14 @@ def test_defaults_when_no_config(tmp_path: Path):
     assert cfg.vault_path is None
 
 
+def test_context_window_default_and_override(tmp_path: Path):
+    assert load_config(tmp_path).context_window == 1_000_000
+    (tmp_path / "config.toml").write_text(
+        "[sleep]\ncontext_window = 200000\n", encoding="utf-8"
+    )
+    assert load_config(tmp_path).context_window == 200_000
+
+
 def test_reads_config_toml(tmp_path: Path):
     (tmp_path / "config.toml").write_text(
         '[vault]\nmode = "global"\nproject = "lts-demo"\npath = "/some/vault"\n'

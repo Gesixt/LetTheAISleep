@@ -22,9 +22,9 @@ _FORCE = (
 
 def build_context(event: dict, *, root: Path | None = None) -> str:
     cfg = load_config(root or event.get("cwd"))
-    tokens = transcript.estimate_tokens(Path(event.get("transcript_path", "")))
+    tokens = transcript.context_tokens(Path(event.get("transcript_path", "")))
     level = transcript.pressure_level(
-        tokens, transcript.DEFAULT_WINDOW, cfg.pressure_warn, cfg.pressure_force
+        tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
     )
     if level == "force":
         return _FORCE

@@ -52,6 +52,35 @@ def estimate_tokens(transcript_path: Path) -> int:
     return len(transcript_path.read_text(encoding="utf-8", errors="ignore")) // 4
 
 
+def context_tokens(transcript_path: Path) -> int:
+    """Real current context size from the last assistant message's `usage` counters.
+
+    Sums input + cache-read + cache-creation tokens (what actually occupies the window).
+    Falls back to the rough char estimate only if no usage data is present.
+    """
+    if not transcript_path.exists():
+        return 0
+    last = 0
+    for line in transcript_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if d.get("type") != "assistant":
+            continue
+        usage = (d.get("message") or {}).get("usage")
+        if isinstance(usage, dict):
+            last = (
+                int(usage.get("input_tokens", 0) or 0)
+                + int(usage.get("cache_read_input_tokens", 0) or 0)
+                + int(usage.get("cache_creation_input_tokens", 0) or 0)
+            )
+    return last if last else estimate_tokens(transcript_path)
+
+
 def pressure_level(tokens: int, window: int, warn: float, force: float) -> str:
     if window <= 0:
         return "none"

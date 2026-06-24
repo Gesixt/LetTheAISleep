@@ -298,6 +298,7 @@ project = "lts-<name>"      # Basic Memory project name
 [sleep]
 pressure_warn = 0.60        # UserPromptSubmit: soft reminder
 pressure_force = 0.80       # hard "time to /sleep"
+context_window = 1000000    # model window (override per model, e.g. 200000 for Sonnet)
 ```
 
 ### `install.py` — idempotent wizard
