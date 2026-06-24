@@ -24,9 +24,16 @@ class Config:
 
 
 def find_project_root(start: Path) -> Path:
+    """The lts project root is marked solely by `config.toml` (walking up from `start`).
+
+    We deliberately do NOT use `.git`: a project may not be a git repo at all, and a
+    multi-repo project can have nested sub-repos (a service's own `.git`) that would be
+    the wrong root. If no `config.toml` is found, the start directory itself is the root
+    (this is the pre-install case — `install.py` writes `config.toml` there).
+    """
     start = start.resolve()
     for candidate in (start, *start.parents):
-        if (candidate / ".git").exists() or (candidate / "config.toml").exists():
+        if (candidate / "config.toml").exists():
             return candidate
     return start
 
