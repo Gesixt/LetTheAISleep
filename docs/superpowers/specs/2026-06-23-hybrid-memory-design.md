@@ -103,8 +103,8 @@ This project ships a Claude Code integration layer; Basic Memory provides the me
 ┌───────────────▼─────────────────────────────────────────┐
 │  Markdown Vault (LTM) — owned by Basic Memory             │
 │   frontmatter + Markdown · [[links]] · SQLite index       │
-│   organized with our convention: _Session_Memory/,        │
-│   _Knowledge_Base/ (as folders/types within the project)  │
+│   organized with our convention: session-memory/,        │
+│   knowledge-base/ (as folders/types within the project)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -145,8 +145,8 @@ LTM lives in a Basic Memory project (default `~/basic-memory`, or a per-project 
 ```
 <basic-memory project>/        ← owned & indexed by Basic Memory
 ├── _Project_Memory/Main_index.md
-├── _Session_Memory/Session_2026-06-23_1530.md
-├── _Knowledge_Base/DB_choice.md
+├── session-memory/Session_2026-06-23_1530.md
+├── knowledge-base/DB_choice.md
 └── _Templates/{session,knowledge}.md
 
 <project>/.ai_memory/          ← OUR sidecar (gitignored, NOT a Basic Memory note folder)
@@ -225,7 +225,7 @@ Entries: manual `/sleep`; `UserPromptSubmit` pressure at ~80%; or `PreCompact` b
              without STM → from pending_consolidation/ (raw)
 2. EXTRACT → key decisions, ALL numbers, names, architectural choices, contentious points
 3. WRITE   → write_note/edit_note for the session note; status: pending→consolidated
-4. LINK    → topic exists in KB? edit_note (augment) : write_note in _Knowledge_Base/.
+4. LINK    → topic exists in KB? edit_note (augment) : write_note in knowledge-base/.
              Place [[links]] both ways (body + frontmatter kb_refs)
 5. FREE STM + UPDATE ANCHOR + CLEAR → stm_clear; rewrite anchor.json; then /compact
 ```

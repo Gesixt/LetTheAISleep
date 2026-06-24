@@ -22,10 +22,10 @@ Run these steps in order.
 Pull out: key decisions, **ALL numbers**, names, architectural choices, contentious points, open questions. Rule: every number, name, and rationale is carried over **verbatim**. When in doubt, carry it over.
 
 ## 3. Write the session note
-Use Basic Memory `write_note` (or `edit_note` if today's session note exists) in the `_Session_Memory/` folder, named `Session_<YYYY-MM-DD_HHMM>`. Frontmatter: `type: session`, `date`, `topics`, `kb_refs`, `status: consolidated`. Body is coherent prose under: `## Context`, `## Key decisions`, `## Open questions`, `## Links`.
+Use Basic Memory `write_note` (or `edit_note` if today's session note exists) with `directory: "session-memory"`, named `Session_<YYYY-MM-DD_HHMM>`. (Use exactly `session-memory` — that is Basic Memory's slug; do not invent variants like `_Session_Memory`.) Frontmatter: `type: session`, `date`, `topics`, `kb_refs`, `status: consolidated`. Body is coherent prose under: `## Context`, `## Key decisions`, `## Open questions`, `## Links`.
 
 ## 4. Link into the knowledge base
-For each distinct topic: `search` the vault. If a `_Knowledge_Base/` note exists, `edit_note` to augment it; otherwise `write_note` a new one. Place `[[links]]` both ways — in the note body **and** in the session note's frontmatter `kb_refs`. Build coherent linked prose, not a bullet list.
+For each distinct topic: `search` the vault. If a knowledge-base note exists, `edit_note` to augment it; otherwise `write_note` a new one with `directory: "knowledge-base"` (use exactly `knowledge-base`). Place `[[links]]` both ways — in the note body **and** in the session note's frontmatter `kb_refs`. Build coherent linked prose, not a bullet list.
 
 ## 4b. Rebuild embeddings so the new notes are semantically searchable
 `write_note`/`edit_note` do NOT update the vector index automatically — only full-text and graph links are live immediately. So that `/recall` can find what you just wrote by meaning, rebuild embeddings with bash:
