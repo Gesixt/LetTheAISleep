@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lts import paths, stm, transcript
 from lts.config import load_config
+from lts.hooklog import log_error
 
 # Cap per captured message so the STM buffer stays a working set, not a transcript clone.
 _MAX_CHARS = 1000
@@ -26,7 +27,7 @@ def capture(event: dict, *, root: Path | None = None) -> int:
     exchanges were already captured so turns are never duplicated or missed.
     Returns the number of newly captured exchanges.
     """
-    cfg = load_config(root)
+    cfg = load_config(root or event.get("cwd"))
     paths.ensure_sidecar(cfg)
     exchanges = transcript.read_exchanges(Path(event.get("transcript_path", "")))
 
@@ -50,8 +51,11 @@ def capture(event: dict, *, root: Path | None = None) -> int:
 
 
 def main() -> None:
-    event = json.load(sys.stdin)
-    capture(event)
+    try:
+        event = json.load(sys.stdin)
+        capture(event)
+    except Exception:
+        log_error("stop.py")
     print("{}")
 
 

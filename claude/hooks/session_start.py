@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lts import anchor, paths, pending, stm
 from lts.config import load_config
+from lts.hooklog import log_error
 
 _FORCE_MSG = (
     "## Unfinished sleep detected\n"
@@ -18,7 +19,7 @@ _FORCE_MSG = (
 
 
 def build_context(event: dict, *, root: Path | None = None) -> str:
-    cfg = load_config(root)
+    cfg = load_config(root or event.get("cwd"))
     paths.ensure_sidecar(cfg)
     pending_present = pending.has_pending(paths.pending_dir(cfg))
     stm_present = not stm.is_empty(paths.stm_file(cfg))
@@ -40,8 +41,13 @@ def run(event: dict, *, root: Path | None = None) -> dict:
 
 
 def main() -> None:
-    event = json.load(sys.stdin)
-    print(json.dumps(run(event)))
+    try:
+        event = json.load(sys.stdin)
+        result = run(event)
+    except Exception:
+        log_error(__file__)
+        result = {}
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

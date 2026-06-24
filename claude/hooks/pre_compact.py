@@ -8,10 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lts import paths, pending
 from lts.config import load_config
+from lts.hooklog import log_error
 
 
 def run(event: dict, *, root: Path | None = None) -> dict:
-    cfg = load_config(root)
+    cfg = load_config(root or event.get("cwd"))
     paths.ensure_sidecar(cfg)
     transcript_path = Path(event.get("transcript_path", ""))
     content = ""
@@ -22,8 +23,13 @@ def run(event: dict, *, root: Path | None = None) -> dict:
 
 
 def main() -> None:
-    event = json.load(sys.stdin)
-    print(json.dumps(run(event)))
+    try:
+        event = json.load(sys.stdin)
+        result = run(event)
+    except Exception:
+        log_error(__file__)
+        result = {}
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

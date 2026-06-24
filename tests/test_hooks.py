@@ -149,3 +149,19 @@ def test_stop_auto_captures_exchanges(tmp_path: Path):
 
     # idempotent: same transcript, nothing new captured
     assert stop.capture({"transcript_path": str(t)}, root=tmp_path) == 0
+
+
+def test_stop_resolves_project_from_event_cwd(tmp_path: Path):
+    # No explicit root; the hook must locate the project via the event's cwd,
+    # not the process working directory.
+    (tmp_path / ".git").mkdir()
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps(
+        {"type": "user", "message": {"role": "user", "content": "hello cwd"}}
+    ), encoding="utf-8")
+    stop = _load("stop", HOOKS / "stop.py")
+    n = stop.capture({"transcript_path": str(t), "cwd": str(tmp_path)})
+    assert n == 1
+    from lts.config import load_config
+    from lts import paths, stm
+    assert "hello cwd" in stm.read(paths.stm_file(load_config(tmp_path)))
