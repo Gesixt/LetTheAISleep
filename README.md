@@ -138,11 +138,22 @@ right vault automatically.
 | Surface | Purpose |
 |---------|---------|
 | `/sleep` | Consolidate the session into long-term memory without loss, then clear STM. |
-| `/recall` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). |
+| `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `basic-memory project info <project>` | LTM counts (Entities/Relations/Isolated) and embedding status. |
+
+**Recalling memory** — `/recall` takes an optional topic or question:
+
+```
+/recall why did we choose the BFF approach for cart?   # answer a specific question from memory
+/recall cart service                                   # pull everything relevant to a topic
+/recall                                                 # bare: load the anchor + last session as context
+```
+
+You can also just ask the question in plain language — the `CLAUDE.md` memory instructions tell
+Claude to recall first — but an explicit `/recall` guarantees the retrieval runs.
 
 **Checking memory load**
 
