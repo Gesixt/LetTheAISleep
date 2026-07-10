@@ -121,3 +121,92 @@ def test_target_is_the_root_verbatim_even_under_an_existing_project(tmp_path: Pa
     assert (target / ".ai_memory" / "stm").is_dir()
     assert 'project = "service-mem"' in (target / "config.toml").read_text(encoding="utf-8")
     assert 'project = "parent"' in (parent / "config.toml").read_text(encoding="utf-8")
+
+
+def test_set_vault_key_replaces_a_live_line():
+    inst = _load_install()
+    text = '[vault]\nproject = "p"\nauthor = "old"\n\n[sleep]\npressure_warn = 0.6\n'
+    out = inst.set_vault_key(text, "author", "dmitrii")
+    assert 'author = "dmitrii"' in out
+    assert '"old"' not in out
+    assert "pressure_warn = 0.6" in out
+
+
+def test_set_vault_key_replaces_a_commented_line():
+    inst = _load_install()
+    text = '[vault]\nproject = "p"\n# path = "~/ai_memory_vault"\n\n[sleep]\n'
+    out = inst.set_vault_key(text, "path", "/srv/vault")
+    assert 'path = "/srv/vault"' in out
+    assert "# path" not in out
+
+
+def test_set_vault_key_appends_when_absent():
+    inst = _load_install()
+    text = '[vault]\nproject = "p"\n\n[sleep]\npressure_warn = 0.6\n'
+    out = inst.set_vault_key(text, "author", "dmitrii")
+    assert 'author = "dmitrii"' in out
+    # the key lands inside [vault], not in [sleep]
+    assert out.index('author = "dmitrii"') < out.index("[sleep]")
+
+
+def test_resolve_author_prefers_the_argument():
+    inst = _load_install()
+    import argparse
+    args = argparse.Namespace(author="vincent")
+    assert inst.resolve_author(args, None) == "vincent"
+
+
+def test_resolve_author_rejects_a_non_slug():
+    inst = _load_install()
+    import argparse
+    args = argparse.Namespace(author="Dmitry Mitin")
+    import pytest
+    from lts.naming import InvalidAuthor
+    with pytest.raises(InvalidAuthor):
+        inst.resolve_author(args, None)
+
+
+def test_resolve_author_keeps_existing_when_not_a_tty(monkeypatch):
+    inst = _load_install()
+    import argparse
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    args = argparse.Namespace(author=None)
+    assert inst.resolve_author(args, "dmitrii") == "dmitrii"
+    assert inst.resolve_author(args, None) is None
+
+
+def test_main_writes_the_author_and_leaves_an_existing_vault_untouched(tmp_path: Path):
+    inst = _load_install()
+    target = tmp_path / "proj"
+    target.mkdir()
+    vault_note = target / ".ai_vault" / "knowledge-base" / "Cart Service.md"
+    vault_note.parent.mkdir(parents=True)
+    vault_note.write_text("petr wrote this", encoding="utf-8")
+
+    rc = inst.main(["--project", "demo", "--target", str(target), "--author", "dmitrii"])
+    assert rc == 0
+
+    cfg_text = (target / "config.toml").read_text(encoding="utf-8")
+    assert 'author = "dmitrii"' in cfg_text
+    # installation must never touch a vault a teammate cloned
+    assert vault_note.read_text(encoding="utf-8") == "petr wrote this"
+
+
+def test_main_rejects_a_non_slug_author(tmp_path: Path, capsys):
+    inst = _load_install()
+    target = tmp_path / "proj"
+    target.mkdir()
+    rc = inst.main(["--project", "demo", "--target", str(target), "--author", "Dmitry Mitin"])
+    assert rc == 2
+    assert "dmitry-mitin" in capsys.readouterr().err
+
+
+def test_main_without_author_stays_single_developer(tmp_path: Path, monkeypatch):
+    inst = _load_install()
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    target = tmp_path / "proj"
+    target.mkdir()
+    assert inst.main(["--project", "demo", "--target", str(target)]) == 0
+    assert "author" not in (target / "config.toml").read_text(encoding="utf-8")
