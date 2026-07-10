@@ -121,9 +121,16 @@ right vault automatically.
 - **`basic-memory project info <name>` fails with `set to cloud mode but no credentials`** — that
   error is misleading; it really means "no such project". Basic Memory registers projects under a
   **slug** (`LetTheAISleep` → `let-the-aisleep`) but reports the display name over MCP, and its CLI
-  only accepts the slug. `lts status` prints both (`Basic Memory CLI name: …`, or `project_slug` in
-  `--json`), and `/memory-status` uses the slug automatically. MCP calls like `write_note` still
-  take the plain name. Simplest prevention: name Basic Memory projects in lowercase.
+  is inconsistent about which form each subcommand accepts:
+
+  | name form | `project info` | `reindex -p` | MCP (`write_note`, …) |
+  |---|---|---|---|
+  | display (`LetTheAISleep`) | fails | works | works |
+  | slug (`let-the-aisleep`) | works | fails | — |
+
+  `lts status` prints both (`Basic Memory CLI name: …`, or `project_slug` in `--json`), and the
+  skills already pass the right form to each. Simplest prevention: name Basic Memory projects in
+  lowercase so both forms coincide.
 - **Wrong "context filling" warnings** — context pressure is measured against
   `[sleep] context_window` in `config.toml` (default `1000000`, for Opus's 1M window). If you run a
   smaller-window model, set your own value, e.g. `context_window = 200000` for Sonnet — otherwise
