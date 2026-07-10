@@ -210,3 +210,101 @@ def test_main_without_author_stays_single_developer(tmp_path: Path, monkeypatch)
     target.mkdir()
     assert inst.main(["--project", "demo", "--target", str(target)]) == 0
     assert "author" not in (target / "config.toml").read_text(encoding="utf-8")
+
+
+def test_resolve_author_interactive_empty_answer_with_suggestion_stays_solo(monkeypatch):
+    # The regression guard: a git-derived suggestion must be *offered*, never auto-accepted.
+    # Without the git_identity_suggestion monkeypatch this test could pass merely because the
+    # machine running it has no `git config user.name` configured.
+    inst = _load_install()
+    import argparse
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(inst, "git_identity_suggestion", lambda: "dmitry-mitin")
+
+    seen_prompts = []
+
+    def fake_input(prompt=""):
+        seen_prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    args = argparse.Namespace(author=None)
+
+    result = inst.resolve_author(args, None)
+
+    assert result is None  # NOT the suggestion — empty answer means single developer
+    assert len(seen_prompts) == 1
+    assert "dmitry-mitin" in seen_prompts[0]
+    assert "single developer" in seen_prompts[0]
+
+
+def test_resolve_author_interactive_empty_answer_keeps_existing(monkeypatch):
+    inst = _load_install()
+    import argparse
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    args = argparse.Namespace(author=None)
+
+    assert inst.resolve_author(args, "dmitrii") == "dmitrii"
+
+
+def test_resolve_author_interactive_typed_answer_is_validated_and_returned(monkeypatch):
+    inst = _load_install()
+    import argparse
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "vincent")
+    args = argparse.Namespace(author=None)
+
+    assert inst.resolve_author(args, None) == "vincent"
+
+
+def test_resolve_author_interactive_typed_non_slug_answer_raises(monkeypatch):
+    inst = _load_install()
+    import argparse
+    import sys
+    import pytest
+    from lts.naming import InvalidAuthor
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "Dmitry Mitin")
+    args = argparse.Namespace(author=None)
+
+    with pytest.raises(InvalidAuthor):
+        inst.resolve_author(args, None)
+
+
+def test_set_vault_key_appends_when_vault_is_the_last_table():
+    inst = _load_install()
+    import tomllib
+    text = '[sleep]\npressure_warn = 0.6\n\n[vault]\nproject = "p"\n'
+    out = inst.set_vault_key(text, "author", "dmitrii")
+    parsed = tomllib.loads(out)
+    assert parsed["vault"]["author"] == "dmitrii"
+    assert parsed["sleep"]["pressure_warn"] == 0.6
+    # the key must land inside [vault], after the vault header
+    assert out.index("[vault]") < out.index('author = "dmitrii"')
+
+
+def test_set_vault_key_last_table_with_trailing_blank_lines():
+    inst = _load_install()
+    import tomllib
+    text = '[vault]\nproject = "p"\n\n\n'
+    out = inst.set_vault_key(text, "author", "dmitrii")
+    parsed = tomllib.loads(out)
+    assert parsed["vault"]["author"] == "dmitrii"
+    # the new key must land before the trailing blank lines, not after them
+    author_pos = out.index('author = "dmitrii"')
+    trailing = out[author_pos + len('author = "dmitrii"'):]
+    assert trailing.strip("\n") == ""  # only blank lines follow the inserted key
+
+
+def test_set_vault_key_last_table_no_trailing_newline():
+    inst = _load_install()
+    import tomllib
+    text = '[vault]\nproject = "p"'
+    out = inst.set_vault_key(text, "author", "dmitrii")
+    parsed = tomllib.loads(out)
+    assert parsed["vault"]["author"] == "dmitrii"
+    assert out.endswith("\n")  # well-formed: file ends with a newline
