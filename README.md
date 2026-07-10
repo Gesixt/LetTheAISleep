@@ -188,6 +188,51 @@ lts status
 shows the project, STM size, un-slept "sleep debt", context pressure, and anchor freshness. `/memory-status`
 combines this with Basic Memory's LTM stats and tells you if you should `/sleep` or reindex.
 
+## Team mode
+
+Several developers, one memory. `knowledge-base/` is **shared** — one note per topic, everyone
+augments it. `session-memory/` is **personal** — one namespace per developer. Attribution comes from
+byline `[[links]]` back to each session note, so the knowledge graph stays connected instead of
+splitting into one island per person.
+
+```
+.ai_vault/                       # its own git repository
+  knowledge-base/
+    Cart Service.md              # shared; Petr and Vincent both append to it
+  session-memory/
+    dmitrii/Session_dmitrii_2026-07-10_1002.md
+    petr/Session_petr_2026-07-09_1730.md
+```
+
+Set it up by cloning the vault **before** installing:
+
+```bash
+git clone git@github.com:acme/myproject.git
+cd myproject
+git clone git@github.com:acme/myproject-memory.git .ai_vault
+python3 ~/tools/LetTheAISleep/install.py \
+    --target ~/code/myproject --project myproject --author dmitrii
+```
+
+`install.py` never creates, moves or deletes vault content. Omit `--author` (or answer the prompt
+with an empty line) and everything behaves exactly as it does for a single developer.
+
+**The system never runs git for you.** No fetch, pull, commit or push, from any hook or skill —
+publishing memory is your decision, and a hook must not block on the network. What it does instead:
+
+| Command | What it tells you |
+|---------|-------------------|
+| `lts digest` | What teammates changed since your last sleep, and who changed it; plus commits behind/ahead and uncommitted files |
+| `lts session-name` | The session note title and directory for your namespace |
+
+`SessionStart` shows the digest automatically when there is something to report, and `/memory-status`
+always includes it. Ahead/behind counts are relative to the **last fetched** remote ref — run
+`git -C .ai_vault fetch` yourself if you want them fresh.
+
+Notes pulled from teammates are indexed automatically: Basic Memory's MCP server background-syncs
+every project on startup and runs a file watcher, and that path builds vector embeddings too. Nothing
+extra to run after `git pull`.
+
 ## License note
 
 This project talks to Basic Memory only over MCP (no linking/embedding). Basic Memory itself is

@@ -17,6 +17,18 @@ command reports `no lts project at or above ...`, stop and tell the user — do 
 
 Run these steps in order.
 
+## 0. Check the vault before writing (team mode)
+Run:
+```
+lts digest
+```
+- If it reports the vault is **behind** the remote, say so and recommend a `git pull` in the vault
+  before sleeping. Then proceed — a stale base is a warning, not a stop.
+- If any vault note contains git conflict markers (`<<<<<<<`), **stop**. Report the file and let the
+  user resolve it. Consolidating a half-merged note produces confident nonsense.
+
+Never run `git pull`, `git commit` or `git push` yourself. Publishing memory is the user's decision.
+
 ## 1. Collect
 - Read the curated STM buffer:
   `lts stm read`
@@ -29,10 +41,39 @@ Run these steps in order.
 Pull out: key decisions, **ALL numbers**, names, architectural choices, contentious points, open questions. Rule: every number, name, and rationale is carried over **verbatim**. When in doubt, carry it over.
 
 ## 3. Write the session note
-Use Basic Memory `write_note` (or `edit_note` if today's session note exists) with `directory: "session-memory"`, named `Session_<YYYY-MM-DD_HHMM>`. (Use exactly `session-memory` — that is Basic Memory's slug; do not invent variants like `_Session_Memory`.) Frontmatter: `type: session`, `date`, `topics`, `kb_refs`, `status: consolidated`. Body is coherent prose under: `## Context`, `## Key decisions`, `## Open questions`, `## Links`.
+Ask the CLI for the name and directory — never compose them yourself:
+```
+lts session-name --json
+```
+It prints `{"title": "Session_dmitrii_2026-07-10_1002", "directory": "session-memory/dmitrii"}` in
+team mode, and the flat single-developer form otherwise.
+
+Use Basic Memory `write_note` with that exact `title` and `directory`, and **always pass
+`overwrite=False` explicitly** — never rely on the server's default, which a `write_note_overwrite_default`
+setting we do not own can flip to destructive upsert. Frontmatter: `type: session`, `date`, `topics`,
+`kb_refs`, `status: consolidated`, and in team mode `author: <the author from lts status>`. Body is
+coherent prose under: `## Context`, `## Key decisions`, `## Open questions`, `## Links`.
 
 ## 4. Link into the knowledge base
-For each distinct topic: `search` the vault. If a knowledge-base note exists, `edit_note` to augment it; otherwise `write_note` a new one with `directory: "knowledge-base"` (use exactly `knowledge-base`). Place `[[links]]` both ways — in the note body **and** in the session note's frontmatter `kb_refs`. Build coherent linked prose, not a bullet list.
+`knowledge-base/` is **shared with your teammates**. It is flat: never create a per-person folder there.
+
+For each distinct topic, `search` the vault first — by title *and* by meaning. A near-synonym
+(`Cart service`, `Cart Service (API)`) creates a silent duplicate that no error will catch, so prefer
+augmenting an existing note over creating a new one.
+
+- If a note exists: `edit_note` with `append`. Appending is what lets two developers touch one note
+  without a git conflict. Never `replace_section` on a section you did not write, and never pass
+  `skip_conflict_check` — Basic Memory rejects edits made against a stale base on purpose.
+- If no note exists: `write_note` with `directory: "knowledge-base"` and `overwrite=False`.
+
+Give every fact a **byline link** to the session note it came from, so authorship is readable from
+the note itself:
+
+    ## Redis cache
+    TTL is 900s. — [[Session_petr_2026-07-09_1730]]
+
+Place `[[links]]` both ways — in the note body **and** in the session note's frontmatter `kb_refs`.
+Build coherent linked prose, not a bullet list.
 
 ## 4b. Rebuild embeddings so the new notes are semantically searchable
 `write_note`/`edit_note` do NOT update the vector index automatically — only full-text and graph links are live immediately. So that `/recall` can find what you just wrote by meaning, rebuild embeddings with bash:
@@ -54,6 +95,8 @@ Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each,
 - Clear the STM buffer **only after** the writes above succeeded:
   `lts stm clear`
 - If you consumed pending snapshots, drop them: `lts pending clear`
+- In team mode, remind the user to commit and push the vault repository so teammates see this work.
+  Do not do it for them.
 - Then run `/compact` to clear context.
 
 If interrupted before step 6, leave the session note `status: pending` and do **not** clear STM — the next session's SessionStart hook will resume this.

@@ -209,7 +209,13 @@ def test_main_without_author_stays_single_developer(tmp_path: Path, monkeypatch)
     target = tmp_path / "proj"
     target.mkdir()
     assert inst.main(["--project", "demo", "--target", str(target)]) == 0
-    assert "author" not in (target / "config.toml").read_text(encoding="utf-8")
+    # Parse the TOML instead of doing a substring check: the template ships a
+    # commented-out `# author = ...` line to document the option for team mode,
+    # so the literal substring "author" is present by design. What must be
+    # absent is a *live* key in the parsed [vault] table, not the word itself.
+    import tomllib
+    data = tomllib.loads((target / "config.toml").read_text(encoding="utf-8"))
+    assert "author" not in data["vault"]
 
 
 def test_resolve_author_interactive_empty_answer_with_suggestion_stays_solo(monkeypatch):

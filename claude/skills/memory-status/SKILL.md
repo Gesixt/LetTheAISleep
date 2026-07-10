@@ -12,10 +12,16 @@ Run:
 ```
 lts status
 lts doctor
+lts digest
 ```
 `lts status` prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
 
 `lts doctor` prints which project root resolved and whether any **stray sidecars** exist — `.ai_memory/` directories in subdirectories, holding memory that `/sleep` will never read. It exits non-zero when something is wrong. If it reports a stray sidecar or an unconfigured root, say so prominently: the user's `config.toml` was probably moved or deleted, and memory is being split in two.
+
+`lts digest` prints what changed in the vault since your last sleep and who changed it, plus the
+vault's git state (commits behind/ahead of the last fetched remote ref, uncommitted files). It is
+silent when there is nothing to report. In team mode, surface it prominently: it is how the user
+learns a teammate has already solved the thing they are about to investigate.
 
 ## 2. LTM metrics (Basic Memory)
 Take the project name from the `lts status` output above. Do not go hunting for `config.toml`.
@@ -39,6 +45,7 @@ From that dashboard report:
 
 ## 3. Present a combined dashboard and flag actions
 Summarize both tiers together. Raise a clear flag when:
+- **The vault is behind the remote, or has uncommitted notes** → recommend a `git pull` / commit in the vault repository. Never run git yourself.
 - **`lts doctor` exits non-zero** → memory is misplaced. Report the stray path and stop before writing anything new.
 - **Sleep debt > 0** or **context pressure is `force`** → recommend running `/sleep` now.
 - **Embedding Status is not "Up to date"** → recommend `basic-memory reindex --embeddings -p <project>` so `/recall` semantic search is complete.
