@@ -1,7 +1,8 @@
 [vault]
 mode = "per_project"        # per_project | global
 project = "lts-default"     # Basic Memory project name
-# path = "~/ai_memory_vault" # used when creating the project
+# path = "~/ai_memory_vault"  # vault directory (default: <project-root>/.ai_vault)
+# author = "dmitrii"          # team mode: your personal session-memory namespace, must be a slug
 
 [sleep]
 pressure_warn = 0.60          # UserPromptSubmit: soft reminder threshold (fraction of window)

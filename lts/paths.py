@@ -17,6 +17,17 @@ def sidecar_root(cfg: Config) -> Path:
     return cfg.project_root / ".ai_memory"
 
 
+def vault_root(cfg: Config) -> Path:
+    """The Basic Memory vault directory: `[vault] path`, else `<project_root>/.ai_vault`.
+
+    Unlike the sidecar this may live outside the project (a shared vault), and in team mode
+    it is its own git repository, so it is resolved separately from `sidecar_root`.
+    """
+    if cfg.vault_path:
+        return Path(cfg.vault_path).expanduser()
+    return cfg.project_root / ".ai_vault"
+
+
 def stm_file(cfg: Config) -> Path:
     """Single per-project STM buffer (no session dimension — keeps hooks and skills in sync)."""
     return sidecar_root(cfg) / "stm" / "buffer.md"

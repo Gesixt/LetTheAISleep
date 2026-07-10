@@ -77,3 +77,13 @@ def test_render_contains_sections(tmp_path: Path):
     assert "STM" in text
     assert "Sleep debt" in text
     assert "Anchor" in text
+
+
+def test_render_shows_author_only_in_team_mode(tmp_path: Path):
+    make_project(tmp_path, 'author = "dmitrii"\n')
+    text = status.render(status.collect(load_config(tmp_path)))
+    assert "Author:" in text and "dmitrii" in text
+
+    solo = tmp_path / "solo"
+    make_project(solo)
+    assert "Author:" not in status.render(status.collect(load_config(solo)))

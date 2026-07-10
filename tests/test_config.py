@@ -95,3 +95,15 @@ def test_require_project_raises_outside_a_project(tmp_path: Path):
 
 def test_require_project_passes_inside_a_project(tmp_path: Path):
     require_project(load_config(make_project(tmp_path)))  # must not raise
+
+
+def test_author_absent_means_single_developer(tmp_path: Path):
+    make_project(tmp_path)
+    assert load_config(tmp_path).author is None
+
+
+def test_author_is_read_from_config(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[vault]\nproject = "p"\nauthor = "dmitrii"\n', encoding="utf-8"
+    )
+    assert load_config(tmp_path).author == "dmitrii"

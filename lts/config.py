@@ -8,6 +8,7 @@ DEFAULTS = {
     "vault_mode": "per_project",   # per_project | global
     "project": "lts-default",
     "vault_path": None,
+    "author": None,                # personal namespace; None => single-developer mode
     "pressure_warn": 0.60,
     "pressure_force": 0.80,
     "context_window": 1_000_000,   # model context window; override in config.toml (e.g. 200_000 for Sonnet)
@@ -33,6 +34,7 @@ class Config:
     vault_mode: str
     project: str
     vault_path: str | None
+    author: str | None        # None => single-developer mode; otherwise a slug-stable namespace
     pressure_warn: float
     pressure_force: float
     context_window: int
@@ -91,6 +93,8 @@ def load_config(start: Path | None = None) -> Config:
             values["project"] = vault["project"]
         if "path" in vault:
             values["vault_path"] = vault["path"]
+        if "author" in vault:
+            values["author"] = vault["author"]
         if "pressure_warn" in sleep:
             values["pressure_warn"] = float(sleep["pressure_warn"])
         if "pressure_force" in sleep:
