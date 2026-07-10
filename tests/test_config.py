@@ -1,9 +1,20 @@
+import pytest
+
 from pathlib import Path
-from lts.config import load_config, find_project_root, DEFAULTS
+from lts.config import (
+    DEFAULTS,
+    NotAnLtsProject,
+    find_project_root,
+    is_lts_config,
+    load_config,
+    require_project,
+)
+from tests.helpers import make_project
 
 
 def test_defaults_when_no_config(tmp_path: Path):
     cfg = load_config(tmp_path)
+    assert cfg.configured is False
     assert cfg.vault_mode == DEFAULTS["vault_mode"]
     assert cfg.pressure_warn == 0.60
     assert cfg.pressure_force == 0.80
@@ -14,9 +25,7 @@ def test_defaults_when_no_config(tmp_path: Path):
 
 def test_context_window_default_and_override(tmp_path: Path):
     assert load_config(tmp_path).context_window == 1_000_000
-    (tmp_path / "config.toml").write_text(
-        "[sleep]\ncontext_window = 200000\n", encoding="utf-8"
-    )
+    make_project(tmp_path, "[sleep]\ncontext_window = 200000\n")
     assert load_config(tmp_path).context_window == 200_000
 
 
@@ -27,6 +36,7 @@ def test_reads_config_toml(tmp_path: Path):
         encoding="utf-8",
     )
     cfg = load_config(tmp_path)
+    assert cfg.configured is True
     assert cfg.vault_mode == "global"
     assert cfg.project == "lts-demo"
     assert cfg.vault_path == "/some/vault"
@@ -35,7 +45,7 @@ def test_reads_config_toml(tmp_path: Path):
 
 
 def test_find_project_root_walks_up_to_config(tmp_path: Path):
-    (tmp_path / "config.toml").write_text('[vault]\nproject = "p"\n', encoding="utf-8")
+    make_project(tmp_path)
     nested = tmp_path / "a" / "b"
     nested.mkdir(parents=True)
     assert find_project_root(nested) == tmp_path
@@ -43,7 +53,7 @@ def test_find_project_root_walks_up_to_config(tmp_path: Path):
 
 def test_find_project_root_ignores_nested_git(tmp_path: Path):
     # multi-repo layout: project root has config.toml; a nested service is its own git repo
-    (tmp_path / "config.toml").write_text('[vault]\nproject = "p"\n', encoding="utf-8")
+    make_project(tmp_path)
     service = tmp_path / "services" / "cart"
     service.mkdir(parents=True)
     (service / ".git").mkdir()
@@ -51,8 +61,37 @@ def test_find_project_root_ignores_nested_git(tmp_path: Path):
     assert find_project_root(service) == tmp_path
 
 
-def test_find_project_root_no_marker_returns_start(tmp_path: Path):
+def test_find_project_root_no_marker_returns_none(tmp_path: Path):
     nested = tmp_path / "a" / "b"
     nested.mkdir(parents=True)
-    # no config.toml anywhere -> the start dir itself is the root (pre-install case)
-    assert find_project_root(nested) == nested
+    # no config.toml anywhere -> no root at all (never silently fall back to the cwd)
+    assert find_project_root(nested) is None
+
+
+def test_foreign_config_toml_does_not_mark_a_root(tmp_path: Path):
+    # a Hugo/Zola/mdBook/.cargo config.toml in a subdirectory must not hijack the root
+    make_project(tmp_path)
+    service = tmp_path / "site"
+    service.mkdir()
+    (service / "config.toml").write_text('baseURL = "https://example.com"\n', encoding="utf-8")
+    assert find_project_root(service) == tmp_path
+
+
+def test_is_lts_config_rejects_unparsable_and_foreign(tmp_path: Path):
+    broken = tmp_path / "broken.toml"
+    broken.write_text("this is ] not [ toml", encoding="utf-8")
+    assert is_lts_config(broken) is False
+    assert is_lts_config(tmp_path / "missing.toml") is False
+    foreign = tmp_path / "foreign.toml"
+    foreign.write_text('[server]\nport = 8080\n', encoding="utf-8")
+    assert is_lts_config(foreign) is False
+
+
+def test_require_project_raises_outside_a_project(tmp_path: Path):
+    with pytest.raises(NotAnLtsProject) as exc:
+        require_project(load_config(tmp_path))
+    assert str(tmp_path) in str(exc.value)
+
+
+def test_require_project_passes_inside_a_project(tmp_path: Path):
+    require_project(load_config(make_project(tmp_path)))  # must not raise

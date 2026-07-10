@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from lts import paths, stm, transcript
 from lts.config import load_config
-from lts.hooklog import log_error
+from lts.hooklog import log_error, log_note
 
 # Cap per captured message so the STM buffer stays a working set, not a transcript clone.
 _MAX_CHARS = 1000
@@ -25,9 +25,13 @@ def capture(event: dict, *, root: Path | None = None) -> int:
 
     Deterministic (hook-driven): no model decision. A cursor file tracks how many
     exchanges were already captured so turns are never duplicated or missed.
-    Returns the number of newly captured exchanges.
+    Returns the number of newly captured exchanges (0 if there is no project here —
+    we never create a sidecar outside a configured root).
     """
     cfg = load_config(root or event.get("cwd"))
+    if not cfg.configured:
+        log_note("stop.py", f"no lts project at or above {cfg.project_root}; captured nothing")
+        return 0
     paths.ensure_sidecar(cfg)
     exchanges = transcript.read_exchanges(Path(event.get("transcript_path", "")))
 

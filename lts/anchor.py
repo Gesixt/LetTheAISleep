@@ -20,6 +20,7 @@ def write_anchor(
     last_session: str,
     active_topics: list[str],
     active_notes: list[str],
+    next_task: str | None = None,
 ) -> None:
     anchor_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -28,6 +29,8 @@ def write_anchor(
         "active_topics": active_topics,
         "active_notes": active_notes,
     }
+    if next_task:
+        payload["next_task"] = next_task
     anchor_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

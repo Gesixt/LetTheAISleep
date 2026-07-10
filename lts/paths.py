@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from lts.config import Config
+from lts.config import Config, require_project
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -31,5 +31,7 @@ def pending_dir(cfg: Config) -> Path:
 
 
 def ensure_sidecar(cfg: Config) -> None:
+    """Create the sidecar — only ever at a configured project root, never at a bare cwd."""
+    require_project(cfg)
     (sidecar_root(cfg) / "stm").mkdir(parents=True, exist_ok=True)
     pending_dir(cfg).mkdir(parents=True, exist_ok=True)

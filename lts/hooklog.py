@@ -14,3 +14,12 @@ def log_error(hook_name: str) -> None:
             fh.write(f"--- {hook_name} ---\n{traceback.format_exc()}\n")
     except Exception:
         pass
+
+
+def log_note(hook_name: str, message: str) -> None:
+    """Record an expected no-op (not a crash) so a silently skipped hook is still explainable."""
+    try:
+        with ERROR_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"--- {hook_name} --- {message}\n")
+    except Exception:
+        pass

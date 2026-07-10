@@ -115,11 +115,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # The SOURCE is this cloned repo (where the hook scripts and skills live);
-    # the TARGET is the project that gets memory wired into it.
+    # the TARGET is the project that gets memory wired into it. The target directory
+    # becomes the root verbatim — we never walk up looking for an existing config.toml,
+    # or `--target` would silently attach memory to some ancestor instead.
     source_root = Path(__file__).resolve().parent
-    target_start = Path(args.target).resolve() if args.target else Path.cwd()
-    cfg = load_config(target_start)
-    target_root = cfg.project_root
+    target_root = Path(args.target).resolve() if args.target else Path.cwd()
     print(f"source: {source_root}\ntarget: {target_root}")
 
     # 1. config.toml in the target project — create from example, then set the project name
@@ -127,11 +127,12 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg_file.exists():
         shutil.copy(source_root / "config.example.toml", cfg_file)
         print(f"created {cfg_file}")
-    project = resolve_project(args, cfg.project)
+    project = resolve_project(args, load_config(target_root).project)
     cfg_file.write_text(set_config_project(cfg_file.read_text(encoding="utf-8"), project), encoding="utf-8")
     print(f"config.toml project set to '{project}'")
 
-    # 2. sidecar in the target project
+    # 2. sidecar in the target project (config.toml now exists, so this root resolves)
+    cfg = load_config(target_root)
     paths.ensure_sidecar(cfg)
     print(f"sidecar ready at {paths.sidecar_root(cfg)}")
 
@@ -169,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         f"  basic-memory reindex --embeddings -p {project}   # build vector index (writes don't auto-embed)\n"
         "  claude mcp add basic-memory -- basic-memory mcp\n"
         "Then restart Claude Code in this project and try a /sleep at the end of a session.\n"
-        "Tip: add .claude/settings.json, .ai_memory/ and config.toml to the project's .gitignore."
+        "Tip: add .claude/settings.json, .ai_memory/ and config.toml to the project's .gitignore.\n"
+        "Note: config.toml marks the project root — moving it detaches memory. Check with `lts doctor`."
     )
     return 0
 

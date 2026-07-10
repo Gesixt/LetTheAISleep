@@ -13,7 +13,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 | Tier | What | Where | Lives |
 |------|------|-------|-------|
 | **Context** | the live conversation | Claude's window | until `/compact` |
-| **STM** | a working buffer of facts/decisions as they happen | `.ai_memory/stm/<session>.md` | until the next sleep |
+| **STM** | a working buffer of facts/decisions as they happen | `<root>/.ai_memory/stm/buffer.md` | until the next sleep |
 | **LTM** | the linked knowledge graph | Basic Memory Markdown vault | permanent |
 
 - **While working** a `Stop` hook automatically captures each exchange into STM — no need to decide to remember; it survives `/compact`.
@@ -90,6 +90,11 @@ claude mcp add basic-memory -- basic-memory mcp
 `install.py` also reminds you to add `.claude/settings.json`, `.ai_memory/` and `config.toml`
 to the **target project's** `.gitignore` (they contain machine-specific absolute paths).
 
+> `config.toml` **is** the project root marker — the hooks and the `lts` CLI locate `.ai_memory/`
+> by walking up until they find one with a `[vault]` section. Keep it at the root; if it is moved
+> or deleted, memory writes refuse (rather than sprouting a sidecar elsewhere). `lts doctor` tells
+> you which root resolved.
+
 Use the **same `<project-name>`** in step 3 that you passed to `install.py` in step 2 — the
 installer already wrote it into `config.toml` (`[vault] project`), so the skills target the
 right vault automatically.
@@ -118,6 +123,12 @@ right vault automatically.
   `.claude/skills` and hook paths.
 - **Notes land in the wrong vault** — the skills pass `[vault] project` from `config.toml` to Basic
   Memory; make sure that name matches the one you used in `basic-memory project add`.
+- **A `.ai_memory/` appeared in a subdirectory** — `config.toml` is what marks the project root, so
+  moving or deleting it detaches memory from the project. Run `lts doctor`: it prints the root it
+  resolved, and lists stray sidecars (orphaned memory that `/sleep` will never read). Restore
+  `config.toml` at the root, merge anything worth keeping out of the stray `.ai_memory/stm/buffer.md`
+  into the root one, then delete the stray directory. `lts` refuses to create a sidecar outside a
+  configured root, so this cannot recur silently.
 - **`basic-memory project info <name>` fails with `set to cloud mode but no credentials`** — that
   error is misleading; it really means "no such project". Basic Memory registers projects under a
   **slug** (`LetTheAISleep` → `let-the-aisleep`) but reports the display name over MCP, and its CLI
@@ -154,6 +165,7 @@ right vault automatically.
 | `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
+| `lts doctor [--json]` | Check where memory lives: the resolved project root, and any stray sidecars. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `basic-memory project info <project>` | LTM counts (Entities/Relations/Isolated) and embedding status. |
 

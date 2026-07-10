@@ -104,3 +104,20 @@ def test_main_installs_into_target_project(tmp_path: Path):
     source_root = Path(inst.__file__).resolve().parent
     cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert str(source_root / "claude" / "hooks" / "session_start.py") in cmd
+
+
+def test_target_is_the_root_verbatim_even_under_an_existing_project(tmp_path: Path):
+    inst = _load_install()
+    parent = tmp_path / "monorepo"
+    parent.mkdir()
+    (parent / "config.toml").write_text('[vault]\nproject = "parent"\n', encoding="utf-8")
+    target = parent / "service"
+    target.mkdir()
+
+    assert inst.main(["--project", "service-mem", "--target", str(target)]) == 0
+
+    # --target must not walk up and attach memory to the ancestor project
+    assert (target / "config.toml").exists()
+    assert (target / ".ai_memory" / "stm").is_dir()
+    assert 'project = "service-mem"' in (target / "config.toml").read_text(encoding="utf-8")
+    assert 'project = "parent"' in (parent / "config.toml").read_text(encoding="utf-8")

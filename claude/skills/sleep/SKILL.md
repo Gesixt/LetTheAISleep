@@ -9,13 +9,20 @@ Goal: move everything worth keeping from this session into long-term notes with 
 
 **Target the right vault.** Read `[vault] project` from this project's `config.toml` and pass it as the `project` parameter to **every** Basic Memory tool call (`write_note`, `edit_note`, `read_note`, `search`, `build_context`). Without it the tools default to Basic Memory's `main` vault, not this project's.
 
+**Never type a sidecar path yourself.** Do not read or write `.ai_memory/...` directly — a
+relative path resolves against whatever directory your shell happens to be in, which creates an
+orphaned `.ai_memory/` in a subdirectory and silently splits memory in two. Every sidecar read and
+write below goes through `lts`, which resolves the project root from `config.toml`. If any `lts`
+command reports `no lts project at or above ...`, stop and tell the user — do not create anything.
+
 Run these steps in order.
 
 ## 1. Collect
 - Read the curated STM buffer:
   `lts stm read`
 - If a previous session left raw material, also account for it:
-  `lts pending has` → if `yes`, read the snapshots under `.ai_memory/pending_consolidation/` with your file tools.
+  `lts pending list` → prints the absolute path of each snapshot (nothing if there are none).
+  Read those paths with your file tools.
 - Add the significant remaining conversation context (exclude noise).
 
 ## 2. Extract (with preservation, never compress)
@@ -38,10 +45,15 @@ Use the project name from `config.toml` `[vault] project` (omit `-p` to use the 
 Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each, confirm it appears in a written note. Append anything missing via `edit_note`. Only proceed once nothing is missing.
 
 ## 6. Free STM, update the anchor, then clear context
-- Update the anchor file `.ai_memory/anchor.json` with the latest `last_session`, `active_topics`, `active_notes` (the notes you just wrote/touched).
+- Update the anchor with the notes you just wrote/touched (repeat `--topic` / `--note` per item):
+  ```
+  lts anchor write --last-session "Session_<YYYY-MM-DD_HHMM>" \
+    --topic "..." --topic "..." \
+    --note "session-memory/Session_<YYYY-MM-DD_HHMM>" --note "knowledge-base/..."
+  ```
 - Clear the STM buffer **only after** the writes above succeeded:
   `lts stm clear`
-- If you consumed pending snapshots, delete them after a successful write.
+- If you consumed pending snapshots, drop them: `lts pending clear`
 - Then run `/compact` to clear context.
 
 If interrupted before step 6, leave the session note `status: pending` and do **not** clear STM — the next session's SessionStart hook will resume this.

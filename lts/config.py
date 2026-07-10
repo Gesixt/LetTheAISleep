@@ -14,9 +14,22 @@ DEFAULTS = {
 }
 
 
+class NotAnLtsProject(RuntimeError):
+    """Raised instead of silently creating a sidecar outside a configured project."""
+
+    def __init__(self, start: Path) -> None:
+        super().__init__(
+            f"no lts project at or above {start}. "
+            "The .ai_memory sidecar is only ever created next to a config.toml that has a "
+            "[vault] section. Run `install.py --target <project>` first, or pass "
+            "`--root <project-root>`."
+        )
+
+
 @dataclass(frozen=True)
 class Config:
     project_root: Path
+    configured: bool          # False when no lts config.toml was found: reads work, writes refuse
     vault_mode: str
     project: str
     vault_path: str | None
@@ -25,26 +38,50 @@ class Config:
     context_window: int
 
 
-def find_project_root(start: Path) -> Path:
-    """The lts project root is marked solely by `config.toml` (walking up from `start`).
+def is_lts_config(path: Path) -> bool:
+    """True for a config.toml that is *ours* — i.e. declares a `[vault]` table.
+
+    `config.toml` is a common filename (Hugo, Zola, mdBook, .cargo/, .streamlit/ …), so its
+    mere presence must not mark a project root; a foreign one would silently become the root.
+    """
+    if not path.is_file():
+        return False
+    try:
+        return "vault" in tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+
+
+def find_project_root(start: Path) -> Path | None:
+    """Nearest ancestor of `start` holding an lts `config.toml`, or None if there is none.
 
     We deliberately do NOT use `.git`: a project may not be a git repo at all, and a
     multi-repo project can have nested sub-repos (a service's own `.git`) that would be
-    the wrong root. If no `config.toml` is found, the start directory itself is the root
-    (this is the pre-install case — `install.py` writes `config.toml` there).
+    the wrong root. Returning None rather than falling back to `start` is what keeps a
+    stray `.ai_memory/` from sprouting in whatever directory we happened to be run from.
     """
     start = start.resolve()
     for candidate in (start, *start.parents):
-        if (candidate / "config.toml").exists():
+        if is_lts_config(candidate / "config.toml"):
             return candidate
-    return start
+    return None
+
+
+def require_project(cfg: Config) -> None:
+    """Gate every write: refuse to touch the filesystem outside a real project root."""
+    if not cfg.configured:
+        raise NotAnLtsProject(cfg.project_root)
 
 
 def load_config(start: Path | None = None) -> Config:
-    root = find_project_root(Path(start) if start else Path.cwd())
+    start = Path(start) if start else Path.cwd()
+    root = find_project_root(start)
+    configured = root is not None
+    if root is None:
+        root = start.resolve()
     values = dict(DEFAULTS)
     cfg_file = root / "config.toml"
-    if cfg_file.exists():
+    if configured:
         data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
         vault = data.get("vault", {})
         sleep = data.get("sleep", {})
@@ -60,4 +97,4 @@ def load_config(start: Path | None = None) -> Config:
             values["pressure_force"] = float(sleep["pressure_force"])
         if "context_window" in sleep:
             values["context_window"] = int(sleep["context_window"])
-    return Config(project_root=root, **values)
+    return Config(project_root=root, configured=configured, **values)

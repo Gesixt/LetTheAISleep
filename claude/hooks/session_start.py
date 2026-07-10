@@ -17,10 +17,19 @@ _FORCE_MSG = (
     "finish sleeping this material into long-term notes, then continue."
 )
 
+_UNCONFIGURED_MSG = (
+    "## Memory is not configured here\n"
+    "No `config.toml` with a `[vault]` section was found at or above `{root}`, so nothing "
+    "will be captured this session and no `.ai_memory/` will be created. If this project "
+    "used to have memory, its `config.toml` was moved or deleted. Run `lts doctor` to see "
+    "where memory is expected to live, and tell the user."
+)
+
 
 def build_context(event: dict, *, root: Path | None = None) -> str:
     cfg = load_config(root or event.get("cwd"))
-    paths.ensure_sidecar(cfg)
+    if not cfg.configured:
+        return _UNCONFIGURED_MSG.format(root=cfg.project_root)
     pending_present = pending.has_pending(paths.pending_dir(cfg))
     stm_present = not stm.is_empty(paths.stm_file(cfg))
     if pending_present or stm_present:

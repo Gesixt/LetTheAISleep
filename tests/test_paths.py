@@ -1,10 +1,13 @@
+import pytest
+
 from pathlib import Path
-from lts.config import load_config
+from lts.config import NotAnLtsProject, load_config
 from lts import paths
+from tests.helpers import make_project
 
 
 def _cfg(tmp_path: Path):
-    return load_config(tmp_path)
+    return load_config(make_project(tmp_path))
 
 
 def test_sidecar_paths(tmp_path: Path):
@@ -26,3 +29,13 @@ def test_ensure_sidecar_creates_dirs(tmp_path: Path):
     paths.ensure_sidecar(cfg)
     assert (tmp_path / ".ai_memory" / "stm").is_dir()
     assert (tmp_path / ".ai_memory" / "pending_consolidation").is_dir()
+
+
+def test_ensure_sidecar_refuses_outside_a_project(tmp_path: Path):
+    # the bug this guards: a lost/moved config.toml used to make .ai_memory sprout
+    # in whatever directory we happened to run from, silently splitting memory in two
+    stray = tmp_path / "some" / "subdir"
+    stray.mkdir(parents=True)
+    with pytest.raises(NotAnLtsProject):
+        paths.ensure_sidecar(load_config(stray))
+    assert not (stray / ".ai_memory").exists()

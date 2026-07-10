@@ -11,8 +11,11 @@ Goal: report the state of both memory tiers in one place, and flag anything that
 Run:
 ```
 lts status
+lts doctor
 ```
-This prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
+`lts status` prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
+
+`lts doctor` prints which project root resolved and whether any **stray sidecars** exist — `.ai_memory/` directories in subdirectories, holding memory that `/sleep` will never read. It exits non-zero when something is wrong. If it reports a stray sidecar or an unconfigured root, say so prominently: the user's `config.toml` was probably moved or deleted, and memory is being split in two.
 
 ## 2. LTM metrics (Basic Memory)
 Take the project name from the `lts status` output above. Do not go hunting for `config.toml`.
@@ -36,6 +39,7 @@ From that dashboard report:
 
 ## 3. Present a combined dashboard and flag actions
 Summarize both tiers together. Raise a clear flag when:
+- **`lts doctor` exits non-zero** → memory is misplaced. Report the stray path and stop before writing anything new.
 - **Sleep debt > 0** or **context pressure is `force`** → recommend running `/sleep` now.
 - **Embedding Status is not "Up to date"** → recommend `basic-memory reindex --embeddings -p <project>` so `/recall` semantic search is complete.
 - **Isolated (orphans) is high** → suggest linking those notes during the next `/sleep`.

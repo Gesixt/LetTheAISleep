@@ -3,15 +3,14 @@ from pathlib import Path
 
 from lts import anchor, paths, pending, status, stm
 from lts.config import load_config
+from tests.helpers import make_project
 
 
 def _cfg(tmp_path: Path):
-    (tmp_path / ".git").mkdir(exist_ok=True)
-    return load_config(tmp_path)
+    return load_config(make_project(tmp_path))
 
 
 def test_collect_reports_project(tmp_path: Path):
-    (tmp_path / ".git").mkdir(exist_ok=True)
     (tmp_path / "config.toml").write_text('[vault]\nproject = "myproject"\n', encoding="utf-8")
     cfg = load_config(tmp_path)
     m = status.collect(cfg)
@@ -42,8 +41,7 @@ def test_collect_stm_and_pending(tmp_path: Path):
 
 
 def test_collect_pressure(tmp_path: Path):
-    (tmp_path / ".git").mkdir(exist_ok=True)
-    (tmp_path / "config.toml").write_text("[sleep]\ncontext_window = 1000\n", encoding="utf-8")
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
     cfg = load_config(tmp_path)
     t = tmp_path / "t.jsonl"
     t.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant",
