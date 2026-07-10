@@ -27,7 +27,7 @@ lts digest
 - If any vault note contains git conflict markers (`<<<<<<<`), **stop**. Report the file and let the
   user resolve it. Consolidating a half-merged note produces confident nonsense.
 
-Never run `git pull`, `git commit` or `git push` yourself. Publishing memory is the user's decision.
+Never run `git fetch`, `git pull`, `git commit` or `git push` yourself. Publishing memory is the user's decision.
 
 ## 1. Collect
 - Read the curated STM buffer:
@@ -86,11 +86,14 @@ Use the project name from `config.toml` `[vault] project` (omit `-p` to use the 
 Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each, confirm it appears in a written note. Append anything missing via `edit_note`. Only proceed once nothing is missing.
 
 ## 6. Free STM, update the anchor, then clear context
-- Update the anchor with the notes you just wrote/touched (repeat `--topic` / `--note` per item):
+- Update the anchor with the notes you just wrote/touched (repeat `--topic` / `--note` per item).
+  Use the **exact `title` and `directory` from Step 3** — do not retype the flat `Session_<date>` form,
+  or in team mode the anchor will point at a note that does not exist (the author segment is missing)
+  and the anchor → session-note link breaks:
   ```
-  lts anchor write --last-session "Session_<YYYY-MM-DD_HHMM>" \
+  lts anchor write --last-session "<title from Step 3>" \
     --topic "..." --topic "..." \
-    --note "session-memory/Session_<YYYY-MM-DD_HHMM>" --note "knowledge-base/..."
+    --note "<directory from Step 3>/<title from Step 3>" --note "knowledge-base/..."
   ```
 - Clear the STM buffer **only after** the writes above succeeded:
   `lts stm clear`
