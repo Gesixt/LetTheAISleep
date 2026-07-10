@@ -46,6 +46,11 @@ def _from_git(vault: Path, since: str) -> dict[str, list[str]]:
         for rel in files:
             if not rel.endswith(".md"):
                 continue
+            # `git log --name-only` lists deleted paths too, and a note that no longer
+            # exists cannot be read - keep this in step with `_from_mtime`, which only
+            # ever sees existing files.
+            if not (vault / rel).is_file():
+                continue
             authors = changes.setdefault(rel, [])
             if author not in authors:
                 authors.append(author)

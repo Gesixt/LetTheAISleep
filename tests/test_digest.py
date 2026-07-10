@@ -24,6 +24,16 @@ def _commit(repo: Path, rel: str, author: str, email: str) -> None:
     )
 
 
+def _delete(repo: Path, rel: str, author: str, email: str) -> None:
+    _git(repo, "rm", "-q", rel)
+    _git(
+        repo,
+        "-c", f"user.name={author}", "-c", f"user.email={email}",
+        "-c", "commit.gpgsign=false",
+        "commit", "-m", f"remove {rel}", "--author", f"{author} <{email}>",
+    )
+
+
 def _project(tmp_path: Path, *, anchor_at: str | None = "2020-01-01 00:00") -> Path:
     make_project(tmp_path)
     cfg = load_config(tmp_path)
@@ -122,6 +132,19 @@ def test_mtime_fallback_respects_the_cutoff(tmp_path: Path):
     report = digest.collect(load_config(tmp_path))
     assert report["empty"] is True
     assert digest.render(report) == ""
+
+
+def test_git_source_omits_a_note_deleted_within_the_window(tmp_path: Path):
+    _project(tmp_path)
+    vault = _git_vault(tmp_path)
+    _commit(vault, "knowledge-base/Draft.md", "Petr Ivanov", "p@example.com")
+    _delete(vault, "knowledge-base/Draft.md", "Petr Ivanov", "p@example.com")
+
+    report = digest.collect(load_config(tmp_path))
+    assert [n["note"] for n in report["knowledge_base"]] == []
+
+    text = digest.render(report)
+    assert "Draft" not in text
 
 
 def test_explicit_since_overrides_the_anchor(tmp_path: Path):
