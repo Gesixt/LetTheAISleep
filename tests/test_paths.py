@@ -39,3 +39,24 @@ def test_ensure_sidecar_refuses_outside_a_project(tmp_path: Path):
     with pytest.raises(NotAnLtsProject):
         paths.ensure_sidecar(load_config(stray))
     assert not (stray / ".ai_memory").exists()
+
+
+def test_vault_root_defaults_beside_the_project(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    assert paths.vault_root(cfg) == tmp_path / ".ai_vault"
+
+
+def test_vault_root_honours_explicit_path(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[vault]\nproject = "p"\npath = "/srv/shared-vault"\n', encoding="utf-8"
+    )
+    cfg = load_config(tmp_path)
+    assert paths.vault_root(cfg) == Path("/srv/shared-vault")
+
+
+def test_vault_root_expands_user(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[vault]\nproject = "p"\npath = "~/vaults/mine"\n', encoding="utf-8"
+    )
+    cfg = load_config(tmp_path)
+    assert paths.vault_root(cfg) == Path.home() / "vaults" / "mine"
