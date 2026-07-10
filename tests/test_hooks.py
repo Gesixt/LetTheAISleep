@@ -248,6 +248,27 @@ def test_session_start_appends_the_digest_on_the_clean_path(tmp_path: Path):
     assert "Cart Service (Petr Ivanov)" in text   # and so is the teammate's work
 
 
+def test_session_start_keeps_the_anchor_when_the_digest_blows_up(tmp_path: Path):
+    # A dangling *.md symlink makes the mtime scan's note.stat() raise. The anchor must
+    # still render; the digest degrades to nothing rather than dropping everything.
+    make_project(tmp_path)
+    from lts.config import load_config
+    from lts import anchor, paths
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(
+        paths.anchor_file(cfg), updated="2020-01-01 00:00",
+        last_session="[[S]]", active_topics=["t"], active_notes=["[[N1]]"],
+    )
+    vault = tmp_path / ".ai_vault"
+    (vault / "knowledge-base").mkdir(parents=True)
+    (vault / "knowledge-base" / "Dangling.md").symlink_to(vault / "does-not-exist.md")
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "[[N1]]" in text
+
+
 def test_session_start_suppresses_the_digest_while_a_sleep_is_owed(tmp_path: Path):
     make_project(tmp_path)
     from lts.config import load_config

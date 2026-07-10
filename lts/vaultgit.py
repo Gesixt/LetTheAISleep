@@ -30,7 +30,14 @@ def _run(vault: Path, *args: str) -> str | None:
 
 
 def is_git_repo(vault: Path) -> bool:
-    return _run(vault, "rev-parse", "--git-dir") is not None
+    # A bare `rev-parse --git-dir` succeeds from ANY subdir of a git repo, so the default
+    # `<project_root>/.ai_vault` inside a code repo would be mistaken for a vault repo and the
+    # digest would report the enclosing repo's source changes. Require the vault to be the
+    # work-tree root itself (the team-mode case: a separate clone with its own inner `.git`).
+    top = _run(vault, "rev-parse", "--show-toplevel")
+    if top is None:
+        return False
+    return Path(top.strip()).resolve() == vault.resolve()
 
 
 def local_identity(vault: Path) -> str | None:

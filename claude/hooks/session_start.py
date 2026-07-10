@@ -36,9 +36,15 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
         # One demand at a time: finishing the sleep comes before reading anyone else's notes.
         return _FORCE_MSG
 
+    # The digest scans the vault (e.g. note.stat()), which can raise on a dangling symlink or
+    # a mid-scan race. That must never suppress the anchor, so degrade the digest to "".
+    try:
+        digest_block = digest.render(digest.collect(cfg))
+    except Exception:
+        digest_block = ""
     blocks = [
         anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))),
-        digest.render(digest.collect(cfg)),
+        digest_block,
     ]
     return "\n\n".join(b for b in blocks if b)
 

@@ -45,6 +45,32 @@ def test_missing_directory_is_not_a_repo(tmp_path: Path):
     assert vaultgit.is_git_repo(tmp_path / "nope") is False
 
 
+def test_plain_dir_nested_in_a_git_repo_is_not_a_vault_repo(tmp_path: Path):
+    # The default vault lives at <project_root>/.ai_vault, and the project root is
+    # normally itself a git repo. A bare `rev-parse --git-dir` succeeds from any nested
+    # subdir, which would make the digest read the ENCLOSING code repo as if it were vault
+    # memory. `.ai_vault` here is a plain directory, not its own clone.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _git(proj, "init", "-q", "-b", "main")
+    _git(proj, "config", "user.name", "Dmitry Mitin")
+    _git(proj, "config", "user.email", "d@example.com")
+
+    nested = proj / ".ai_vault"
+    nested.mkdir()
+    assert vaultgit.is_git_repo(nested) is False
+
+    # An uncommitted edit to a source file in the enclosing repo must not leak into the
+    # digest. `is_git_repo` is the gate: while it stays False the digest takes the mtime
+    # path and never runs status/log against the parent code repo.
+    (proj / "source.py").write_text("x = 1\n", encoding="utf-8")
+    assert vaultgit.is_git_repo(nested) is False
+
+
+def test_a_vault_that_is_its_own_repo_is_recognized(tmp_path: Path):
+    assert vaultgit.is_git_repo(_vault(tmp_path)) is True
+
+
 def test_local_identity(tmp_path: Path):
     repo = _vault(tmp_path)
     assert vaultgit.local_identity(repo) == "Dmitry Mitin"
