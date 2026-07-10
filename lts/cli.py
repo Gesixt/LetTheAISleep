@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import anchor, doctor, paths, pending, status, stm, transcript
+from lts import anchor, digest, doctor, naming, paths, pending, status, stm, transcript
 from lts.config import NotAnLtsProject, load_config, require_project
 
 
@@ -62,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor = sub.add_parser("doctor")
     _add_root(p_doctor)
     p_doctor.add_argument("--json", action="store_true")
+
+    p_digest = sub.add_parser("digest")
+    _add_root(p_digest)
+    p_digest.add_argument("--since", default=None)
+    p_digest.add_argument("--json", action="store_true")
+
+    p_session = sub.add_parser("session-name")
+    _add_root(p_session)
+    p_session.add_argument("--at", default=None, help='timestamp "YYYY-MM-DD HH:MM" (default: now)')
+    p_session.add_argument("--json", action="store_true")
 
     return parser
 
@@ -127,6 +137,21 @@ def _run(args) -> int:
         else:
             print(doctor.render(report))
         return 0 if report["ok"] else 1
+    elif args.cmd == "digest":
+        report = digest.collect(cfg, since=args.since)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            text = digest.render(report)
+            if text:
+                print(text)
+    elif args.cmd == "session-name":
+        when = datetime.strptime(args.at, "%Y-%m-%d %H:%M") if args.at else None
+        title = naming.session_note_name(cfg, when)
+        if args.json:
+            print(json.dumps({"title": title, "directory": naming.session_directory(cfg)}))
+        else:
+            print(title)
     return 0
 
 

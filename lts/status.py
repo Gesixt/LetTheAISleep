@@ -42,6 +42,8 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
     return {
         "project": cfg.project,
         "project_slug": slugify_project(cfg.project),
+        "author": cfg.author,
+        "vault_path": str(paths.vault_root(cfg)),
         "stm": {"lines": stm_lines, "bytes": stm_bytes, "approx_tokens": stm_tokens},
         "pending": {"snapshots": len(snaps), "bytes": pending_bytes},
         "pressure": pressure,
@@ -63,6 +65,10 @@ def render(metrics: dict) -> str:
     a = metrics["anchor"]
     lines = [
         _project_line(metrics),
+    ]
+    if metrics.get("author"):
+        lines.append(f"  Author:       {metrics['author']} (team mode)")
+    lines += [
         f"  STM buffer:   {s['lines']} entries, {s['bytes']} B (~{s['approx_tokens']} tok)",
         f"  Sleep debt:   {p['snapshots']} pending snapshot(s), {p['bytes']} B"
         + ("  ⚠ un-slept material" if p["snapshots"] else ""),

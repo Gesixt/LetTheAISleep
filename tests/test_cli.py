@@ -136,3 +136,43 @@ def test_doctor_json_on_healthy_project(tmp_path: Path, capsys):
     assert main(["doctor", "--root", str(tmp_path), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["ok"] is True and data["configured"] is True
+
+
+def test_session_name_single_developer(tmp_path: Path, capsys):
+    make_project(tmp_path)
+    assert main(["session-name", "--root", str(tmp_path), "--at", "2026-07-10 10:02"]) == 0
+    assert capsys.readouterr().out.strip() == "Session_2026-07-10_1002"
+
+
+def test_session_name_team_mode_json(tmp_path: Path, capsys):
+    make_project(tmp_path, 'author = "dmitrii"\n')
+    assert main([
+        "session-name", "--root", str(tmp_path), "--at", "2026-07-10 10:02", "--json"
+    ]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data == {
+        "title": "Session_dmitrii_2026-07-10_1002",
+        "directory": "session-memory/dmitrii",
+    }
+
+
+def test_digest_is_silent_without_a_vault(tmp_path: Path, capsys):
+    make_project(tmp_path)
+    assert main(["digest", "--root", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_digest_json_reports_unavailability(tmp_path: Path, capsys):
+    make_project(tmp_path)
+    assert main(["digest", "--root", str(tmp_path), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["available"] is False
+    assert data["empty"] is True
+
+
+def test_status_json_carries_author_and_vault_path(tmp_path: Path, capsys):
+    make_project(tmp_path, 'author = "dmitrii"\n')
+    main(["status", "--root", str(tmp_path), "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["author"] == "dmitrii"
+    assert data["vault_path"].endswith(".ai_vault")
