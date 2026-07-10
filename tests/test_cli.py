@@ -19,7 +19,7 @@ def test_status_json(tmp_path: Path, capsys):
     (tmp_path / ".git").mkdir()
     main(["status", "--root", str(tmp_path), "--json"])
     data = json.loads(capsys.readouterr().out)
-    assert set(data) >= {"project", "stm", "pending", "pressure", "anchor"}
+    assert set(data) >= {"project", "project_slug", "stm", "pending", "pressure", "anchor"}
     assert data["pressure"] is None
 
 

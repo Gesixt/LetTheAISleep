@@ -15,12 +15,16 @@ lts status
 This prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
 
 ## 2. LTM metrics (Basic Memory)
-Take the project name from the `lts status` output above — the `Project:` line (or the `project`
-field with `--json`). That value comes straight from this project's `config.toml`, so do not go
-hunting for the file yourself. Then run:
+Take the project name from the `lts status` output above. Do not go hunting for `config.toml`.
+
+**Use the slug.** The Basic Memory CLI looks projects up by their slug, not the display name —
+`lts status` prints it as `Basic Memory CLI name: <slug>` (or the `project_slug` field with
+`--json`). Passing the display name (e.g. `LetTheAISleep`) makes the CLI fail with a misleading
+`set to cloud mode but no credentials` error. So run:
 ```
-basic-memory project info <project>
+basic-memory project info <project_slug>
 ```
+(MCP tool calls such as `write_note` still take the plain `project` name — only the CLI needs the slug.)
 From that dashboard report:
 - **Entities** — number of notes
 - **Relations** — number of `[[links]]`

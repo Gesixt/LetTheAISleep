@@ -12,11 +12,11 @@ def _cfg(tmp_path: Path):
 
 def test_collect_reports_project(tmp_path: Path):
     (tmp_path / ".git").mkdir(exist_ok=True)
-    (tmp_path / "config.toml").write_text('[vault]\nproject = "netprint"\n', encoding="utf-8")
+    (tmp_path / "config.toml").write_text('[vault]\nproject = "myproject"\n', encoding="utf-8")
     cfg = load_config(tmp_path)
     m = status.collect(cfg)
-    assert m["project"] == "netprint"
-    assert "netprint" in status.render(m)
+    assert m["project"] == "myproject"
+    assert "myproject" in status.render(m)
 
 
 def test_collect_empty(tmp_path: Path):

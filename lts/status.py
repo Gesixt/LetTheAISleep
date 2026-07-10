@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lts import anchor, paths, pending, stm, transcript
+from lts.slug import slugify_project
 from lts.config import Config
 
 
@@ -40,6 +41,7 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
 
     return {
         "project": cfg.project,
+        "project_slug": slugify_project(cfg.project),
         "stm": {"lines": stm_lines, "bytes": stm_bytes, "approx_tokens": stm_tokens},
         "pending": {"snapshots": len(snaps), "bytes": pending_bytes},
         "pressure": pressure,
@@ -47,12 +49,20 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
     }
 
 
+def _project_line(metrics: dict) -> str:
+    name = metrics.get("project", "")
+    slug = metrics.get("project_slug", "")
+    # the Basic Memory CLI only accepts the slug; surface it when it differs
+    suffix = f" (Basic Memory CLI name: {slug})" if slug and slug != name else ""
+    return f"Memory status — project {name}{suffix}"
+
+
 def render(metrics: dict) -> str:
     s = metrics["stm"]
     p = metrics["pending"]
     a = metrics["anchor"]
     lines = [
-        f"Memory status — project {metrics.get('project', '')}",
+        _project_line(metrics),
         f"  STM buffer:   {s['lines']} entries, {s['bytes']} B (~{s['approx_tokens']} tok)",
         f"  Sleep debt:   {p['snapshots']} pending snapshot(s), {p['bytes']} B"
         + ("  ⚠ un-slept material" if p["snapshots"] else ""),

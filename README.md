@@ -63,7 +63,7 @@ Then, **for each project** you want memory in, attach it (this writes `config.to
 ```bash
 # 2. attach memory to a target project and set its Basic Memory project name
 python ~/tools/LetTheAISleep/install.py --target /path/to/your/project --project <project-name>
-#   e.g.  python ~/tools/LetTheAISleep/install.py --target ~/code/netprint --project netprint
+#   e.g.  python ~/tools/LetTheAISleep/install.py --target ~/code/myproject --project myproject
 #   (omit --target to use the current directory; omit --project to be prompted)
 ```
 
@@ -74,9 +74,9 @@ cd /path/to/your/project
 
 # 3. create a Basic Memory project (the vault) and build its vector index
 basic-memory project add <project-name> <vault-path>
-#   e.g.  basic-memory project add netprint ~/code/netprint/.ai_vault
+#   e.g.  basic-memory project add myproject ~/code/myproject/.ai_vault
 basic-memory reindex --embeddings -p <project-name>
-#   e.g.  basic-memory reindex --embeddings -p netprint
+#   e.g.  basic-memory reindex --embeddings -p myproject
 
 # 4. REGISTER the Basic Memory MCP server with Claude Code (required — the skills call its tools)
 claude mcp add basic-memory -- basic-memory mcp
@@ -118,6 +118,12 @@ right vault automatically.
   `.claude/skills` and hook paths.
 - **Notes land in the wrong vault** — the skills pass `[vault] project` from `config.toml` to Basic
   Memory; make sure that name matches the one you used in `basic-memory project add`.
+- **`basic-memory project info <name>` fails with `set to cloud mode but no credentials`** — that
+  error is misleading; it really means "no such project". Basic Memory registers projects under a
+  **slug** (`LetTheAISleep` → `let-the-aisleep`) but reports the display name over MCP, and its CLI
+  only accepts the slug. `lts status` prints both (`Basic Memory CLI name: …`, or `project_slug` in
+  `--json`), and `/memory-status` uses the slug automatically. MCP calls like `write_note` still
+  take the plain name. Simplest prevention: name Basic Memory projects in lowercase.
 - **Wrong "context filling" warnings** — context pressure is measured against
   `[sleep] context_window` in `config.toml` (default `1000000`, for Opus's 1M window). If you run a
   smaller-window model, set your own value, e.g. `context_window = 200000` for Sonnet — otherwise
