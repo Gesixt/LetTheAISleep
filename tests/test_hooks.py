@@ -210,3 +210,53 @@ def test_stop_resolves_project_from_event_cwd(tmp_path: Path):
     from lts.config import load_config
     from lts import paths, stm
     assert "hello cwd" in stm.read(paths.stm_file(load_config(tmp_path)))
+
+
+def _vault_with_a_teammate_note(root: Path) -> None:
+    import subprocess
+    vault = root / ".ai_vault"
+    (vault / "knowledge-base").mkdir(parents=True)
+    (vault / "knowledge-base" / "Cart Service.md").write_text("cart", encoding="utf-8")
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(vault), *args], check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "Dmitry Mitin")
+    git("config", "user.email", "d@example.com")
+    git("add", "knowledge-base/Cart Service.md")
+    git("-c", "user.name=Petr Ivanov", "-c", "user.email=p@example.com",
+        "-c", "commit.gpgsign=false",
+        "commit", "-m", "cart", "--author", "Petr Ivanov <p@example.com>")
+
+
+def test_session_start_appends_the_digest_on_the_clean_path(tmp_path: Path):
+    make_project(tmp_path)
+    from lts.config import load_config
+    from lts import anchor, paths
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(
+        paths.anchor_file(cfg), updated="2020-01-01 00:00",
+        last_session="[[S]]", active_topics=["t"], active_notes=["[[N1]]"],
+    )
+    _vault_with_a_teammate_note(tmp_path)
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "[[N1]]" in text                       # the anchor is still there
+    assert "Cart Service (Petr Ivanov)" in text   # and so is the teammate's work
+
+
+def test_session_start_suppresses_the_digest_while_a_sleep_is_owed(tmp_path: Path):
+    make_project(tmp_path)
+    from lts.config import load_config
+    from lts import paths, pending
+    cfg = load_config(tmp_path)
+    pending.dump_snapshot(paths.pending_dir(cfg), "s", "raw")
+    _vault_with_a_teammate_note(tmp_path)
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "finish sleeping" in text.lower()
+    assert "Cart Service" not in text             # one demand at a time

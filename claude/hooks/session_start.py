@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import anchor, paths, pending, stm
+from lts import anchor, digest, paths, pending, stm
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -33,8 +33,14 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     pending_present = pending.has_pending(paths.pending_dir(cfg))
     stm_present = not stm.is_empty(paths.stm_file(cfg))
     if pending_present or stm_present:
+        # One demand at a time: finishing the sleep comes before reading anyone else's notes.
         return _FORCE_MSG
-    return anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg)))
+
+    blocks = [
+        anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))),
+        digest.render(digest.collect(cfg)),
+    ]
+    return "\n\n".join(b for b in blocks if b)
 
 
 def run(event: dict, *, root: Path | None = None) -> dict:
