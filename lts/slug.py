@@ -1,9 +1,16 @@
 """Basic Memory slugifies project and folder names; mirror that rule.
 
 Basic Memory registers a project under a slug key (`LetTheAISleep` -> `let-the-aisleep`)
-while still reporting the original display name over MCP. Its CLI looks projects up by the
-slug, so `basic-memory project info LetTheAISleep` fails — with a misleading "cloud mode"
-error rather than "not found". Anything we hand to the CLI must be slugified first.
+while still reporting the original display name over MCP. Which form its CLI wants depends
+on the subcommand, so slugifying everything is wrong (checked against basic-memory 0.22.1):
+
+    basic-memory project info let-the-aisleep   works
+    basic-memory project info LetTheAISleep     fails, "set to cloud mode" (= no such project)
+    basic-memory reindex -p LetTheAISleep       works
+    basic-memory reindex -p let-the-aisleep     fails, "Project not found."
+
+MCP tool calls (`write_note`, `search`, ...) take the display name. So: slugify only for
+`project info`; hand every other caller `cfg.project` verbatim.
 """
 
 from __future__ import annotations

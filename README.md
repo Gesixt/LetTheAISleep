@@ -174,8 +174,9 @@ own are left alone; only the ones the clone ships are overwritten.
   | display (`LetTheAISleep`) | fails | works | works |
   | slug (`let-the-aisleep`) | works | fails | — |
 
-  `lts status` prints both (`Basic Memory CLI name: …`, or `project_slug` in `--json`), and the
-  skills already pass the right form to each. Simplest prevention: name Basic Memory projects in
+  `lts status` prints both forms next to the subcommand each belongs to
+  (`Basic Memory: reindex -p <name>  ·  project info <slug>`, or `project_slug` in `--json`),
+  and the skills already pass the right form to each. Simplest prevention: name Basic Memory projects in
   lowercase so both forms coincide.
 - **Wrong "context filling" warnings** — context pressure is measured against
   `[sleep] context_window` in `config.toml` (default `1000000`, for Opus's 1M window). If you run a

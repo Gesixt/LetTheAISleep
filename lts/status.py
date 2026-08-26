@@ -51,21 +51,30 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
     }
 
 
-def _project_line(metrics: dict) -> str:
+def _name_hint(metrics: dict) -> str | None:
+    """How to address this project on the Basic Memory CLI, per subcommand.
+
+    There is no single "CLI name": `basic-memory project info` resolves projects by their
+    **slug** and rejects the display name (with a misleading "cloud mode" error), while
+    `basic-memory reindex -p` wants the **display name** and rejects the slug with
+    "Project not found". Naming the wrong one sent readers straight into that error, so
+    spell out both commands. Nothing to say when the two forms coincide.
+    """
     name = metrics.get("project", "")
     slug = metrics.get("project_slug", "")
-    # the Basic Memory CLI only accepts the slug; surface it when it differs
-    suffix = f" (Basic Memory CLI name: {slug})" if slug and slug != name else ""
-    return f"Memory status — project {name}{suffix}"
+    if not slug or slug == name:
+        return None
+    return f"  Basic Memory: reindex -p {name}  ·  project info {slug}"
 
 
 def render(metrics: dict) -> str:
     s = metrics["stm"]
     p = metrics["pending"]
     a = metrics["anchor"]
-    lines = [
-        _project_line(metrics),
-    ]
+    lines = [f"Memory status — project {metrics.get('project', '')}"]
+    hint = _name_hint(metrics)
+    if hint:
+        lines.append(hint)
     if metrics.get("author"):
         lines.append(f"  Author:       {metrics['author']} (team mode)")
     lines += [

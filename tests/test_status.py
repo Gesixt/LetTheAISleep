@@ -87,3 +87,22 @@ def test_render_shows_author_only_in_team_mode(tmp_path: Path):
     solo = tmp_path / "solo"
     make_project(solo)
     assert "Author:" not in status.render(status.collect(load_config(solo)))
+
+
+def test_render_names_the_command_each_form_belongs_to(tmp_path: Path):
+    """The CLI takes the slug for `project info` and the display name for `reindex -p`.
+
+    Calling the slug "the Basic Memory CLI name" sent readers to `reindex -p <slug>`, which
+    fails with "Project not found" (verified against basic-memory 0.22.1).
+    """
+    (tmp_path / "config.toml").write_text('[vault]\nproject = "LetTheAISleep"\n', encoding="utf-8")
+    text = status.render(status.collect(load_config(tmp_path)))
+    assert "CLI name" not in text
+    assert "reindex -p LetTheAISleep" in text
+    assert "project info let-the-aisleep" in text
+
+
+def test_render_omits_the_name_hint_when_the_slug_is_the_name(tmp_path: Path):
+    (tmp_path / "config.toml").write_text('[vault]\nproject = "lowercase-name"\n', encoding="utf-8")
+    text = status.render(status.collect(load_config(tmp_path)))
+    assert "Basic Memory:" not in text

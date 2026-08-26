@@ -34,9 +34,10 @@ the clone has moved on. It exits non-zero when anything is stale.
 Take the project name from the `lts status` output above. Do not go hunting for `config.toml`.
 
 **Use the slug for this command.** `basic-memory project info` resolves projects only by their
-**slug**, not the display name. `lts status` prints it as `Basic Memory CLI name: <slug>` (or the
-`project_slug` field with `--json`). Passing the display name (e.g. `LetTheAISleep`) fails with a
-misleading `set to cloud mode but no credentials` error, which really means "no such project". Run:
+**slug**, not the display name. `lts status` prints both forms next to the subcommand each one
+belongs to (`Basic Memory: reindex -p <name>  ·  project info <slug>`), or the `project_slug`
+field with `--json`. Passing the display name (e.g. `LetTheAISleep`) fails with a misleading
+`set to cloud mode but no credentials` error, which really means "no such project". Run:
 ```
 basic-memory project info <project_slug>
 ```
