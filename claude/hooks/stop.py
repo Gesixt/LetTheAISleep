@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -30,7 +31,7 @@ def _capture_mark(cfg) -> dict:
     return {}
 
 
-def capture(event: dict, *, root: Path | None = None) -> int:
+def capture(event: dict, *, root: Path | None = None, now: datetime | None = None) -> int:
     """Automatically append any new user/assistant exchanges to the STM buffer.
 
     Deterministic (hook-driven): no model decision. A watermark records the last exchange
@@ -39,7 +40,8 @@ def capture(event: dict, *, root: Path | None = None) -> int:
 
     When `/sleep` has just armed the sleep flag, this turn *is* the sleep: its narration is
     discarded rather than written into the buffer it just emptied, and the sleep mark is
-    advanced so the `/compact` that follows has nothing left to snapshot.
+    advanced so the `/compact` that follows has nothing left to snapshot. That mark is the
+    instant this hook runs, not the last exchange in the file — see `watermark.mark_at`.
 
     Returns the number of newly captured exchanges (0 if there is no project here —
     we never create a sidecar outside a configured root).
@@ -52,9 +54,10 @@ def capture(event: dict, *, root: Path | None = None) -> int:
     transcript_path = Path(event.get("transcript_path", ""))
 
     if watermark.is_armed(paths.sleep_flag_file(cfg)):
-        here = watermark.mark_of(transcript_path)
+        here = watermark.mark_at(now)
         watermark.write_mark(paths.capture_mark_file(cfg), here)
         watermark.write_mark(paths.sleep_mark_file(cfg), here)
+        # Stop is the only hook that knows the turn has ended, so it owns disarming.
         watermark.disarm(paths.sleep_flag_file(cfg))
         log_note("stop.py", "sleep just finished; dropped this turn instead of refilling STM")
         return 0

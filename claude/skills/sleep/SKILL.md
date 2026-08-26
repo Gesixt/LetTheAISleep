@@ -106,7 +106,8 @@ Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each,
   This also places the **sleep mark** — the point in the transcript that consolidation reached.
   Everything behind it is now off the hooks' books: the Stop hook drops this turn instead of
   refilling the buffer you just emptied with the story of the sleep itself, and the `/compact`
-  below snapshots nothing. Never edit `sleep-mark.json` by hand.
+  below snapshots nothing — including the closing message you are about to write, and the
+  `/compact` command itself. Never edit `sleep-mark.json` by hand.
 - If you consumed pending snapshots, drop them: `lts pending clear`
 - In team mode, remind the user to commit and push the vault repository so teammates see this work.
   Do not do it for them.

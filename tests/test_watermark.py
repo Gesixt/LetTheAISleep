@@ -104,3 +104,34 @@ def test_render_exchanges_is_readable_text(tmp_path: Path):
     assert "[user] why PostgreSQL?" in text
     assert "900s TTL." in text
     assert "{" not in text  # prose, not raw JSONL
+
+
+def test_mark_at_records_an_instant_rather_than_a_position(tmp_path: Path):
+    from datetime import datetime, timezone
+    mark = watermark.mark_at(datetime(2026, 8, 26, 11, 2, 3, 928000, tzinfo=timezone.utc))
+    assert mark == {"timestamp": "2026-08-26T11:02:03.928Z"}
+
+
+def test_entries_after_an_instant_excludes_a_message_not_yet_flushed(tmp_path: Path):
+    """The Stop hook can read the transcript before the turn's last message is written to it.
+
+    A mark naming the last *flushed* exchange therefore sits one message short, and that
+    message leaks into the next snapshot. An instant covers it: Claude Code stamps a message
+    when it is produced, and the hook always runs after that.
+    """
+    from datetime import datetime, timezone
+    t = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z"),
+        _msg("assistant", "Consolidated.", "u2", "2026-08-26T11:02:03.815Z"),
+    ])
+    hook_ran_at = datetime(2026, 8, 26, 11, 2, 3, 928000, tzinfo=timezone.utc)
+
+    assert watermark.entries_after(t, watermark.mark_at(hook_ran_at)) == []
+
+    _transcript(t, [
+        _msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z"),
+        _msg("assistant", "Consolidated.", "u2", "2026-08-26T11:02:03.815Z"),
+        _msg("user", "next question", "u3", "2026-08-26T11:04:47.179Z"),
+    ])
+    later = watermark.entries_after(t, watermark.mark_at(hook_ran_at))
+    assert [e["uuid"] for e in later] == ["u3"]

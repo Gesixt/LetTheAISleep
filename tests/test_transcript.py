@@ -85,3 +85,45 @@ def test_read_exchanges_carries_the_entry_uuid_and_timestamp(tmp_path: Path):
     ex = transcript.read_exchanges(t)[0]
     assert ex["uuid"] == "u1"
     assert ex["timestamp"] == "2026-08-26T10:00:00Z"
+
+
+def _raw(path: Path, records: list[dict]) -> Path:
+    path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+    return path
+
+
+def _user(text: str, uuid: str, **extra) -> dict:
+    return {"type": "user", "uuid": uuid, "timestamp": "2026-08-26T11:00:00.000Z",
+            "message": {"role": "user", "content": text}, **extra}
+
+
+def test_read_exchanges_drops_slash_command_scaffolding(tmp_path: Path):
+    """`/compact` writes four user records; none of them is material worth remembering.
+
+    Left in, they land in the STM buffer and — worse — make PreCompact write a snapshot of
+    pure scaffolding right after a sleep, so SessionStart demands a sleep that is not owed.
+    """
+    t = _raw(tmp_path / "t.jsonl", [
+        _user("/compact", "c1"),
+        _user("<local-command-caveat>Caveat: the messages below…</local-command-caveat>",
+              "c2", isMeta=True),
+        _user("<command-name>/compact</command-name>\n<command-args></command-args>", "c3"),
+        _user("<local-command-stdout>Compacted</local-command-stdout>", "c4"),
+        _user("real question", "c5"),
+    ])
+    assert [e["uuid"] for e in transcript.read_exchanges(t)] == ["c5"]
+
+
+def test_read_exchanges_drops_the_compaction_summary(tmp_path: Path):
+    # The raw tail it summarises was already captured by the PreCompact snapshot.
+    t = _raw(tmp_path / "t.jsonl", [
+        _user("This session is being continued from a previous conversation…", "s1",
+              isCompactSummary=True, isVisibleInTranscriptOnly=True),
+        _user("real question", "s2"),
+    ])
+    assert [e["uuid"] for e in transcript.read_exchanges(t)] == ["s2"]
+
+
+def test_read_exchanges_keeps_a_slash_command_that_carries_an_instruction(tmp_path: Path):
+    t = _raw(tmp_path / "t.jsonl", [_user("/sleep and then explain the schema", "k1")])
+    assert [e["uuid"] for e in transcript.read_exchanges(t)] == ["k1"]

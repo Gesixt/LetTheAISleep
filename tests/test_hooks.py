@@ -108,26 +108,6 @@ def test_pre_compact_advances_the_mark_so_a_second_compact_does_not_duplicate(tm
     assert len(_snapshots(tmp_path)) == 1
 
 
-def test_pre_compact_consumes_the_sleep_flag_without_snapshotting(tmp_path: Path):
-    # Auto-compact can fire inside the sleep turn itself, before Stop gets to place the mark.
-    make_project(tmp_path)
-    from lts import paths, watermark
-    from lts.config import load_config
-    cfg = load_config(tmp_path)
-    paths.ensure_sidecar(cfg)
-    transcript = _transcript(tmp_path / "t.jsonl", [
-        _msg("user", "just consolidated this", "u1", "2026-08-26T10:00:00Z"),
-    ])
-    watermark.arm(paths.sleep_flag_file(cfg))
-
-    pre = _load("pre_compact", HOOKS / "pre_compact.py")
-    pre.run({"session_id": "s", "transcript_path": str(transcript)}, root=tmp_path)
-
-    assert _snapshots(tmp_path) == []
-    assert not watermark.is_armed(paths.sleep_flag_file(cfg))
-    assert watermark.read_mark(paths.sleep_mark_file(cfg))["uuid"] == "u1"
-
-
 def test_stop_drops_the_sleep_turn_when_the_sleep_flag_is_armed(tmp_path: Path):
     # `lts stm clear` runs mid-turn; without this the Stop hook immediately refills the
     # freshly emptied buffer with the sleep's own narration.
@@ -476,3 +456,97 @@ def test_session_start_says_exactly_what_is_owed(tmp_path: Path):
     assert "2 STM" in text
     assert "1 pending snapshot" in text
     assert "duplicate" in text.lower()   # tells the model not to re-check for one
+
+
+def test_stop_marks_the_sleep_at_the_hook_instant_not_the_last_flushed_message(tmp_path: Path):
+    """The sleep's own closing message must not leak into the next snapshot.
+
+    Observed in production 2026-08-26: Stop ran 113 ms after the closing message was
+    produced but before Claude Code had written it to the transcript, so the mark named the
+    message before it and `/compact` snapshotted the sleep's own summary (4485 B) — enough
+    for SessionStart to announce an unfinished sleep that was already done.
+    """
+    from datetime import datetime, timezone
+    from lts import paths, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    t = tmp_path / "t.jsonl"
+    _transcript(t, [_msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z")])
+    watermark.arm(paths.sleep_flag_file(cfg))
+    hook_ran_at = datetime(2026, 8, 26, 11, 2, 3, 928000, tzinfo=timezone.utc)
+
+    stop = _load("stop", HOOKS / "stop.py")
+    stop.capture({"transcript_path": str(t)}, root=tmp_path, now=hook_ran_at)
+
+    # …and only now does Claude Code flush the closing message it had already stamped.
+    _transcript(t, [
+        _msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z"),
+        _msg("assistant", "Consolidated.", "u2", "2026-08-26T11:02:03.815Z"),
+    ])
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path)
+    assert _snapshots(tmp_path) == []
+
+
+def test_pre_compact_leaves_the_sleep_flag_for_stop(tmp_path: Path):
+    """Only Stop knows the sleep turn has ended, so PreCompact must not consume the flag.
+
+    An auto-compact mid-sleep used to disarm it, and the rest of the sleep's narration then
+    went into the buffer the sleep had just emptied.
+    """
+    from datetime import datetime, timezone
+    from lts import paths, stm, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    t = tmp_path / "t.jsonl"
+    _transcript(t, [_msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z")])
+    watermark.arm(paths.sleep_flag_file(cfg))
+
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(t)},
+            root=tmp_path, now=datetime(2026, 8, 26, 11, 1, 30, tzinfo=timezone.utc))
+    assert _snapshots(tmp_path) == []
+    assert watermark.is_armed(paths.sleep_flag_file(cfg))
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == {
+        "timestamp": "2026-08-26T11:01:30.000Z"
+    }
+
+    _transcript(t, [
+        _msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z"),
+        _msg("assistant", "…rest of the sleep.", "u2", "2026-08-26T11:02:00.000Z"),
+    ])
+    stop = _load("stop", HOOKS / "stop.py")
+    stop.capture({"transcript_path": str(t)}, root=tmp_path,
+                 now=datetime(2026, 8, 26, 11, 2, 3, tzinfo=timezone.utc))
+    assert stm.is_empty(paths.stm_file(cfg))
+    assert not watermark.is_armed(paths.sleep_flag_file(cfg))
+
+
+def test_pre_compact_never_marks_past_material_it_did_not_snapshot(tmp_path: Path):
+    """The instant is right for a sleep (which discards on purpose) but wrong here.
+
+    A snapshot can only contain what was already flushed, so the mark must name the last
+    exchange it actually wrote out. Marking "now" would step over a message that was stamped
+    earlier but reached the file later, dropping it from memory altogether.
+    """
+    from datetime import datetime, timezone
+    make_project(tmp_path)
+    t = tmp_path / "t.jsonl"
+    _transcript(t, [_msg("user", "first", "u1", "2026-08-26T11:00:00.000Z")])
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    compact_ran_at = datetime(2026, 8, 26, 11, 5, 0, tzinfo=timezone.utc)
+    pre.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path, now=compact_ran_at)
+
+    _transcript(t, [
+        _msg("user", "first", "u1", "2026-08-26T11:00:00.000Z"),
+        _msg("assistant", "flushed late", "u2", "2026-08-26T11:04:59.000Z"),
+    ])
+    pre.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path, now=compact_ran_at)
+
+    snaps = _snapshots(tmp_path)
+    assert len(snaps) == 2
+    assert snaps[1].read_text(encoding="utf-8") == "[assistant] flushed late"

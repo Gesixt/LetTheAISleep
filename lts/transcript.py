@@ -1,9 +1,31 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 DEFAULT_WINDOW = 200_000
+
+# Claude Code writes its own bookkeeping into the transcript as `user` records. A single
+# `/compact` produces four of them (the bare command, an isMeta caveat, a <command-name>
+# block and the <local-command-stdout>), plus an isCompactSummary record afterwards. None of
+# it is material: left in, it fills the STM buffer and makes PreCompact snapshot pure
+# scaffolding right after a sleep — an "unfinished sleep" that was in fact finished.
+_SCAFFOLD_FLAGS = ("isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")
+_SCAFFOLD_PREFIXES = ("<command-name>", "<command-message>", "<local-command-stdout>",
+                      "<local-command-caveat>")
+# A slash command with no arguments carries no content of its own; one with arguments does.
+_BARE_SLASH_COMMAND = re.compile(r"^/[A-Za-z][\w:-]*$")
+
+
+def is_scaffolding(record: dict, role: str, text: str) -> bool:
+    """True when this transcript record is Claude Code's plumbing rather than the dialogue."""
+    if any(record.get(flag) for flag in _SCAFFOLD_FLAGS):
+        return True
+    if text.startswith(_SCAFFOLD_PREFIXES):
+        return True
+    return role == "user" and bool(_BARE_SLASH_COMMAND.match(text))
+
 
 
 def extract_text(content) -> str:
@@ -46,7 +68,7 @@ def read_exchanges(transcript_path: Path) -> list[dict]:
         msg = d.get("message") or {}
         role = msg.get("role") or d.get("type")
         text = extract_text(msg.get("content"))
-        if text:
+        if text and not is_scaffolding(d, role, text):
             out.append({
                 "role": role,
                 "text": text,

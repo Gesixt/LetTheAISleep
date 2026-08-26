@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -11,7 +12,7 @@ from lts.config import load_config
 from lts.hooklog import log_error, log_note
 
 
-def run(event: dict, *, root: Path | None = None) -> dict:
+def run(event: dict, *, root: Path | None = None, now: datetime | None = None) -> dict:
     """Snapshot the un-consolidated tail of the transcript, so a compact loses nothing.
 
     Only the tail: a Claude Code transcript is append-only across `--resume` and can span
@@ -28,11 +29,12 @@ def run(event: dict, *, root: Path | None = None) -> dict:
     mark_file = paths.sleep_mark_file(cfg)
 
     if watermark.is_armed(paths.sleep_flag_file(cfg)):
-        # A sleep finished in this very turn (auto-compact can beat the Stop hook to it):
-        # everything up to here is already consolidated.
-        watermark.write_mark(mark_file, watermark.mark_of(transcript_path))
-        watermark.disarm(paths.sleep_flag_file(cfg))
-        log_note("pre_compact.py", "sleep just finished; nothing to snapshot")
+        # A sleep is finishing in this very turn (auto-compact can beat the Stop hook to it):
+        # everything up to here is already consolidated. The flag stays armed — only Stop
+        # knows when the turn ends, and disarming here left the rest of the sleep's own
+        # narration to be captured into the buffer the sleep had just emptied.
+        watermark.write_mark(mark_file, watermark.mark_at(now))
+        log_note("pre_compact.py", "sleep in progress; nothing to snapshot")
         return {}
 
     new = watermark.entries_after(transcript_path, watermark.read_mark(mark_file))
@@ -46,7 +48,9 @@ def run(event: dict, *, root: Path | None = None) -> dict:
         watermark.render_exchanges(new),
     )
     # The tail is now captured (in a snapshot rather than in notes), so a second compact
-    # before the next sleep snapshots only what came after it.
+    # before the next sleep snapshots only what came after it. This mark names the last
+    # exchange actually written out, never the instant: a snapshot can only hold what was
+    # flushed, and an instant would step over a message that arrived in the file late.
     watermark.write_mark(mark_file, watermark.mark_of(transcript_path))
     return {}
 

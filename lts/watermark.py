@@ -13,11 +13,15 @@ Two marks use this module, both stored as `{"uuid", "timestamp", "count"}`:
 
 Resolution is deliberately layered: `uuid` is exact, `timestamp` survives a transcript that
 was rewritten under us, and `count` is the last resort for transcripts that carry neither.
+
+A mark placed at the *end of a turn* carries a timestamp only (`mark_at`), because the last
+message of the turn may not be in the file yet when the hook reads it.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lts.transcript import read_exchanges
@@ -34,6 +38,19 @@ def mark_of(transcript_path: Path) -> dict:
         "timestamp": last.get("timestamp"),
         "count": len(exchanges),
     }
+
+
+def mark_at(when: datetime | None = None) -> dict:
+    """A mark that is an instant, not a position — everything stamped at or before it is done.
+
+    `mark_of` cannot be used at the end of a turn: a hook can read the transcript before
+    Claude Code has written the turn's last message to it, so the mark lands one message
+    short and that message leaks into the next snapshot. An instant covers it, because a
+    message is stamped when it is produced and the hook always runs after that.
+    """
+    when = when or datetime.now(timezone.utc)
+    stamp = when.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+    return {"timestamp": stamp.replace("+00:00", "Z")}
 
 
 def entries_after(transcript_path: Path, mark: dict) -> list[dict]:

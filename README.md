@@ -30,6 +30,14 @@ everything worth keeping into linked long-term notes **without losing a single n
 > Everything behind the mark is in long-term notes and is never snapshotted again, so a `PreCompact`
 > that finds nothing new writes no snapshot, and `SessionStart` only demands a sleep that is really
 > owed. The same mark keeps the sleep's own narration out of the buffer it just emptied.
+>
+> The mark a hook places at the end of a turn is an **instant**, not a message id: Claude Code
+> can write the turn's last message to the transcript *after* the hook has read it, so a mark
+> naming the last message in the file lands one short — and that message (the sleep's own
+> closing summary) leaked into the next snapshot. A timestamp covers it, because a message is
+> stamped when it is produced. Claude Code's own bookkeeping records — the four `user` entries
+> a `/compact` writes, and the compaction summary — are filtered out of the transcript
+> entirely, so they reach neither the STM buffer nor a snapshot.
 
 > **Semantic search note:** Basic Memory serves full-text and graph links immediately on write,
 > but vector embeddings are rebuilt by `basic-memory reindex --embeddings -p <project>` (not on
