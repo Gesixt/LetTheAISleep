@@ -8,39 +8,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from lts import naming, paths
+from lts import naming, paths, sync
 from lts.config import load_config
 from lts.naming import InvalidAuthor
 from lts.slug import slugify_project
 
-HOOK_EVENTS = {
-    "SessionStart": "session_start.py",
-    "PreCompact": "pre_compact.py",
-    "UserPromptSubmit": "user_prompt_submit.py",
-    "Stop": "stop.py",
-}
-
-
-def render_hook_settings(repo_root: Path) -> dict:
-    hooks_dir = repo_root / "claude" / "hooks"
-    hooks: dict = {}
-    for event, script in HOOK_EVENTS.items():
-        hooks[event] = [
-            {
-                "hooks": [
-                    {"type": "command", "command": f'python3 "{hooks_dir / script}"'}
-                ]
-            }
-        ]
-    return {"hooks": hooks}
-
-
-def merge_settings(existing: dict, hooks: dict) -> dict:
-    merged = dict(existing)
-    merged_hooks = dict(existing.get("hooks", {}))
-    merged_hooks.update(hooks["hooks"])
-    merged["hooks"] = merged_hooks
-    return merged
+# The copies an install lays down are owned by `lts.sync`, so `lts update` can refresh them
+# later without re-running this script. Re-exported here: install.py is the documented entry
+# point and its callers address these names directly.
+HOOK_EVENTS = sync.HOOK_EVENTS
+render_hook_settings = sync.render_hook_settings
+merge_settings = sync.merge_settings
 
 
 def set_config_project(toml_text: str, project: str) -> str:
@@ -133,40 +111,10 @@ def resolve_author(args: argparse.Namespace, existing: str | None) -> str | None
     return naming.validate_author(entered)
 
 
-_MEM_START = "<!-- lts:memory-instructions:start -->"
-_MEM_END = "<!-- lts:memory-instructions:end -->"
-
-
-def memory_instruction_block() -> str:
-    return f"""{_MEM_START}
-## Memory (Let The AI Sleep)
-
-This project has hybrid memory via the `lts` CLI + the Basic Memory MCP. Use it proactively —
-do not let findings evaporate:
-
-- **STM fills automatically.** A `Stop` hook captures each exchange into the short-term buffer
-  after every turn — you do not need to remember to record things. (To add a deliberate highlight
-  you may still `lts stm append --text "..."`, but it is optional.)
-- **Sleep at the end of a chapter.** When a task or investigation wraps up (or context is
-  filling), run the `/sleep` skill to consolidate the STM buffer + the conversation into linked
-  long-term notes; it then clears STM. Offer `/sleep` before the user moves on.
-- **Recall before re-deriving.** When a question touches earlier work, use `/recall` first.
-- **Check load** any time with `/memory-status`.
-
-The Basic Memory project name is in `config.toml` (`[vault] project`); the skills pass it to
-Basic Memory automatically.
-{_MEM_END}"""
-
-
-def upsert_memory_instructions(existing_text: str) -> str:
-    """Insert or refresh the memory-instructions block (between markers) without duplicating it."""
-    block = memory_instruction_block()
-    if _MEM_START in existing_text and _MEM_END in existing_text:
-        start = existing_text.index(_MEM_START)
-        end = existing_text.index(_MEM_END) + len(_MEM_END)
-        return existing_text[:start] + block + existing_text[end:]
-    sep = "" if existing_text == "" else ("\n" if existing_text.endswith("\n") else "\n\n")
-    return existing_text + sep + block + "\n"
+_MEM_START = sync._MEM_START
+_MEM_END = sync._MEM_END
+memory_instruction_block = sync.memory_instruction_block
+upsert_memory_instructions = sync.upsert_memory_instructions
 
 
 def basic_memory_available() -> bool:
@@ -242,29 +190,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n[!] no vault at {vault}. In team mode, clone it before use:\n"
               f"    git clone <vault-repo> {vault}")
 
-    # 3. .claude/settings.json hooks in the target — commands point back at the SOURCE scripts
-    claude_dir = target_root / ".claude"
-    claude_dir.mkdir(exist_ok=True)
-    settings_file = claude_dir / "settings.json"
-    existing = json.loads(settings_file.read_text(encoding="utf-8")) if settings_file.exists() else {}
-    settings = merge_settings(existing, render_hook_settings(source_root))
-    settings_file.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    print(f"wrote hooks into {settings_file}")
-
-    # 4. skills copied from the SOURCE into the target's .claude/skills
-    skills_src = source_root / "claude" / "skills"
-    skills_dst = claude_dir / "skills"
-    skills_dst.mkdir(exist_ok=True)
-    if skills_src.exists():
-        for skill in skills_src.iterdir():
-            shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
-    print(f"installed skills into {skills_dst}")
-
-    # 4b. CLAUDE.md memory instructions in the target (so Claude captures memory proactively)
-    claude_md = target_root / "CLAUDE.md"
-    existing_md = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
-    claude_md.write_text(upsert_memory_instructions(existing_md), encoding="utf-8")
-    print(f"memory instructions written into {claude_md}")
+    # 3. the copies: hook wiring in .claude/settings.json, the skills, and the CLAUDE.md
+    #    memory block. `lts update` refreshes exactly these later, from the same code.
+    print(sync.render(sync.sync(source_root, cfg)))
 
     # 5. Basic Memory next steps (project name already written to config.toml)
     if not basic_memory_available():

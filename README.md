@@ -109,6 +109,34 @@ right vault automatically.
 > Without step 4 the `/sleep` and `/recall` skills cannot read or write long-term notes —
 > registering the Basic Memory MCP is **required**, not optional.
 
+## Updating an already-installed project
+
+An install leaves two kinds of thing behind, and they age differently.
+
+The **hook scripts and the `lts` CLI stay in the clone** and are only referenced from a project,
+so they update with a `git pull` there — every project follows at once. The **skills, the hook
+wiring in `.claude/settings.json`, and the memory block in `CLAUDE.md` are copies**, and a copy
+goes stale in silence: a project can keep running last month's `/sleep` long after the clone
+moved on.
+
+`lts update` refreshes exactly those copies. Re-running `install.py` is never needed:
+
+```bash
+git -C <path-to-clone> pull       # the code: hooks + the lts CLI, shared by every project
+cd <your-project>
+lts update --check                # what is stale? writes nothing, exits 1 if anything is
+lts update                        # refresh this project's copies
+```
+
+It prints which clone it is copying **from** — the answer is whichever clone this `lts` is
+running out of, not whichever one you are standing in, which matters as soon as a machine holds
+both a development clone and a deployed one. Point it elsewhere with `--source`, name another
+project with `--target`, and get the report as data with `--json`.
+
+`lts update` never touches `config.toml`, `.ai_memory/` or the vault — those are your state, so
+the command is safe to run at any moment, including mid-session. Skills the project added of its
+own are left alone; only the ones the clone ships are overwritten.
+
 ## Troubleshooting (install gotchas)
 
 - **`uv: command not found`** — `uv` is optional. Either install it (`sudo snap install astral-uv`)
@@ -174,6 +202,7 @@ right vault automatically.
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
 | `lts doctor [--json]` | Check where memory lives: the resolved project root, and any stray sidecars. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
+| `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
 | `basic-memory project info <project>` | LTM counts (Entities/Relations/Isolated) and embedding status. |
 
 **Recalling memory** — `/recall` takes an optional topic or question:

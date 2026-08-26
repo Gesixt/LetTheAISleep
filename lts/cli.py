@@ -6,8 +6,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import anchor, digest, doctor, naming, paths, pending, status, stm, transcript, watermark
+from lts import anchor, digest, doctor, naming, paths, pending, status, stm, sync, transcript, watermark
 from lts.config import NotAnLtsProject, load_config, require_project
+from lts.sync import NotASource
 
 
 def _cfg(root: str | None):
@@ -67,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root(p_digest)
     p_digest.add_argument("--since", default=None)
     p_digest.add_argument("--json", action="store_true")
+
+    p_update = sub.add_parser("update")
+    p_update.add_argument("--target", default=None, help="project to refresh (default: cwd)")
+    p_update.add_argument("--source", default=None,
+                          help="clone to copy from (default: the one this `lts` runs from)")
+    p_update.add_argument("--check", action="store_true",
+                          help="report what is stale without writing; exit 1 if anything is")
+    p_update.add_argument("--json", action="store_true")
 
     p_session = sub.add_parser("session-name")
     _add_root(p_session)
@@ -150,6 +159,16 @@ def _run(args) -> int:
             text = digest.render(report)
             if text:
                 print(text)
+    elif args.cmd == "update":
+        # `--target` names the project, not the sidecar root: load_config walks up from it the
+        # same way every other command does, so running this from a subdirectory still works.
+        target_cfg = _cfg(args.target)
+        report = sync.sync(sync.source_root(args.source), target_cfg, check=args.check)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(sync.render(report))
+        return 1 if (args.check and report["stale"]) else 0
     elif args.cmd == "session-name":
         when = datetime.strptime(args.at, "%Y-%m-%d %H:%M") if args.at else None
         title = naming.session_note_name(cfg, when)
@@ -164,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return _run(args)
-    except NotAnLtsProject as exc:
+    except (NotAnLtsProject, NotASource) as exc:
         print(f"lts: {exc}", file=sys.stderr)
         return 2
 

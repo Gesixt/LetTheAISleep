@@ -188,3 +188,48 @@ def test_stm_clear_arms_the_sleep_flag(tmp_path: Path):
     main(["stm", "clear", "--root", str(tmp_path)])
     cfg = load_config(tmp_path)
     assert watermark.is_armed(paths.sleep_flag_file(cfg))
+
+
+def _sync_fixture(tmp_path: Path):
+    """A source clone and a project installed against an older one."""
+    from lts import sync
+    source = tmp_path / "source"
+    (source / "claude" / "hooks").mkdir(parents=True)
+    for script in sync.HOOK_EVENTS.values():
+        (source / "claude" / "hooks" / script).write_text("# hook\n", encoding="utf-8")
+    (source / "claude" / "skills" / "sleep").mkdir(parents=True)
+    (source / "claude" / "skills" / "sleep" / "SKILL.md").write_text("new\n", encoding="utf-8")
+
+    target = tmp_path / "target"
+    make_project(target)
+    (target / ".claude" / "skills" / "sleep").mkdir(parents=True)
+    (target / ".claude" / "skills" / "sleep" / "SKILL.md").write_text("old\n", encoding="utf-8")
+    return source, target
+
+
+def test_update_refreshes_the_target_and_says_what_changed(tmp_path: Path, capsys):
+    source, target = _sync_fixture(tmp_path)
+    assert main(["update", "--target", str(target), "--source", str(source)]) == 0
+    out = capsys.readouterr().out
+    assert "skills/sleep" in out
+    assert (target / ".claude" / "skills" / "sleep" / "SKILL.md").read_text(
+        encoding="utf-8") == "new\n"
+
+
+def test_update_check_exits_nonzero_while_stale_and_zero_once_synced(tmp_path: Path, capsys):
+    source, target = _sync_fixture(tmp_path)
+    assert main(["update", "--target", str(target), "--source", str(source), "--check"]) == 1
+    assert (target / ".claude" / "skills" / "sleep" / "SKILL.md").read_text(
+        encoding="utf-8") == "old\n"
+    main(["update", "--target", str(target), "--source", str(source)])
+    capsys.readouterr()
+    assert main(["update", "--target", str(target), "--source", str(source), "--check"]) == 0
+
+
+def test_update_refuses_a_directory_that_has_no_memory_installed(tmp_path: Path, capsys):
+    source, _ = _sync_fixture(tmp_path)
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    assert main(["update", "--target", str(stray), "--source", str(source)]) == 2
+    assert "no lts project" in capsys.readouterr().err
+    assert not (stray / ".claude").exists()
