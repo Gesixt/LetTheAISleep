@@ -6,22 +6,48 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import paths, pending
+from lts import paths, pending, watermark
 from lts.config import load_config
 from lts.hooklog import log_error, log_note
 
 
 def run(event: dict, *, root: Path | None = None) -> dict:
+    """Snapshot the un-consolidated tail of the transcript, so a compact loses nothing.
+
+    Only the tail: a Claude Code transcript is append-only across `--resume` and can span
+    months, so dumping the whole file made every snapshot mostly a copy of chapters that
+    were already in long-term notes — and made SessionStart demand a sleep that was not
+    owed. When nothing follows the sleep mark, no snapshot is written at all.
+    """
     cfg = load_config(root or event.get("cwd"))
     if not cfg.configured:
         log_note("pre_compact.py", f"no lts project at or above {cfg.project_root}; no snapshot")
         return {}
     paths.ensure_sidecar(cfg)
     transcript_path = Path(event.get("transcript_path", ""))
-    content = ""
-    if transcript_path.exists():
-        content = transcript_path.read_text(encoding="utf-8", errors="ignore")
-    pending.dump_snapshot(paths.pending_dir(cfg), event.get("session_id", "default"), content)
+    mark_file = paths.sleep_mark_file(cfg)
+
+    if watermark.is_armed(paths.sleep_flag_file(cfg)):
+        # A sleep finished in this very turn (auto-compact can beat the Stop hook to it):
+        # everything up to here is already consolidated.
+        watermark.write_mark(mark_file, watermark.mark_of(transcript_path))
+        watermark.disarm(paths.sleep_flag_file(cfg))
+        log_note("pre_compact.py", "sleep just finished; nothing to snapshot")
+        return {}
+
+    new = watermark.entries_after(transcript_path, watermark.read_mark(mark_file))
+    if not new:
+        log_note("pre_compact.py", "no material since the last sleep; no snapshot")
+        return {}
+
+    pending.dump_snapshot(
+        paths.pending_dir(cfg),
+        event.get("session_id", "default"),
+        watermark.render_exchanges(new),
+    )
+    # The tail is now captured (in a snapshot rather than in notes), so a second compact
+    # before the next sleep snapshots only what came after it.
+    watermark.write_mark(mark_file, watermark.mark_of(transcript_path))
     return {}
 
 

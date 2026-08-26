@@ -24,7 +24,12 @@ def extract_text(content) -> str:
 
 
 def read_exchanges(transcript_path: Path) -> list[dict]:
-    """Ordered user/assistant exchanges with non-empty text: [{"role", "text"}, ...]."""
+    """Ordered user/assistant exchanges with non-empty text.
+
+    Each entry is `{"role", "text", "uuid", "timestamp"}`. The uuid/timestamp identify the
+    exchange inside the transcript, which is what lets the sleep watermark say "consolidation
+    reached here" in a file that keeps growing across `--resume`.
+    """
     if not transcript_path.exists():
         return []
     out: list[dict] = []
@@ -42,7 +47,12 @@ def read_exchanges(transcript_path: Path) -> list[dict]:
         role = msg.get("role") or d.get("type")
         text = extract_text(msg.get("content"))
         if text:
-            out.append({"role": role, "text": text})
+            out.append({
+                "role": role,
+                "text": text,
+                "uuid": d.get("uuid"),
+                "timestamp": d.get("timestamp"),
+            })
     return out
 
 

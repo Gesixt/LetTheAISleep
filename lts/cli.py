@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import anchor, digest, doctor, naming, paths, pending, status, stm, transcript
+from lts import anchor, digest, doctor, naming, paths, pending, status, stm, transcript, watermark
 from lts.config import NotAnLtsProject, load_config, require_project
 
 
@@ -90,6 +90,11 @@ def _run(args) -> int:
             print(stm.read(f), end="")
         elif args.op == "clear":
             stm.clear(f)
+            # Step 6 of /sleep runs mid-turn: tell the hooks that everything up to now is
+            # consolidated, or the Stop hook refills the buffer with the sleep's own
+            # narration and the following /compact snapshots a chapter already in notes.
+            paths.ensure_sidecar(cfg)
+            watermark.arm(paths.sleep_flag_file(cfg))
     elif args.cmd == "anchor":
         if args.op == "render":
             print(anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))))

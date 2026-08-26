@@ -20,9 +20,16 @@ everything worth keeping into linked long-term notes **without losing a single n
 - **`/sleep`** reads the STM buffer, writes/links long-term notes (zero loss), rebuilds embeddings, then clears STM.
 - **`/recall`** retrieves by graph priority (anchor links first) + semantic search, loading only what's relevant.
 - **`/memory-status`** shows a dashboard of both tiers and flags when to sleep or reindex.
-- **Hooks** (run by Claude Code automatically): `PreCompact` snapshots raw material as a backstop,
-  `SessionStart` injects the anchor or forces an unfinished sleep to complete, `UserPromptSubmit`
-  adds escalating "time to sleep" pressure as context fills.
+- **Hooks** (run by Claude Code automatically): `PreCompact` snapshots un-consolidated material as
+  a backstop, `SessionStart` injects the anchor or forces an unfinished sleep to complete,
+  `UserPromptSubmit` adds escalating "time to sleep" pressure as context fills.
+
+> **The sleep mark.** A Claude Code transcript is one append-only file that `--resume` keeps
+> extending, so it holds the whole history of a project, not the current chapter. `lts stm clear`
+> (step 6 of `/sleep`) records how far consolidation reached — `<root>/.ai_memory/sleep-mark.json`.
+> Everything behind the mark is in long-term notes and is never snapshotted again, so a `PreCompact`
+> that finds nothing new writes no snapshot, and `SessionStart` only demands a sleep that is really
+> owed. The same mark keeps the sleep's own narration out of the buffer it just emptied.
 
 > **Semantic search note:** Basic Memory serves full-text and graph links immediately on write,
 > but vector embeddings are rebuilt by `basic-memory reindex --embeddings -p <project>` (not on

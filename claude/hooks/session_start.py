@@ -12,8 +12,10 @@ from lts.hooklog import log_error
 
 _FORCE_MSG = (
     "## Unfinished sleep detected\n"
-    "There is un-consolidated memory from a previous session (STM buffer or a "
-    "PreCompact snapshot). Before doing anything else, run the `/sleep` skill to "
+    "Un-consolidated memory is waiting: {stm} STM entries, {snapshots} pending snapshot(s).\n"
+    "This is new material only — everything already consolidated sits behind the sleep mark "
+    "and was never written here, so it is not a duplicate of notes you already hold. Do not "
+    "spend a turn checking. Before doing anything else, run the `/sleep` skill to "
     "finish sleeping this material into long-term notes, then continue."
 )
 
@@ -30,11 +32,12 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     cfg = load_config(root or event.get("cwd"))
     if not cfg.configured:
         return _UNCONFIGURED_MSG.format(root=cfg.project_root)
-    pending_present = pending.has_pending(paths.pending_dir(cfg))
-    stm_present = not stm.is_empty(paths.stm_file(cfg))
-    if pending_present or stm_present:
+    snapshots = pending.list_snapshots(paths.pending_dir(cfg))
+    stm_text = stm.read(paths.stm_file(cfg))
+    stm_entries = len([ln for ln in stm_text.splitlines() if ln.strip()])
+    if snapshots or stm_entries:
         # One demand at a time: finishing the sleep comes before reading anyone else's notes.
-        return _FORCE_MSG
+        return _FORCE_MSG.format(stm=stm_entries, snapshots=len(snapshots))
 
     # The digest scans the vault (e.g. note.stat()), which can raise on a dangling symlink or
     # a mid-scan race. That must never suppress the anchor, so degrade the digest to "".

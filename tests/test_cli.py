@@ -176,3 +176,15 @@ def test_status_json_carries_author_and_vault_path(tmp_path: Path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["author"] == "dmitrii"
     assert data["vault_path"].endswith(".ai_vault")
+
+
+def test_stm_clear_arms_the_sleep_flag(tmp_path: Path):
+    # Step 6 of /sleep is `lts stm clear`; arming there is what tells the hooks that
+    # everything up to this point is consolidated, so they stop re-reporting it.
+    from lts import paths, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    main(["stm", "append", "--root", str(tmp_path), "--text", "a fact"])
+    main(["stm", "clear", "--root", str(tmp_path)])
+    cfg = load_config(tmp_path)
+    assert watermark.is_armed(paths.sleep_flag_file(cfg))

@@ -18,23 +18,199 @@ def _load(name: str, path: Path):
 HOOKS = Path(__file__).resolve().parents[1] / "claude" / "hooks"
 
 
+def _msg(role: str, text: str, uuid: str | None = None, ts: str | None = None) -> dict:
+    d = {"type": role, "message": {"role": role, "content": text}}
+    if uuid:
+        d["uuid"] = uuid
+    if ts:
+        d["timestamp"] = ts
+    return d
+
+
+def _transcript(path: Path, entries: list[dict]) -> Path:
+    path.write_text("\n".join(json.dumps(e) for e in entries), encoding="utf-8")
+    return path
+
+
+def _snapshots(root: Path) -> list[Path]:
+    return sorted((root / ".ai_memory" / "pending_consolidation").glob("*.md"))
+
+
 def test_pre_compact_dumps_transcript(tmp_path: Path):
     make_project(tmp_path)
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("conversation raw text", encoding="utf-8")
+    transcript = _transcript(tmp_path / "t.jsonl", [_msg("user", "conversation text", "u1")])
     pre = _load("pre_compact", HOOKS / "pre_compact.py")
     pre.run({"session_id": "s", "transcript_path": str(transcript)}, root=tmp_path)
-    snaps = list((tmp_path / ".ai_memory" / "pending_consolidation").glob("*.md"))
+    snaps = _snapshots(tmp_path)
     assert len(snaps) == 1
-    assert snaps[0].read_text(encoding="utf-8") == "conversation raw text"
+    assert snaps[0].read_text(encoding="utf-8") == "[user] conversation text"
 
 
-def test_pre_compact_missing_transcript_still_writes(tmp_path: Path):
+def test_pre_compact_writes_nothing_for_a_missing_transcript(tmp_path: Path):
     make_project(tmp_path)
     pre = _load("pre_compact", HOOKS / "pre_compact.py")
     pre.run({"session_id": "s", "transcript_path": str(tmp_path / "nope.jsonl")}, root=tmp_path)
-    snaps = list((tmp_path / ".ai_memory" / "pending_consolidation").glob("*.md"))
-    assert len(snaps) == 1
+    assert _snapshots(tmp_path) == []
+
+
+def test_pre_compact_snapshots_only_what_follows_the_sleep_mark(tmp_path: Path):
+    # The chapter before the mark is already in long-term notes; re-dumping it is what made
+    # every post-sleep session open by investigating a snapshot it had already consolidated.
+    make_project(tmp_path)
+    from lts import paths, watermark
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "the vacations chapter", "u1", "2026-07-23T09:04:00Z"),
+        _msg("assistant", "getVacationHistory done", "u2", "2026-07-23T09:20:00Z"),
+        _msg("user", "the release-builder chapter", "u3", "2026-08-26T12:40:00Z"),
+    ])
+    watermark.write_mark(paths.sleep_mark_file(cfg), {
+        "uuid": "u2", "timestamp": "2026-07-23T09:20:00Z", "count": 2,
+    })
+
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(transcript)}, root=tmp_path)
+
+    body = _snapshots(tmp_path)[0].read_text(encoding="utf-8")
+    assert "release-builder" in body
+    assert "getVacationHistory" not in body
+    assert "vacations chapter" not in body
+
+
+def test_pre_compact_writes_no_snapshot_when_nothing_is_new(tmp_path: Path):
+    # No new material means no sleep is owed — SessionStart must stay quiet.
+    make_project(tmp_path)
+    from lts import paths, watermark
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "already consolidated", "u1", "2026-08-26T10:00:00Z"),
+    ])
+    watermark.write_mark(paths.sleep_mark_file(cfg), watermark.mark_of(transcript))
+
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(transcript)}, root=tmp_path)
+    assert _snapshots(tmp_path) == []
+
+
+def test_pre_compact_advances_the_mark_so_a_second_compact_does_not_duplicate(tmp_path: Path):
+    make_project(tmp_path)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "one chapter", "u1", "2026-08-26T10:00:00Z"),
+    ])
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    event = {"session_id": "s", "transcript_path": str(transcript)}
+    pre.run(event, root=tmp_path)
+    pre.run(event, root=tmp_path)
+    assert len(_snapshots(tmp_path)) == 1
+
+
+def test_pre_compact_consumes_the_sleep_flag_without_snapshotting(tmp_path: Path):
+    # Auto-compact can fire inside the sleep turn itself, before Stop gets to place the mark.
+    make_project(tmp_path)
+    from lts import paths, watermark
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "just consolidated this", "u1", "2026-08-26T10:00:00Z"),
+    ])
+    watermark.arm(paths.sleep_flag_file(cfg))
+
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(transcript)}, root=tmp_path)
+
+    assert _snapshots(tmp_path) == []
+    assert not watermark.is_armed(paths.sleep_flag_file(cfg))
+    assert watermark.read_mark(paths.sleep_mark_file(cfg))["uuid"] == "u1"
+
+
+def test_stop_drops_the_sleep_turn_when_the_sleep_flag_is_armed(tmp_path: Path):
+    # `lts stm clear` runs mid-turn; without this the Stop hook immediately refills the
+    # freshly emptied buffer with the sleep's own narration.
+    make_project(tmp_path)
+    from lts import paths, stm, watermark
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "/sleep", "u1", "2026-08-26T10:00:00Z"),
+        _msg("assistant", "Sleeping. Collecting the material.", "u2", "2026-08-26T10:01:00Z"),
+    ])
+    watermark.arm(paths.sleep_flag_file(cfg))
+
+    stop = _load("stop", HOOKS / "stop.py")
+    assert stop.capture({"transcript_path": str(transcript)}, root=tmp_path) == 0
+    assert stm.is_empty(paths.stm_file(cfg))
+    assert not watermark.is_armed(paths.sleep_flag_file(cfg))
+
+
+def test_stop_marks_the_sleep_so_the_next_compact_is_silent(tmp_path: Path):
+    make_project(tmp_path)
+    from lts import paths, watermark
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "/sleep", "u1", "2026-08-26T10:00:00Z"),
+        _msg("assistant", "Consolidated.", "u2", "2026-08-26T10:01:00Z"),
+    ])
+    watermark.arm(paths.sleep_flag_file(cfg))
+
+    stop = _load("stop", HOOKS / "stop.py")
+    stop.capture({"transcript_path": str(transcript)}, root=tmp_path)
+
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(transcript)}, root=tmp_path)
+    assert _snapshots(tmp_path) == []
+
+
+def test_stop_captures_the_first_turn_of_a_new_shorter_transcript(tmp_path: Path):
+    # The old numeric cursor was per-project, so a fresh session's short transcript was
+    # sliced away entirely and its opening turn never reached STM.
+    make_project(tmp_path)
+    from lts import paths, stm
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    stop = _load("stop", HOOKS / "stop.py")
+
+    long_one = _transcript(tmp_path / "old.jsonl", [
+        _msg("user", f"turn {i}", f"o{i}", f"2026-08-25T10:{i:02d}:00Z") for i in range(20)
+    ])
+    stop.capture({"transcript_path": str(long_one)}, root=tmp_path)
+    stm.clear(paths.stm_file(cfg))
+
+    fresh = _transcript(tmp_path / "new.jsonl", [
+        _msg("user", "opening turn of a new session", "n1", "2026-08-26T09:00:00Z"),
+    ])
+    assert stop.capture({"transcript_path": str(fresh)}, root=tmp_path) == 1
+    assert "opening turn of a new session" in stm.read(paths.stm_file(cfg))
+
+
+def test_stop_migrates_the_legacy_capture_offset(tmp_path: Path):
+    # Existing sidecars carry `.lts-capture-offset`; honour it once so upgrading does not
+    # replay the whole transcript into STM.
+    make_project(tmp_path)
+    from lts import paths, stm
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    (paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset").write_text("2", encoding="utf-8")
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "already captured", "u1", "2026-08-26T10:00:00Z"),
+        _msg("assistant", "also already captured", "u2", "2026-08-26T10:01:00Z"),
+        _msg("user", "genuinely new", "u3", "2026-08-26T10:02:00Z"),
+    ])
+
+    stop = _load("stop", HOOKS / "stop.py")
+    assert stop.capture({"transcript_path": str(transcript)}, root=tmp_path) == 1
+    buf = stm.read(paths.stm_file(cfg))
+    assert "genuinely new" in buf
+    assert "already captured" not in buf
+    assert not (paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset").exists()
 
 
 def test_session_start_injects_anchor_when_clean(tmp_path: Path):
@@ -109,8 +285,7 @@ def test_user_prompt_submit_silent_when_low(tmp_path: Path):
 
 def test_pre_compact_runs_as_subprocess_without_pythonpath(tmp_path: Path):
     make_project(tmp_path)
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("raw transcript", encoding="utf-8")
+    transcript = _transcript(tmp_path / "t.jsonl", [_msg("user", "raw transcript", "u1")])
     event = {"session_id": "s", "transcript_path": str(transcript)}
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     proc = subprocess.run(
@@ -281,3 +456,23 @@ def test_session_start_suppresses_the_digest_while_a_sleep_is_owed(tmp_path: Pat
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert "finish sleeping" in text.lower()
     assert "Cart Service" not in text             # one demand at a time
+
+
+def test_session_start_says_exactly_what_is_owed(tmp_path: Path):
+    # A bare "unfinished sleep" made every session open by investigating whether the
+    # material was a duplicate. It never is any more, so say so and give the size.
+    make_project(tmp_path)
+    from lts import paths, pending, stm
+    from lts.config import load_config
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    stm.append(paths.stm_file(cfg), "[user] a fact")
+    stm.append(paths.stm_file(cfg), "[assistant] another fact")
+    pending.dump_snapshot(paths.pending_dir(cfg), "s", "[user] raw tail")
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+    assert "finish sleeping" in text.lower()
+    assert "2 STM" in text
+    assert "1 pending snapshot" in text
+    assert "duplicate" in text.lower()   # tells the model not to re-check for one

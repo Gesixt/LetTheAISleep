@@ -35,6 +35,11 @@ Never run `git fetch`, `git pull`, `git commit` or `git push` yourself. Publishi
 - If a previous session left raw material, also account for it:
   `lts pending list` → prints the absolute path of each snapshot (nothing if there are none).
   Read those paths with your file tools.
+
+  A snapshot holds **only what was said after the last sleep** — the sleep mark
+  (`.ai_memory/sleep-mark.json`) keeps everything already consolidated out of it. So treat a
+  snapshot as new material and consolidate it. Do not open the session's notes to check whether
+  it duplicates them; it does not, and that check used to burn a whole turn every session.
 - Add the significant remaining conversation context (exclude noise).
 
 ## 2. Extract (with preservation, never compress)
@@ -97,6 +102,11 @@ Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each,
   ```
 - Clear the STM buffer **only after** the writes above succeeded:
   `lts stm clear`
+
+  This also places the **sleep mark** — the point in the transcript that consolidation reached.
+  Everything behind it is now off the hooks' books: the Stop hook drops this turn instead of
+  refilling the buffer you just emptied with the story of the sleep itself, and the `/compact`
+  below snapshots nothing. Never edit `sleep-mark.json` by hand.
 - If you consumed pending snapshots, drop them: `lts pending clear`
 - In team mode, remind the user to commit and push the vault repository so teammates see this work.
   Do not do it for them.
