@@ -70,6 +70,18 @@ def commits_since(vault: Path, since: str) -> list[tuple[str, list[str]]]:
     return commits
 
 
+def head_ref(vault: Path) -> str | None:
+    """The checked-out branch name, or None when detached (or not a repo)."""
+    out = _run(vault, "rev-parse", "--abbrev-ref", "HEAD")
+    name = out.strip() if out else ""
+    return name if name and name != "HEAD" else None
+
+
+def head_sha(vault: Path) -> str | None:
+    out = _run(vault, "rev-parse", "--short", "HEAD")
+    return out.strip() if out and out.strip() else None
+
+
 def upstream_name(vault: Path) -> str | None:
     out = _run(vault, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
     return out.strip() if out and out.strip() else None

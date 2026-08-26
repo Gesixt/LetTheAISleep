@@ -13,6 +13,7 @@ Run:
 lts status
 lts doctor
 lts digest
+lts update --check
 ```
 `lts status` prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
 
@@ -22,6 +23,12 @@ lts digest
 vault's git state (commits behind/ahead of the last fetched remote ref, uncommitted files). It is
 silent when there is nothing to report. In team mode, surface it prominently: it is how the user
 learns a teammate has already solved the thing they are about to investigate.
+
+`lts update --check` writes nothing and reports whether this project's **copies** — the skills,
+the hook wiring in `.claude/settings.json`, the `CLAUDE.md` memory block — still match the clone
+they came from. It also names the clone in use and how far behind its remote it is (as of the
+last fetch). Staleness here is silent otherwise: a project can run a months-old `/sleep` while
+the clone has moved on. It exits non-zero when anything is stale.
 
 ## 2. LTM metrics (Basic Memory)
 Take the project name from the `lts status` output above. Do not go hunting for `config.toml`.
@@ -47,6 +54,7 @@ From that dashboard report:
 Summarize both tiers together. Raise a clear flag when:
 - **The vault is behind the remote, or has uncommitted notes** → recommend a `git pull` / commit in the vault repository. Never run git yourself.
 - **`lts doctor` exits non-zero** → memory is misplaced. Report the stray path and stop before writing anything new.
+- **`lts update --check` reports anything stale** → this project is running older copies than the clone ships. Recommend `git -C <clone> pull` (if the clone is behind) followed by `lts update`. Never run git yourself.
 - **Sleep debt > 0** or **context pressure is `force`** → recommend running `/sleep` now.
 - **Embedding Status is not "Up to date"** → recommend `basic-memory reindex --embeddings -p <project>` so `/recall` semantic search is complete.
 - **Isolated (orphans) is high** → suggest linking those notes during the next `/sleep`.

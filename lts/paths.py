@@ -37,6 +37,26 @@ def anchor_file(cfg: Config) -> Path:
     return sidecar_root(cfg) / "anchor.json"
 
 
+def sleep_mark_file(cfg: Config) -> Path:
+    """How far consolidation has reached in the transcript (see `lts.watermark`)."""
+    return sidecar_root(cfg) / "sleep-mark.json"
+
+
+def capture_mark_file(cfg: Config) -> Path:
+    """How far the Stop hook has read the transcript into the STM buffer."""
+    return sidecar_root(cfg) / "stm" / "capture-mark.json"
+
+
+def legacy_capture_offset_file(cfg: Config) -> Path:
+    """Pre-watermark cursor: a bare exchange count. Honoured once, then removed."""
+    return sidecar_root(cfg) / "stm" / ".lts-capture-offset"
+
+
+def sleep_flag_file(cfg: Config) -> Path:
+    """Set by `lts stm clear`: a sleep just finished, mid-turn. Cleared by the next hook."""
+    return sidecar_root(cfg) / "stm" / ".lts-sleep-armed"
+
+
 def pending_dir(cfg: Config) -> Path:
     return sidecar_root(cfg) / "pending_consolidation"
 

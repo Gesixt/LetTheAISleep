@@ -73,3 +73,15 @@ def test_pressure_levels():
     assert transcript.pressure_level(600, w, 0.6, 0.8) == "warn"
     assert transcript.pressure_level(799, w, 0.6, 0.8) == "warn"
     assert transcript.pressure_level(800, w, 0.6, 0.8) == "force"
+
+
+def test_read_exchanges_carries_the_entry_uuid_and_timestamp(tmp_path: Path):
+    # The sleep watermark points at a specific message, so exchanges must be identifiable.
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps({
+        "type": "user", "uuid": "u1", "timestamp": "2026-08-26T10:00:00Z",
+        "message": {"role": "user", "content": "hi"},
+    }), encoding="utf-8")
+    ex = transcript.read_exchanges(t)[0]
+    assert ex["uuid"] == "u1"
+    assert ex["timestamp"] == "2026-08-26T10:00:00Z"
