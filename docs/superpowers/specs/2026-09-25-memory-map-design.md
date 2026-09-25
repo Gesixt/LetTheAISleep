@@ -74,9 +74,10 @@ early return, because in that case there is nothing to describe.
 ## 3. The memory map
 
 ```
-## Memory map (17 notes) — read before re-deriving
-knowledge-base: Architecture · Basic Memory Behaviour · Context Pressure Measurement ·
-  Hooks and Automatic STM Capture · Installation and Environment · Project Conventions · …
+## Memory map (19 notes) — read before re-deriving
+active: session-memory/Session_2026-09-25_1534 · knowledge-base/Memory Map ·
+  knowledge-base/Sleep Watermark · knowledge-base/Context Pressure Measurement · …
+knowledge-base: Team Mode · Installation and Environment · Project Conventions · …
 session-memory: Session_2026-08-26_1356 · Session_2026-07-11_0028 · …
 If the question touches any of these, read the note instead of re-deriving it.
 ```
@@ -86,9 +87,30 @@ If the question touches any of these, read the note instead of re-deriving it.
 `*.md` is instant. The title is the filename stem, which is what Basic Memory uses as the title.
 
 **Grouping.** By top-level vault directory: `knowledge-base` first (permanent topical notes carry
-the most meaning per title), other directories alphabetically, `session-memory` last and, within
-it, newest first — `Session_YYYY-MM-DD_HHMM` sorts chronologically as a string. Team mode's
+the most meaning per title), other directories alphabetically, `session-memory` last. Team mode's
 `session-memory/<author>/` collapses into the one `session-memory` group.
+
+**Ranking (revised 2026-09-25, after measuring ppss).** Grouping alone is not an order. On a
+247-note vault the budget bought 23 titles and spent all of them on the alphabetical head of
+`knowledge-base` — the notes the last sleep had just marked as the live ones were not among them,
+and `session-memory` got nothing at all. So the map ranks in three tiers:
+
+1. **The anchor's `active_notes`, hoisted above the groups**, on their own `active:` line and in
+   anchor order. This is the one ranking signal that the model did not produce this turn: the
+   sleep chose those notes itself. They must clear the group tiers, because the entry points cross
+   them — the last session note lives in `session-memory`, the first group truncation drops. They
+   are printed as full addresses (`knowledge-base/Memory Map`), which is what `read_note` takes,
+   and removed from their own group so the budget never pays for a title twice. An anchor entry
+   whose note no longer exists is dropped: advertising a deleted note costs a wasted `read_note`
+   and teaches the model that the map lies.
+2. **Recency, inside each topical group**: most recently modified first, by filesystem mtime.
+3. **The alphabet**, breaking recency ties — which, straight after a `git clone` that flattens
+   every mtime to the checkout time, is the entire ranking. Degrading to the previous behaviour is
+   the right failure here.
+
+`session-memory` is ranked by title instead, descending. A session title *is* its date, exactly,
+and it survives that same `git clone`; mtime could only corrupt it — fixing a typo in an old
+session note must not make it look like the latest chapter.
 
 **No exclusions.** Basic Memory indexes every `.md` and does not honour `.bmignore` (established
 by experiment, recorded in `Basic Memory Behaviour`). The map therefore lists exactly what is
@@ -96,7 +118,7 @@ actually findable; inventing an exclusion list here would make the map lie.
 
 **Budget with degradation.** 17 notes is 387 bytes, but 500 titles would be ~10k tokens per turn.
 One setting, `[memory] map_budget` (characters, default 1500, `0` disables the map entirely),
-truncates in the grouping order above; what does not fit collapses into `… +37 more (use /recall)`.
+truncates in the ranking order above; what does not fit collapses into `… +37 more (use /recall)`.
 A single knob does both jobs, so there is no separate on/off flag.
 
 **Silence, not noise.** `render` returns `""` — and the hook injects nothing — when the vault
@@ -109,7 +131,7 @@ The map must never be a reason for a hook to fail or to chatter.
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `lts/memorymap.py` | `render(cfg) -> str`: the map, grouped, ordered, within budget | `paths.vault_root` |
+| `lts/memorymap.py` | `render(cfg) -> str`: the map, grouped, ranked, within budget | `paths.vault_root`, `anchor` |
 | `lts/config.py` | the `map_budget` field, default 1500 | — |
 | `claude/hooks/session_start.py` | accumulate blocks instead of returning the sleep demand alone | `anchor`, `digest`, `pending`, `stm` |
 | `claude/hooks/user_prompt_submit.py` | inject the map, then the pressure line | `memorymap`, `transcript` |
@@ -159,6 +181,13 @@ TDD throughout; every test watched failing first.
 `tests/test_memorymap.py` — group order (`knowledge-base` first, `session-memory` last), newest
 session first, budget truncation carrying a `+N more` tail, and the four silent cases (no vault,
 empty vault, `map_budget = 0`, unconfigured project).
+
+For the ranking: the anchor's notes lead the map and are not listed twice; a stale anchor entry is
+dropped; no anchor means no `active:` line; a 247-note vault with room for ~25 titles still shows
+the anchored note (the ppss case, stated as the test it is); recency beats the alphabet in a
+topical group; and a session note's mtime does **not** outrank its title. Budget truncation is
+pinned with every mtime set equal, which is both the `git clone` case and the only way to assert
+the alphabet deterministically.
 
 `tests/test_hooks.py` — that `SessionStart` emits the anchor **and** the sleep demand together.
 This is the regression test for the root cause in §1.1, where the two are mutually exclusive.

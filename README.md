@@ -48,6 +48,13 @@ everything worth keeping into linked long-term notes **without losing a single n
 > anchor *and* the digest; and `UserPromptSubmit` injects a **memory map** on every turn — the
 > titles of every note in the vault, grouped, ~120 tokens, capped by `[memory] map_budget` (0 turns
 > it off). The map guarantees the *information*; choosing what to read is still the model's.
+>
+> The map is **ranked**, because on a 247-note vault the budget bought 23 titles and spent them all
+> on the alphabetical head of `knowledge-base`. The anchor's notes come first, on their own
+> `active:` line, above the groups — the last sleep chose them, and one of them is the last session
+> note, which lives in the group that truncation drops first. Then recency within each topical
+> group, then the alphabet to break ties. Session notes are ranked by title, since the title is the
+> date and, unlike an mtime, it survives a `git clone`.
 
 > **Semantic search note:** Basic Memory serves full-text and graph links immediately on write,
 > but vector embeddings are rebuilt by `basic-memory reindex --embeddings -p <project>` (not on
