@@ -10,14 +10,32 @@ from lts import memorymap, transcript
 from lts.config import load_config
 from lts.hooklog import log_error
 
+# The nudges deliberately quote no percentage of their own. The old wording — "(~60%+)",
+# "(~80%+)" — was the only figure the model ever saw, and stating a band invited it to report a
+# specific number it had not measured: on 2026-09-25 it announced "Контекст ~75%" and recommended
+# a /compact while the turn's own usage record said 276,013 tokens, i.e. 27.6%. The measured line
+# below carries the number; these two only say what to do about it.
 _WARN = (
-    "Context is filling up (~60%+). Consider running `/sleep` soon, or at the next "
+    "Context is filling up. Consider running `/sleep` soon, or at the next "
     "natural break, so nothing is lost."
 )
 _FORCE = (
-    "Context is nearly full (~80%+). You should run `/sleep` now to consolidate this "
+    "Context is nearly full. You should run `/sleep` now to consolidate this "
     "session into long-term notes before context is compacted."
 )
+
+
+def _context_line(tokens: int, window: int) -> str:
+    """The measured occupancy of the context window, stated on every turn.
+
+    Below the warn threshold this hook used to say nothing, and no skill passes `--transcript`
+    to `lts status`, so the one real number in the system was never quotable. With nothing to
+    cite, the model produced a figure of its own. "window" is in the label on purpose: the STM
+    buffer is a different meter, and the two were being conflated.
+    """
+    if not tokens or window <= 0:
+        return ""
+    return f"Context window: {tokens:,}/{window:,} tokens ({round(tokens / window * 100)}%)"
 
 
 def build_context(event: dict, *, root: Path | None = None) -> str:
@@ -34,7 +52,8 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
         tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
     )
     pressure = _FORCE if level == "force" else (_WARN if level == "warn" else "")
-    return "\n\n".join(b for b in (memorymap.render(cfg), pressure) if b)
+    blocks = (memorymap.render(cfg), _context_line(tokens, cfg.context_window), pressure)
+    return "\n\n".join(b for b in blocks if b)
 
 
 def run(event: dict, *, root: Path | None = None) -> dict:

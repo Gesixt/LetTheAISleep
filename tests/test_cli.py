@@ -50,12 +50,22 @@ def test_stm_append_read_clear(tmp_path: Path, capsys):
     assert capsys.readouterr().out.strip() == ""
 
 
-def test_pressure(tmp_path: Path, capsys):
-    make_project(tmp_path)
+def test_pressure_falls_back_to_the_size_estimate_without_usage_counters(tmp_path: Path, capsys):
+    """No `usage` anywhere in the transcript is the one case where size is all we have.
+
+    Even then it is measured against the *configured* window. This test used to assert `force`
+    for a 680 KB file, which was the hardcoded 200k window talking, not the project's.
+    """
+    make_project(tmp_path, "[sleep]\ncontext_window = 200000\n")
     t = tmp_path / "t.jsonl"
-    t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~170k tokens of 200k
+    t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~170k tokens
     main(["pressure", "--root", str(tmp_path), "--transcript", str(t)])
-    assert capsys.readouterr().out.strip() == "force"
+    assert capsys.readouterr().out.strip() == "force"        # 170k / 200k
+
+    wide = tmp_path / "wide"
+    make_project(wide, "[sleep]\ncontext_window = 1000000\n")
+    main(["pressure", "--root", str(wide), "--transcript", str(t)])
+    assert capsys.readouterr().out.strip() == "none"         # the same file, 170k / 1M
 
 
 def test_pending_has(tmp_path: Path, capsys):
@@ -244,3 +254,21 @@ def test_memory_map_prints_the_map(tmp_path: Path, capsys):
     assert main(["memory-map", "--root", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "Memory map" in out and "Cart Service" in out
+
+
+def test_pressure_measures_live_context_not_the_size_of_the_file(tmp_path: Path, capsys):
+    """`lts pressure` measured `len(transcript_file) / 4` against a hardcoded 200k window.
+
+    A transcript is append-only across `--resume`, so its size is the whole history of the
+    project, not the live window: on the real ppss transcript this path reported 45,413,420
+    tokens — 9900% — while the session was actually at 28%.
+    """
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "usage": {
+            "input_tokens": 900, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}},
+    }), encoding="utf-8")
+    main(["pressure", "--root", str(tmp_path), "--transcript", str(t)])
+    assert capsys.readouterr().out.strip() == "force"   # 900 / 1000, not 231 / 200000

@@ -137,9 +137,13 @@ def _run(args) -> int:
         elif args.op == "clear":
             pending.clear_all(d)
     elif args.cmd == "pressure":
-        tokens = transcript.estimate_tokens(Path(args.transcript))
+        # Must match what the hook reports. This used to measure `len(file) / 4` against a
+        # hardcoded 200k window: a transcript is append-only across `--resume`, so its size is
+        # the whole history of the project. On a real one that read 45,413,420 tokens (9900%)
+        # while the session was at 28%.
+        tokens = transcript.context_tokens(Path(args.transcript))
         print(transcript.pressure_level(
-            tokens, transcript.DEFAULT_WINDOW, cfg.pressure_warn, cfg.pressure_force
+            tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
         ))
     elif args.cmd == "status":
         tp = Path(args.transcript) if args.transcript else None

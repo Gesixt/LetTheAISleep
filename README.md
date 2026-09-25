@@ -22,7 +22,8 @@ everything worth keeping into linked long-term notes **without losing a single n
 - **`/memory-status`** shows a dashboard of both tiers and flags when to sleep or reindex.
 - **Hooks** (run by Claude Code automatically): `PreCompact` snapshots un-consolidated material as
   a backstop, `SessionStart` injects the anchor or forces an unfinished sleep to complete,
-  `UserPromptSubmit` adds escalating "time to sleep" pressure as context fills.
+  `UserPromptSubmit` states the measured context occupancy on every turn and adds escalating
+  "time to sleep" pressure as it fills.
 
 > **The sleep mark.** A Claude Code transcript is one append-only file that `--resume` keeps
 > extending, so it holds the whole history of a project, not the current chapter. `lts stm clear`
@@ -195,6 +196,12 @@ own are left alone; only the ones the clone ships are overwritten.
   (`Basic Memory: reindex -p <name>  ·  project info <slug>`, or `project_slug` in `--json`),
   and the skills already pass the right form to each. Simplest prevention: name Basic Memory projects in
   lowercase so both forms coincide.
+- **A reported context percentage that is not the real one** — the model has to be *given* the
+  number or it will estimate one. Observed 2026-09-25: it announced "context ~75%" and recommended
+  a `/compact` while the turn's own usage record read 276,013 tokens, i.e. 27.6%. The hook now
+  states `Context window: <used>/<window> tokens (<pct>%)` on every turn, and the nudges no longer
+  quote bands of their own. Two meters exist and must not be conflated: the **context window**
+  (what `/compact` resets) and the **STM buffer** (what `/sleep` clears).
 - **Wrong "context filling" warnings** — context pressure is measured against
   `[sleep] context_window` in `config.toml` (default `1000000`, for Opus's 1M window). If you run a
   smaller-window model, set your own value, e.g. `context_window = 200000` for Sonnet — otherwise

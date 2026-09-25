@@ -254,13 +254,16 @@ def test_user_prompt_submit_force_nudge(tmp_path: Path):
     assert "now" in text.lower()
 
 
-def test_user_prompt_submit_silent_when_low(tmp_path: Path):
+def test_user_prompt_submit_states_the_figure_but_does_not_nudge_when_low(tmp_path: Path):
+    # It used to be silent altogether below the warn threshold. Silence is what left the model
+    # with no measured number to quote, so the figure is now unconditional; only the nudge is not.
     make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
     t = tmp_path / "t.jsonl"
     _usage_transcript(t, 100)  # 10% -> none
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
-    assert ups.build_context({"transcript_path": str(t)}, root=tmp_path) == ""
-    assert ups.run({"transcript_path": str(t)}, root=tmp_path) == {}
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert text == "Context window: 100/1,000 tokens (10%)"
+    assert "/sleep" not in text
 
 
 def test_pre_compact_runs_as_subprocess_without_pythonpath(tmp_path: Path):
@@ -625,3 +628,32 @@ def test_user_prompt_submit_maps_nothing_outside_a_project(tmp_path: Path):
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
     assert "Cart Service" not in text
+
+
+def test_user_prompt_submit_always_states_the_measured_context(tmp_path: Path):
+    """The model invented "~75%" because no measured figure was ever in front of it.
+
+    Below the warn threshold this hook said nothing at all, and no skill passes --transcript
+    to `lts status`, so the one number that exists was never quotable. Observed 2026-09-25 in
+    ppss: the turn's own usage was 276,013 (27.6%) and the model reported ~75%.
+    """
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 276)  # 27.6% — well below warn, where the hook used to be silent
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "Context window" in text
+    assert "28%" in text
+    assert "/sleep" not in text          # a figure, not a nudge: there is no pressure yet
+
+
+def test_the_pressure_nudge_never_quotes_a_band_of_its_own(tmp_path: Path):
+    # "(~60%+)" in the nudge is what invited the model to state a specific number it had not
+    # measured. The measured line sits right above it; the nudge only says what to do.
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 900)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "90%" in text and "/sleep" in text
+    assert "60%+" not in text and "80%+" not in text
