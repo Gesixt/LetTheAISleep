@@ -107,3 +107,13 @@ def test_author_is_read_from_config(tmp_path: Path):
         '[vault]\nproject = "p"\nauthor = "dmitrii"\n', encoding="utf-8"
     )
     assert load_config(tmp_path).author == "dmitrii"
+
+def test_map_budget_defaults_and_can_be_overridden(tmp_path: Path):
+    (tmp_path / "config.toml").write_text('[vault]\nproject = "p"\n', encoding="utf-8")
+    assert load_config(tmp_path).map_budget == 1500
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "config.toml").write_text(
+        '[vault]\nproject = "p"\n\n[memory]\nmap_budget = 0\n', encoding="utf-8")
+    assert load_config(other).map_budget == 0

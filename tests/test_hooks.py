@@ -424,18 +424,24 @@ def test_session_start_keeps_the_anchor_when_the_digest_blows_up(tmp_path: Path)
     assert "[[N1]]" in text
 
 
-def test_session_start_suppresses_the_digest_while_a_sleep_is_owed(tmp_path: Path):
+def test_session_start_shows_the_digest_while_a_sleep_is_owed(tmp_path: Path):
     make_project(tmp_path)
     from lts.config import load_config
-    from lts import paths, pending
+    from lts import anchor, paths, pending
     cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    # The digest measures "since the last sleep", so it needs an anchor for a baseline.
+    anchor.write_anchor(
+        paths.anchor_file(cfg), updated="2020-01-01 00:00",
+        last_session="[[S]]", active_topics=["t"], active_notes=["[[N1]]"],
+    )
     pending.dump_snapshot(paths.pending_dir(cfg), "s", "raw")
     _vault_with_a_teammate_note(tmp_path)
 
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert "finish sleeping" in text.lower()
-    assert "Cart Service" not in text             # one demand at a time
+    assert "Cart Service" in text                 # a teammate's work is not worth hiding
 
 
 def test_session_start_says_exactly_what_is_owed(tmp_path: Path):
@@ -550,3 +556,72 @@ def test_pre_compact_never_marks_past_material_it_did_not_snapshot(tmp_path: Pat
     snaps = _snapshots(tmp_path)
     assert len(snaps) == 2
     assert snaps[1].read_text(encoding="utf-8") == "[assistant] flushed late"
+
+
+def test_session_start_shows_the_anchor_even_when_a_sleep_is_owed(tmp_path: Path):
+    """The sleep demand used to *replace* the anchor, which hid memory exactly when it was needed.
+
+    "One demand at a time" assumed sessions end often. A session that runs for two months on
+    /sleep + /compact never has an empty STM buffer, so the anchor — the only thing telling the
+    model which notes exist — was never delivered at all, and /recall had nothing to aim at.
+    """
+    from lts import anchor, paths, stm
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(
+        paths.anchor_file(cfg),
+        updated="2026-09-25 10:00",
+        last_session="Session_2026-09-25_1000",
+        active_topics=["the memory map"],
+        active_notes=["knowledge-base/Architecture"],
+    )
+    stm.append(paths.stm_file(cfg), "un-consolidated fact")
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    text = ss.build_context({"session_id": "s", "source": "compact"}, root=tmp_path)
+
+    assert "finish sleeping" in text.lower()          # the demand still stands
+    assert "Session_2026-09-25_1000" in text          # …and no longer hides the anchor
+    assert "knowledge-base/Architecture" in text
+    assert text.index("finish sleeping") < text.index("Session_2026-09-25_1000")
+
+
+def _vault_note(root: Path, folder: str, title: str) -> None:
+    d = root / ".ai_vault" / folder
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{title}.md").write_text(f"# {title}\n", encoding="utf-8")
+
+
+def test_user_prompt_submit_injects_the_memory_map(tmp_path: Path):
+    # Between two compactions nothing else tells the model the vault exists.
+    make_project(tmp_path)
+    _vault_note(tmp_path, "knowledge-base", "Cart Service")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 100)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "Memory map" in text
+    assert "Cart Service" in text
+
+
+def test_user_prompt_submit_puts_the_pressure_line_after_the_map(tmp_path: Path):
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    _vault_note(tmp_path, "knowledge-base", "Cart Service")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 900)  # 90% -> force
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "Cart Service" in text
+    assert text.index("Cart Service") < text.index("/sleep")
+
+
+def test_user_prompt_submit_maps_nothing_outside_a_project(tmp_path: Path):
+    # No config.toml, so a neighbouring .ai_vault is not ours to advertise.
+    _vault_note(tmp_path, "knowledge-base", "Cart Service")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 900)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "Cart Service" not in text

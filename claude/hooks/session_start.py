@@ -35,9 +35,14 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     snapshots = pending.list_snapshots(paths.pending_dir(cfg))
     stm_text = stm.read(paths.stm_file(cfg))
     stm_entries = len([ln for ln in stm_text.splitlines() if ln.strip()])
+
+    # The sleep demand is one block among several, never a replacement for them. It used to
+    # return early — "one demand at a time" — which assumed sessions end often. A session that
+    # runs for months on /sleep + /compact never has an empty buffer, so the anchor and the
+    # digest were withheld permanently and the model had no idea which notes existed.
+    blocks = []
     if snapshots or stm_entries:
-        # One demand at a time: finishing the sleep comes before reading anyone else's notes.
-        return _FORCE_MSG.format(stm=stm_entries, snapshots=len(snapshots))
+        blocks.append(_FORCE_MSG.format(stm=stm_entries, snapshots=len(snapshots)))
 
     # The digest scans the vault (e.g. note.stat()), which can raise on a dangling symlink or
     # a mid-scan race. That must never suppress the anchor, so degrade the digest to "".
@@ -45,7 +50,7 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
         digest_block = digest.render(digest.collect(cfg))
     except Exception:
         digest_block = ""
-    blocks = [
+    blocks += [
         anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))),
         digest_block,
     ]

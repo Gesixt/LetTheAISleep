@@ -233,3 +233,14 @@ def test_update_refuses_a_directory_that_has_no_memory_installed(tmp_path: Path,
     assert main(["update", "--target", str(stray), "--source", str(source)]) == 2
     assert "no lts project" in capsys.readouterr().err
     assert not (stray / ".claude").exists()
+
+
+def test_memory_map_prints_the_map(tmp_path: Path, capsys):
+    # The hook injects this on every turn; a command makes it inspectable without one.
+    make_project(tmp_path)
+    kb = tmp_path / ".ai_vault" / "knowledge-base"
+    kb.mkdir(parents=True)
+    (kb / "Cart Service.md").write_text("# Cart Service\n", encoding="utf-8")
+    assert main(["memory-map", "--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Memory map" in out and "Cart Service" in out

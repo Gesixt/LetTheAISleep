@@ -12,6 +12,7 @@ DEFAULTS = {
     "pressure_warn": 0.60,
     "pressure_force": 0.80,
     "context_window": 1_000_000,   # model context window; override in config.toml (e.g. 200_000 for Sonnet)
+    "map_budget": 1500,            # chars of memory map injected per turn; 0 disables it
 }
 
 
@@ -38,6 +39,7 @@ class Config:
     pressure_warn: float
     pressure_force: float
     context_window: int
+    map_budget: int           # characters; the map degrades to fit, and 0 turns it off
 
 
 def is_lts_config(path: Path) -> bool:
@@ -87,6 +89,7 @@ def load_config(start: Path | None = None) -> Config:
         data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
         vault = data.get("vault", {})
         sleep = data.get("sleep", {})
+        memory = data.get("memory", {})
         if "mode" in vault:
             values["vault_mode"] = vault["mode"]
         if "project" in vault:
@@ -101,4 +104,6 @@ def load_config(start: Path | None = None) -> Config:
             values["pressure_force"] = float(sleep["pressure_force"])
         if "context_window" in sleep:
             values["context_window"] = int(sleep["context_window"])
+        if "map_budget" in memory:
+            values["map_budget"] = int(memory["map_budget"])
     return Config(project_root=root, configured=configured, **values)

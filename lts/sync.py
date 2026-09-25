@@ -91,7 +91,11 @@ do not let findings evaporate:
 - **Sleep at the end of a chapter.** When a task or investigation wraps up (or context is
   filling), run the `/sleep` skill to consolidate the STM buffer + the conversation into linked
   long-term notes; it then clears STM. Offer `/sleep` before the user moves on.
-- **Recall before re-deriving.** When a question touches earlier work, use `/recall` first.
+- **Recall before re-deriving.** Every turn carries a **memory map** — the titles of every note
+  in the vault. If a question touches anything the map names, read that note instead of working
+  it out again; `/recall` when you need ranking and linked neighbours, `read_note` when a title
+  is an obvious match. Re-deriving something already written down is the failure this exists to
+  prevent.
 - **Check load** any time with `/memory-status`.
 
 The Basic Memory project name is in `config.toml` (`[vault] project`); the skills pass it to

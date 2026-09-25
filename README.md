@@ -39,6 +39,15 @@ everything worth keeping into linked long-term notes **without losing a single n
 > a `/compact` writes, and the compaction summary — are filtered out of the transcript
 > entirely, so they reach neither the STM buffer nor a snapshot.
 
+> **The memory map.** `/recall` is a skill, so using it is the model's decision — and the model
+> cannot decide to read notes it does not know exist. `SessionStart` used to return the "unfinished
+> sleep" demand *instead of* the anchor, which is correct for short sessions and catastrophic for
+> long ones: a session running for weeks on `/sleep` + `/compact` never has an empty STM buffer, so
+> the anchor was withheld permanently. Two fixes: `SessionStart` now emits the demand *and* the
+> anchor *and* the digest; and `UserPromptSubmit` injects a **memory map** on every turn — the
+> titles of every note in the vault, grouped, ~120 tokens, capped by `[memory] map_budget` (0 turns
+> it off). The map guarantees the *information*; choosing what to read is still the model's.
+
 > **Semantic search note:** Basic Memory serves full-text and graph links immediately on write,
 > but vector embeddings are rebuilt by `basic-memory reindex --embeddings -p <project>` (not on
 > every write). `/sleep` runs this after consolidating; `install.py` lists it as a setup step.
@@ -212,6 +221,7 @@ own are left alone; only the ones the clone ships are overwritten.
 | `lts doctor [--json]` | Check where memory lives: the resolved project root, and any stray sidecars. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
+| `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |
 | `basic-memory project info <project>` | LTM counts (Entities/Relations/Isolated) and embedding status. |
 
 **Recalling memory** — `/recall` takes an optional topic or question:

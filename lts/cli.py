@@ -6,7 +6,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import anchor, digest, doctor, naming, paths, pending, status, stm, sync, transcript, watermark
+from lts import (anchor, digest, doctor, memorymap, naming, paths, pending, status, stm,
+                 sync, transcript, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
 
@@ -76,6 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.add_argument("--check", action="store_true",
                           help="report what is stale without writing; exit 1 if anything is")
     p_update.add_argument("--json", action="store_true")
+
+    p_map = sub.add_parser("memory-map")
+    _add_root(p_map)
 
     p_session = sub.add_parser("session-name")
     _add_root(p_session)
@@ -169,6 +173,8 @@ def _run(args) -> int:
         else:
             print(sync.render(report))
         return 1 if (args.check and report["stale"]) else 0
+    elif args.cmd == "memory-map":
+        print(memorymap.render(cfg))
     elif args.cmd == "session-name":
         when = datetime.strptime(args.at, "%Y-%m-%d %H:%M") if args.at else None
         title = naming.session_note_name(cfg, when)

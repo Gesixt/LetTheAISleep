@@ -10,6 +10,10 @@ Goal: load only what is relevant, cheaply. Prefer notes directly linked from the
 **Target the right vault.** Read `[vault] project` from this project's `config.toml` and pass it as the `project` parameter to every Basic Memory tool call (`search`, `build_context`, `read_note`) — otherwise they query the default `main` vault instead of this project's.
 
 ## Steps
+0. **Check the map you already have.** Every turn carries a **memory map** — the titles of every
+   note in the vault. When one of them obviously answers the question, `read_note` it directly and
+   stop; the steps below are for when you need ranking, snippets or linked neighbours. The map is
+   titles only, so it tells you what exists, never what a note says.
 1. **Anchor first.** Read the anchor entry points:
    `lts anchor render`
    These `active_notes` are the highest-priority candidates.
