@@ -269,3 +269,168 @@ def test_render_shows_a_fix_only_where_something_is_wrong(tmp_path: Path):
     ])
     assert "never print this" not in out
     assert "Fix: run /sleep" in out
+
+
+import json as _json
+from datetime import datetime, timedelta, timezone
+
+from lts import paths, watermark
+
+
+def _mark(cfg, which: str, when: datetime) -> None:
+    target = paths.capture_mark_file(cfg) if which == "capture" else paths.sleep_mark_file(cfg)
+    paths.ensure_sidecar(cfg)
+    watermark.write_mark(target, watermark.mark_at(when))
+
+
+def _transcript(path: Path, stamps: list[str]) -> Path:
+    """A transcript with one assistant message per stamp, plus a usage record."""
+    lines = []
+    for i, stamp in enumerate(stamps):
+        lines.append(_json.dumps({
+            "type": "assistant", "uuid": f"u{i}", "timestamp": stamp,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": f"msg {i}"}],
+                        "usage": {"input_tokens": 100}},
+        }))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+_T0 = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_equal_marks_are_normal_because_a_sleep_writes_both_at_one_instant(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "sleep", _T0)
+    assert _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks").level == "ok"
+
+
+def test_a_sleep_mark_ahead_of_capture_fails(tmp_path: Path):
+    """Consolidation would be claiming material the capture never read."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "sleep", _T0 + timedelta(minutes=5))
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=10)), "marks")
+    assert check.level == "fail"
+    assert "ahead of" in check.message
+
+
+def test_a_mark_in_the_future_fails(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0 + timedelta(hours=1))
+    check = _by_id(health.run(cfg, now=_T0), "marks")
+    assert check.level == "fail"
+    assert "future" in check.message
+
+
+def test_no_marks_at_all_is_a_skip_not_a_pass(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    assert _by_id(health.run(cfg, now=_T0), "marks").level == "skip"
+
+
+def test_one_exchange_behind_the_capture_mark_is_the_measured_normal(tmp_path: Path):
+    """Stop reads the transcript before the turn's last message is flushed, and mark_of
+    deliberately stops short of it — so exactly one behind means nothing is wrong."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T12:30:00.000Z"])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
+    assert check.level == "ok"
+
+
+def test_a_stale_capture_mark_with_a_real_backlog_fails(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(tmp_path / "t.jsonl", [
+        "2026-09-29T12:20:00.000Z", "2026-09-29T12:40:00.000Z", "2026-09-29T13:00:00.000Z",
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=2)), "capture")
+    assert check.level == "fail"
+    assert "not capturing" in check.message
+
+
+def test_a_busy_turn_inside_the_tolerance_does_not_trip_capture(tmp_path: Path):
+    """Several exchanges within ten minutes is a busy turn, not a dead hook."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(tmp_path / "t.jsonl", [
+        "2026-09-29T12:00:30.000Z", "2026-09-29T12:01:00.000Z", "2026-09-29T12:02:00.000Z",
+    ])
+    assert _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(minutes=5)),
+                  "capture").level == "ok"
+
+
+def test_capture_skips_with_a_reason_when_no_transcript_is_given(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    check = _by_id(health.run(cfg, now=_T0), "capture")
+    assert check.level == "skip"
+    assert "--transcript" in check.message
+
+
+def test_tokens_above_the_window_fail_and_name_both_numbers(tmp_path: Path):
+    """The 9900% bug, caught as an assertion on an output."""
+    cfg = _healthy(tmp_path)
+    metrics = {"pressure": {"tokens": 45_413_420, "window": 1_000_000}}
+    check = _by_id(health.run(cfg, metrics=metrics, now=_T0), "pressure")
+    assert check.level == "fail"
+    assert "45,413,420" in check.message and "1,000,000" in check.message
+
+
+def test_tokens_inside_the_window_pass(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    metrics = {"pressure": {"tokens": 276_013, "window": 1_000_000}}
+    check = _by_id(health.run(cfg, metrics=metrics, now=_T0), "pressure")
+    assert check.level == "ok"
+    assert "28%" in check.message
+
+
+def test_a_window_of_zero_fails_rather_than_dividing(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    metrics = {"pressure": {"tokens": 100, "window": 0}}
+    assert _by_id(health.run(cfg, metrics=metrics, now=_T0), "pressure").level == "fail"
+
+
+def test_pressure_skips_with_a_reason_without_a_transcript(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    check = _by_id(health.run(cfg, metrics={"pressure": None}, now=_T0), "pressure")
+    assert check.level == "skip"
+    assert "--transcript" in check.message
+
+
+def test_an_anchor_older_than_the_newest_session_note_warns(tmp_path: Path):
+    """A /sleep wrote a session note and did not update the anchor."""
+    cfg = _healthy(tmp_path)
+    _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
+    paths.ensure_sidecar(cfg)
+    from lts import anchor as anchor_mod
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2020-01-01 00:00",
+                            last_session="old", active_topics=[], active_notes=[])
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "warn"
+    assert "a session behind" in check.message
+
+
+def test_a_fresh_anchor_passes(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
+    paths.ensure_sidecar(cfg)
+    from lts import anchor as anchor_mod
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2099-01-01 00:00",
+                            last_session="new", active_topics=[], active_notes=[])
+    assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "ok"
+
+
+def test_session_notes_without_an_anchor_fail(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "fail"
+    assert "no anchor" in check.message
+
+
+def test_team_mode_session_notes_are_found_through_the_author_folder(tmp_path: Path):
+    """Team mode nests notes by author, so a flat listing would miss them entirely."""
+    cfg = _healthy(tmp_path)
+    _vault(tmp_path, {"session-memory/dmitrii": ["Session_dmitrii_2026-09-29_1200"]})
+    assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "fail"

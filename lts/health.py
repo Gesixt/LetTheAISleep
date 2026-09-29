@@ -23,9 +23,10 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lts import doctor, paths, sync
+from lts import anchor, doctor, paths, status, sync, watermark
 from lts.config import Config, is_lts_config
 
 # Worst first. `skip` outranks `ok` because a check that did not run is not a check that passed.
@@ -39,6 +40,16 @@ _IDS = (
 )
 
 _QUOTED = re.compile(r'"([^"]+)"')
+
+# Clock skew we forgive before calling a timestamp impossible.
+_SKEW = timedelta(seconds=60)
+# How far the transcript may run past the capture mark before the Stop hook looks dead. One
+# exchange behind is the measured normal (the turn's last message is not flushed when Stop reads
+# the file), so both a count and a time threshold must be exceeded.
+_CAPTURE_TOLERANCE = timedelta(minutes=10)
+# The anchor's `updated` is minute-granular local time, so a sleep can look up to a minute older
+# than the note it just wrote.
+_ANCHOR_SKEW = timedelta(minutes=2)
 
 _DEMAND_HEAD = (
     "## Memory health: {n} check{s} FAILED\n"
@@ -211,20 +222,176 @@ def _check_vault(cfg: Config) -> Check:
     return Check("vault", "ok", f"{len(notes)} notes at {vault}")
 
 
-def run(cfg: Config) -> list[Check]:
+# --- invariants -----------------------------------------------------------------------------
+
+
+def _utc(when: datetime | None) -> datetime | None:
+    """`when` as timezone-aware UTC. A naive timestamp is read as UTC, not as local time.
+
+    Every comparison in this module mixes a caller's `now` with a mark parsed out of a file, and
+    one naive operand raises rather than answering — the check would then not run at all.
+    """
+    if when is None:
+        return None
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when.astimezone(timezone.utc)
+
+
+def _stamp_time(stamp: object) -> datetime | None:
+    """A Claude Code ISO-8601 `...Z` timestamp as UTC, or None when it is absent or unparseable."""
+    if not stamp:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(str(stamp).replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _check_marks(cfg: Config, now: datetime) -> Check:
+    """The two marks must tell a consistent story about what has been read and consolidated."""
+    capture = _stamp_time(watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp"))
+    sleep = _stamp_time(watermark.read_mark(paths.sleep_mark_file(cfg)).get("timestamp"))
+    if capture is None and sleep is None:
+        return Check("marks", "skip", "no marks yet — nothing has been captured or consolidated")
+    for name, when in (("capture", capture), ("sleep", sleep)):
+        if when is not None and when > now + _SKEW:
+            return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
+                         "check the system clock; the next Stop hook will then correct it")
+    # Equal marks are normal: a sleep writes both at one instant.
+    if capture is not None and sleep is not None and sleep > capture:
+        return Check(
+            "marks", "fail",
+            f"the sleep mark ({sleep.isoformat()}) is ahead of the capture mark "
+            f"({capture.isoformat()}) — consolidation claims material the capture never read",
+            "run /sleep to re-consolidate this material before it is dropped",
+        )
+    return Check("marks", "ok", "marks consistent")
+
+
+def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> Check:
+    """Is the transcript running away from the capture mark?
+
+    Exactly one exchange behind is the measured normal — the Stop hook reads the transcript before
+    Claude Code has flushed the turn's last message, and `mark_at` deliberately covers only what
+    was there. So a count threshold *and* a time threshold must both be exceeded; either alone
+    would cry wolf on every ordinary turn.
+    """
+    if transcript_path is None:
+        return Check("capture", "skip",
+                     "no transcript given — run `lts doctor --transcript <path>` to check this")
+    path = Path(transcript_path)
+    if not path.exists():
+        return Check("capture", "skip", f"transcript not found: {path}")
+    mark = watermark.read_mark(paths.capture_mark_file(cfg))
+    backlog = watermark.entries_after(path, mark)
+    if len(backlog) <= 1:
+        return Check("capture", "ok",
+                     f"{len(backlog)} exchange(s) behind the capture mark — the normal flush lag")
+    marked = _stamp_time(mark.get("timestamp"))
+    newest = _stamp_time(backlog[-1].get("timestamp"))
+    if marked is not None and newest is not None and newest - marked > _CAPTURE_TOLERANCE:
+        minutes = int((newest - marked).total_seconds() // 60)
+        return Check(
+            "capture", "fail",
+            f"{len(backlog)} exchanges behind the capture mark, the newest {minutes} min past it "
+            "— the Stop hook is not capturing",
+            "check /tmp/lts-hook-errors.log, and the hooks check above",
+        )
+    tolerance = int(_CAPTURE_TOLERANCE.total_seconds() // 60)
+    return Check("capture", "ok",
+                 f"{len(backlog)} exchanges behind the capture mark, within {tolerance} min")
+
+
+def _check_pressure(metrics: dict | None) -> Check:
+    """Measured tokens must fit the window they are measured against.
+
+    `lts pressure` once reported 9900% on a real project: 45,413,420 tokens against a
+    1,000,000-token window, a character estimate divided by a hardcoded window. A percentage
+    above 100 is never real, so it is an assertion on the output rather than a bug hunt.
+    """
+    measured = (metrics or {}).get("pressure")
+    if not measured:
+        return Check("pressure", "skip",
+                     "no transcript given — run `lts doctor --transcript <path>` to check this")
+    tokens = int(measured.get("tokens") or 0)
+    window = int(measured.get("window") or 0)
+    if window <= 0:
+        return Check("pressure", "fail", f"the context window is {window}",
+                     "set `[context] window` in config.toml")
+    if tokens > window:
+        return Check(
+            "pressure", "fail",
+            f"measured {tokens:,} tokens against a {window:,}-token window "
+            f"({round(tokens / window * 100)}%)",
+            "a percentage above 100 is never real — either the measurement or "
+            "`[context] window` is wrong",
+        )
+    return Check("pressure", "ok", f"{tokens:,}/{window:,} tokens ({round(tokens / window * 100)}%)")
+
+
+def _check_anchor_fresh(cfg: Config) -> Check:
+    """The anchor is the entry point a new session reads; it must not lag the notes it points at."""
+    entry = anchor.read_anchor(paths.anchor_file(cfg))
+    sessions_dir = paths.vault_root(cfg) / "session-memory"
+    # rglob, not glob: team mode nests notes under session-memory/<author>/.
+    sessions = list(sessions_dir.rglob("*.md")) if sessions_dir.is_dir() else []
+    if not entry:
+        if sessions:
+            return Check("anchor_fresh", "fail",
+                         f"no anchor, but {len(sessions)} session note(s) exist",
+                         "run `lts anchor write ...` — /sleep step 6 does this")
+        return Check("anchor_fresh", "skip", "no anchor and no session notes yet")
+    if not sessions:
+        return Check("anchor_fresh", "ok", "anchor present; no session notes to compare against")
+    newest = max(sessions, key=lambda p: p.stat().st_mtime)
+    # Both sides are naive local times: `updated` is minute-granular local, the mtime is local.
+    note_at = datetime.fromtimestamp(newest.stat().st_mtime)
+    try:
+        anchor_at = datetime.strptime(str(entry.get("updated", "")), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return Check("anchor_fresh", "warn",
+                     f"the anchor has no readable `updated`: {entry.get('updated')!r}",
+                     "rewrite it with `lts anchor write`")
+    if anchor_at + _ANCHOR_SKEW < note_at:
+        return Check(
+            "anchor_fresh", "warn",
+            f"anchor updated {entry['updated']}, but {newest.name} is newer — the entry points "
+            "are a session behind",
+            "a /sleep wrote a note without updating the anchor; run `lts anchor write`",
+        )
+    return Check("anchor_fresh", "ok", f"anchor updated {entry['updated']}")
+
+
+def run(
+    cfg: Config,
+    *,
+    transcript_path: Path | None = None,
+    metrics: dict | None = None,
+    now: datetime | None = None,
+) -> list[Check]:
     """Every check, in `_IDS` order.
+
+    `metrics` is a `status.collect` result. It is taken as an argument rather than recomputed so
+    the transcript is parsed at most once per run, and so `status.collect` stays the single place
+    that counts memory load.
 
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.
     """
+    now = _utc(now) or datetime.now(timezone.utc)
     config_check = _check_config(cfg)
     if not cfg.configured:
         return [config_check] + [
             Check(check_id, "skip", "no lts project here") for check_id in _IDS[1:]
         ]
+    if metrics is None:
+        metrics = status.collect(cfg, transcript_path=transcript_path)
     return [
         config_check,
         _check_sidecars(cfg),
         _check_hooks(cfg),
         _check_vault(cfg),
+        _check_marks(cfg, now),
+        _check_capture(cfg, transcript_path, now),
+        _check_pressure(metrics),
+        _check_anchor_fresh(cfg),
     ]
