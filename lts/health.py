@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lts import anchor, doctor, paths, status, sync, watermark
+from lts import anchor, doctor, naming, paths, status, sync, watermark
 from lts.config import Config, is_lts_config
 
 # Worst first. `skip` outranks `ok` because a check that did not run is not a check that passed.
@@ -274,6 +274,11 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
     Claude Code has flushed the turn's last message, and `mark_at` deliberately covers only what
     was there. So a count threshold *and* a time threshold must both be exceeded; either alone
     would cry wolf on every ordinary turn.
+
+    The mark is classified before the backlog is read, because the backlog means nothing on its
+    own: `entries_after` returns the whole transcript when the mark is empty, and an empty list
+    when the mark's timestamp does not parse. Both would otherwise arrive here as a plain count
+    and be reported as a healthy lag.
     """
     if transcript_path is None:
         return Check("capture", "skip",
@@ -281,24 +286,56 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
     path = Path(transcript_path)
     if not path.exists():
         return Check("capture", "skip", f"transcript not found: {path}")
+
     mark = watermark.read_mark(paths.capture_mark_file(cfg))
+    stamp = mark.get("timestamp")
+    if not stamp:
+        # Not `fail`: a brand-new project legitimately has no mark and a transcript full of
+        # exchanges, and a false demand is what trains demands away. The same failure class is
+        # still caught, more cheaply: the `capture_progress` trend check sees an absent or frozen
+        # mark across several journalled runs with a flat buffer.
+        return Check(
+            "capture", "skip",
+            "no capture mark yet — there is nothing to measure the transcript against",
+            "the next Stop hook writes one; if none appears, see the hooks check above",
+        )
+    marked = _stamp_time(stamp)
+    if marked is None:
+        # `entries_after` filters lexicographically, so no real stamp sorts above an unparseable
+        # one and the backlog comes back empty — the system would claim to be perfectly current.
+        return Check(
+            "capture", "fail",
+            f"the capture mark timestamp does not parse: {stamp!r} — the backlog cannot be "
+            "trusted, and an unreadable mark makes the transcript look fully captured",
+            "delete the capture mark file so the next Stop hook writes a fresh one",
+        )
+
     backlog = watermark.entries_after(path, mark)
     if len(backlog) <= 1:
         return Check("capture", "ok",
                      f"{len(backlog)} exchange(s) behind the capture mark — the normal flush lag")
-    marked = _stamp_time(mark.get("timestamp"))
+    # One lag, one reference: the newest exchange when it carries a readable stamp, `now` when it
+    # does not. The claim below can only quote a number this line actually produced.
     newest = _stamp_time(backlog[-1].get("timestamp"))
-    if marked is not None and newest is not None and newest - marked > _CAPTURE_TOLERANCE:
-        minutes = int((newest - marked).total_seconds() // 60)
+    reference, measured_to = (
+        (newest, "the newest exchange") if newest is not None
+        else (now, "now (the newest exchange has no readable timestamp)")
+    )
+    lag = reference - marked
+    tolerance = int(_CAPTURE_TOLERANCE.total_seconds() // 60)
+    if lag > _CAPTURE_TOLERANCE:
+        minutes = int(lag.total_seconds() // 60)
         return Check(
             "capture", "fail",
-            f"{len(backlog)} exchanges behind the capture mark, the newest {minutes} min past it "
-            "— the Stop hook is not capturing",
+            f"{len(backlog)} exchanges behind the capture mark, {minutes} min past it measured to "
+            f"{measured_to} — the Stop hook is not capturing",
             "check /tmp/lts-hook-errors.log, and the hooks check above",
         )
-    tolerance = int(_CAPTURE_TOLERANCE.total_seconds() // 60)
-    return Check("capture", "ok",
-                 f"{len(backlog)} exchanges behind the capture mark, within {tolerance} min")
+    return Check(
+        "capture", "ok",
+        f"{len(backlog)} exchanges behind the capture mark, within {tolerance} min of "
+        f"{measured_to}",
+    )
 
 
 def _check_pressure(metrics: dict | None) -> Check:
@@ -331,7 +368,9 @@ def _check_pressure(metrics: dict | None) -> Check:
 def _check_anchor_fresh(cfg: Config) -> Check:
     """The anchor is the entry point a new session reads; it must not lag the notes it points at."""
     entry = anchor.read_anchor(paths.anchor_file(cfg))
-    sessions_dir = paths.vault_root(cfg) / "session-memory"
+    # `naming.SESSION_DIR`, not a literal: a renamed folder would find zero notes here and degrade
+    # into the silent false pass this module exists to prevent.
+    sessions_dir = paths.vault_root(cfg) / naming.SESSION_DIR
     # rglob, not glob: team mode nests notes under session-memory/<author>/.
     sessions = list(sessions_dir.rglob("*.md")) if sessions_dir.is_dir() else []
     if not entry:
@@ -342,9 +381,24 @@ def _check_anchor_fresh(cfg: Config) -> Check:
         return Check("anchor_fresh", "skip", "no anchor and no session notes yet")
     if not sessions:
         return Check("anchor_fresh", "ok", "anchor present; no session notes to compare against")
-    newest = max(sessions, key=lambda p: p.stat().st_mtime)
+    # One `stat` per note, kept: statting again for the mtime can raise on a note that vanished
+    # between the two calls, and an exception here takes the whole report down with it.
+    stamped = []
+    for note in sessions:
+        try:
+            stamped.append((note.stat().st_mtime, note))
+        except OSError:
+            continue  # a note that is no longer there cannot be the newest one
+    if not stamped:
+        return Check(
+            "anchor_fresh", "skip",
+            f"none of the {len(sessions)} session note(s) could be read to compare the anchor "
+            "against",
+            "re-run the check; if it persists, something else is rewriting the vault",
+        )
+    mtime, newest = max(stamped, key=lambda pair: pair[0])
     # Both sides are naive local times: `updated` is minute-granular local, the mtime is local.
-    note_at = datetime.fromtimestamp(newest.stat().st_mtime)
+    note_at = datetime.fromtimestamp(mtime)
     try:
         anchor_at = datetime.strptime(str(entry.get("updated", "")), "%Y-%m-%d %H:%M")
     except ValueError:

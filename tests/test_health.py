@@ -1,7 +1,10 @@
 import json
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lts import health, sync
+from lts import anchor as anchor_mod
+from lts import health, paths, sync, watermark
 from lts.config import load_config
 from tests.helpers import make_project
 
@@ -271,12 +274,6 @@ def test_render_shows_a_fix_only_where_something_is_wrong(tmp_path: Path):
     assert "Fix: run /sleep" in out
 
 
-import json as _json
-from datetime import datetime, timedelta, timezone
-
-from lts import paths, watermark
-
-
 def _mark(cfg, which: str, when: datetime) -> None:
     target = paths.capture_mark_file(cfg) if which == "capture" else paths.sleep_mark_file(cfg)
     paths.ensure_sidecar(cfg)
@@ -287,7 +284,7 @@ def _transcript(path: Path, stamps: list[str]) -> Path:
     """A transcript with one assistant message per stamp, plus a usage record."""
     lines = []
     for i, stamp in enumerate(stamps):
-        lines.append(_json.dumps({
+        lines.append(json.dumps({
             "type": "assistant", "uuid": f"u{i}", "timestamp": stamp,
             "message": {"role": "assistant", "content": [{"type": "text", "text": f"msg {i}"}],
                         "usage": {"input_tokens": 100}},
@@ -403,7 +400,6 @@ def test_an_anchor_older_than_the_newest_session_note_warns(tmp_path: Path):
     cfg = _healthy(tmp_path)
     _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
     paths.ensure_sidecar(cfg)
-    from lts import anchor as anchor_mod
     anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2020-01-01 00:00",
                             last_session="old", active_topics=[], active_notes=[])
     check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
@@ -415,7 +411,6 @@ def test_a_fresh_anchor_passes(tmp_path: Path):
     cfg = _healthy(tmp_path)
     _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
     paths.ensure_sidecar(cfg)
-    from lts import anchor as anchor_mod
     anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2099-01-01 00:00",
                             last_session="new", active_topics=[], active_notes=[])
     assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "ok"
@@ -434,3 +429,53 @@ def test_team_mode_session_notes_are_found_through_the_author_folder(tmp_path: P
     cfg = _healthy(tmp_path)
     _vault(tmp_path, {"session-memory/dmitrii": ["Session_dmitrii_2026-09-29_1200"]})
     assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "fail"
+
+
+def test_no_capture_mark_at_all_is_a_skip_not_a_pass(tmp_path: Path):
+    """A hook that is wired but has never written a mark is not a hook that is up to date.
+
+    `entries_after` returns the whole transcript for an empty mark, so the backlog count is real
+    but there is no mark to measure it against — and no time claim may be made about it.
+    """
+    cfg = _healthy(tmp_path)
+    tr = _transcript(tmp_path / "t.jsonl", [
+        f"2026-09-29T{hour:02d}:00:00.000Z" for hour in range(4, 13)
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
+    assert check.level == "skip", check
+    assert "no capture mark" in check.message
+    assert "within" not in check.message
+
+
+def test_an_unparseable_capture_mark_fails_because_the_backlog_looks_empty(tmp_path: Path):
+    """A corrupt mark is the dangerous case: the lexicographic filter reports nothing behind."""
+    cfg = _healthy(tmp_path)
+    paths.ensure_sidecar(cfg)
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": "not-a-date"})
+    tr = _transcript(tmp_path / "t.jsonl", [
+        "2026-09-29T12:20:00.000Z", "2026-09-29T12:40:00.000Z", "2026-09-29T13:00:00.000Z",
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=2)), "capture")
+    assert check.level == "fail", check
+    assert "not-a-date" in check.message
+
+
+def test_a_mark_inside_the_clock_skew_is_not_called_impossible(tmp_path: Path):
+    """_SKEW exists because a hook and the file it reads can disagree by seconds."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0 + timedelta(seconds=30))
+    assert _by_id(health.run(cfg, now=_T0), "marks").level == "ok"
+
+
+def test_an_anchor_truncated_to_the_minute_is_not_a_session_behind(tmp_path: Path):
+    """_ANCHOR_SKEW exists because /sleep writes the note first and the anchor second, and
+    `updated` is minute-granular — so the anchor can look up to a minute older than its note."""
+    cfg = _healthy(tmp_path)
+    vault = _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
+    note = vault / "session-memory" / "Session_2026-09-29_1200.md"
+    written = datetime(2026, 9, 29, 12, 0, 45).timestamp()  # local, as `fromtimestamp` reads it
+    os.utime(note, (written, written))
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                            last_session="new", active_topics=[], active_notes=[])
+    assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "ok"
