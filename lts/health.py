@@ -246,25 +246,107 @@ def _stamp_time(stamp: object) -> datetime | None:
         return None
 
 
+# What a mark file turned out to hold, established before anything is compared against it. Only
+# `_MARK_READ` may take part in a comparison, and only a comparison may be reported as passing.
+_MARK_MISSING = "missing"          # no file: nothing has ever been written here
+_MARK_UNREADABLE = "unreadable"    # a file, but not a mark: truncated, or not JSON at all
+_MARK_NO_STAMP = "no-stamp"        # a mark, but with no timestamp value in it
+_MARK_BAD_STAMP = "bad-stamp"      # a timestamp that does not parse
+_MARK_READ = "read"
+
+
+def _classify_mark(path: Path) -> tuple[str, datetime | None, dict, object]:
+    """`(state, when, mark, raw timestamp)` — what is actually in a mark file.
+
+    `watermark.read_mark` answers `{}` both for a file that is absent and for one whose JSON is
+    unreadable (`write_mark` is a plain, non-atomic write, so a hook killed mid-write leaves a
+    partial file behind), and `mark_of` legitimately writes `timestamp: None` for an exchange that
+    carried no stamp. Collapsed into a bare `None`, those states are indistinguishable from each
+    other — and a `None` operand silently cancels the comparison it was meant to take part in,
+    which was then reported as the comparison having passed. Hence: classify, then compare.
+    """
+    path = Path(path)
+    if not path.exists():
+        return _MARK_MISSING, None, {}, None
+    mark = watermark.read_mark(path)
+    if not mark:
+        return _MARK_UNREADABLE, None, {}, None
+    stamp = mark.get("timestamp")
+    if not stamp:
+        return _MARK_NO_STAMP, None, mark, stamp
+    when = _stamp_time(stamp)
+    if when is None:
+        return _MARK_BAD_STAMP, None, mark, stamp
+    return _MARK_READ, when, mark, stamp
+
+
 def _check_marks(cfg: Config, now: datetime) -> Check:
-    """The two marks must tell a consistent story about what has been read and consolidated."""
-    capture = _stamp_time(watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp"))
-    sleep = _stamp_time(watermark.read_mark(paths.sleep_mark_file(cfg)).get("timestamp"))
-    if capture is None and sleep is None:
+    """The two marks must tell a consistent story about what has been read and consolidated.
+
+    Both marks are classified before either is used. "Marks consistent" is a claim about a
+    comparison, and with one mark unreadable the comparison short-circuited on `None` while this
+    check still returned it — about a mark it had never read. A corrupt sleep mark is the single
+    state in which "consolidation claims material the capture never read" *cannot* be ruled out,
+    so it is the last state that may be reported as the healthy one.
+    """
+    capture_file = paths.capture_mark_file(cfg)
+    sleep_file = paths.sleep_mark_file(cfg)
+    capture_state, capture, _, capture_stamp = _classify_mark(capture_file)
+    sleep_state, sleep, _, sleep_stamp = _classify_mark(sleep_file)
+    if capture_state == _MARK_MISSING and sleep_state == _MARK_MISSING:
         return Check("marks", "skip", "no marks yet — nothing has been captured or consolidated")
+
+    unusable = (
+        "— the two marks cannot be compared, and a corrupt sleep mark is exactly the state in "
+        "which consolidation may be claiming material the capture never read"
+    )
+    for name, state, stamp, mark_file in (
+        ("capture", capture_state, capture_stamp, capture_file),
+        ("sleep", sleep_state, sleep_stamp, sleep_file),
+    ):
+        if state == _MARK_UNREADABLE:
+            return Check(
+                "marks", "fail",
+                f"the {name} mark file is there but holds no readable mark ({mark_file}) "
+                f"{unusable}",
+                f"delete the {name} mark file, then run /sleep to re-consolidate this material",
+            )
+        if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP):
+            return Check(
+                "marks", "fail",
+                f"the {name} mark has no usable timestamp: {stamp!r} {unusable}",
+                f"delete the {name} mark file, then run /sleep to re-consolidate this material",
+            )
+
     for name, when in (("capture", capture), ("sleep", sleep)):
         if when is not None and when > now + _SKEW:
             return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
                          "check the system clock; the next Stop hook will then correct it")
-    # Equal marks are normal: a sleep writes both at one instant.
-    if capture is not None and sleep is not None and sleep > capture:
+
+    if sleep_state == _MARK_MISSING:
+        # Captured and not yet consolidated: the ordinary state of a working project, and there is
+        # no comparison to make — so it is not reported as one.
+        return Check("marks", "ok",
+                     f"capture mark at {capture.isoformat()}; no sleep mark yet — nothing has "
+                     "been consolidated, so there is nothing to compare it against")
+    if capture_state == _MARK_MISSING:
+        return Check(
+            "marks", "skip",
+            f"a sleep mark ({sleep.isoformat()}) but no capture mark file — the two cannot be "
+            "compared",
+            "the next Stop hook writes a capture mark; if none appears, see the hooks check above",
+        )
+    # Equal marks are normal: a sleep writes both at one instant, measured as the same millisecond.
+    if sleep > capture:
         return Check(
             "marks", "fail",
             f"the sleep mark ({sleep.isoformat()}) is ahead of the capture mark "
             f"({capture.isoformat()}) — consolidation claims material the capture never read",
             "run /sleep to re-consolidate this material before it is dropped",
         )
-    return Check("marks", "ok", "marks consistent")
+    return Check("marks", "ok",
+                 f"marks consistent: the sleep mark ({sleep.isoformat()}) is at or behind the "
+                 f"capture mark ({capture.isoformat()})")
 
 
 def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> Check:
@@ -287,9 +369,9 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
     if not path.exists():
         return Check("capture", "skip", f"transcript not found: {path}")
 
-    mark = watermark.read_mark(paths.capture_mark_file(cfg))
-    stamp = mark.get("timestamp")
-    if not stamp:
+    mark_file = paths.capture_mark_file(cfg)
+    state, marked, mark, stamp = _classify_mark(mark_file)
+    if state == _MARK_MISSING:
         # Not `fail`: a brand-new project legitimately has no mark and a transcript full of
         # exchanges, and a false demand is what trains demands away. The same failure class is
         # still caught, more cheaply: the `capture_progress` trend check sees an absent or frozen
@@ -299,8 +381,24 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
             "no capture mark yet — there is nothing to measure the transcript against",
             "the next Stop hook writes one; if none appears, see the hooks check above",
         )
-    marked = _stamp_time(stamp)
-    if marked is None:
+    if state == _MARK_UNREADABLE:
+        # "No mark yet" would be a false statement with the file sitting right there, and its fix
+        # — wait for the next Stop hook — would send the reader past the file to delete.
+        return Check(
+            "capture", "skip",
+            f"the capture mark file could not be read as a mark ({mark_file}) — there is nothing "
+            "to measure the transcript against",
+            "delete the mark file so the next Stop hook writes a fresh one",
+        )
+    if state == _MARK_NO_STAMP:
+        # `entries_after` can still resolve this mark exactly, by uuid, so the backlog is real —
+        # but there is no instant to measure it against, and no time claim may be made about it.
+        return Check(
+            "capture", "skip",
+            f"the capture mark has no timestamp to measure against: {stamp!r} ({mark_file})",
+            "delete the mark file so the next Stop hook writes a fresh one",
+        )
+    if state == _MARK_BAD_STAMP:
         # `entries_after` filters lexicographically, so no real stamp sorts above an unparseable
         # one and the backlog comes back empty — the system would claim to be perfectly current.
         return Check(
@@ -322,9 +420,22 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
         else (now, "now (the newest exchange has no readable timestamp)")
     )
     lag = reference - marked
+    # The distance, not the signed difference: `entries_after` resolves a mark by uuid without
+    # looking at timestamps at all, so a rewritten transcript can put entries *older* than the
+    # mark into the backlog. A negative lag slipped under the threshold and "within 10 min of the
+    # newest exchange" was printed however far off the two really were.
+    distance = abs(lag)
     tolerance = int(_CAPTURE_TOLERANCE.total_seconds() // 60)
-    if lag > _CAPTURE_TOLERANCE:
-        minutes = int(lag.total_seconds() // 60)
+    if distance > _CAPTURE_TOLERANCE:
+        minutes = int(distance.total_seconds() // 60)
+        if lag < timedelta(0):
+            return Check(
+                "capture", "fail",
+                f"{len(backlog)} exchanges behind the capture mark, but {measured_to} is "
+                f"{minutes} min older than the mark — the transcript was rewritten under it, so "
+                "the backlog cannot be trusted",
+                "delete the capture mark file so the next Stop hook writes a fresh one",
+            )
         return Check(
             "capture", "fail",
             f"{len(backlog)} exchanges behind the capture mark, {minutes} min past it measured to "
@@ -390,11 +501,13 @@ def _check_anchor_fresh(cfg: Config) -> Check:
         except OSError:
             continue  # a note that is no longer there cannot be the newest one
     if not stamped:
+        # No `fix`: a `skip` carries one only when there is an action that would make the check
+        # measurable. There is none here — re-running the same check is not a fix, and `render`
+        # printing "Fix:" under a check that did not run reads as though something was diagnosed.
         return Check(
             "anchor_fresh", "skip",
             f"none of the {len(sessions)} session note(s) could be read to compare the anchor "
-            "against",
-            "re-run the check; if it persists, something else is rewriting the vault",
+            "against — something else may be rewriting the vault",
         )
     mtime, newest = max(stamped, key=lambda pair: pair[0])
     # Both sides are naive local times: `updated` is minute-granular local, the mtime is local.

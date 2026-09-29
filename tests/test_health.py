@@ -479,3 +479,279 @@ def test_an_anchor_truncated_to_the_minute_is_not_a_session_behind(tmp_path: Pat
     anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
                             last_session="new", active_topics=[], active_notes=[])
     assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "ok"
+
+
+def _raw_mark(cfg, which: str, payload: dict | str) -> Path:
+    """Write a mark file verbatim: a dict as JSON, a string as the literal bytes on disk.
+
+    The degenerate shapes cannot be produced through `_mark`: `write_mark` is a plain,
+    non-atomic write, so a hook killed mid-write leaves a partial file, and `mark_of` writes
+    `timestamp: None` for an exchange that carried no stamp.
+    """
+    paths.ensure_sidecar(cfg)
+    target = paths.capture_mark_file(cfg) if which == "capture" else paths.sleep_mark_file(cfg)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(payload, str):
+        target.write_text(payload, encoding="utf-8")
+    else:
+        watermark.write_mark(target, payload)
+    return target
+
+
+def _uuid_transcript(path: Path, entries: list[tuple[str, str | None]]) -> Path:
+    """A transcript of (uuid, timestamp) lines — `None` for a line that carries no stamp.
+
+    `_transcript` stamps every line. This one exists because `entries_after` resolves a mark by
+    uuid without looking at timestamps at all, so the backlog it returns can legitimately hold
+    entries that are unstamped, or older than the mark itself.
+    """
+    lines = [
+        json.dumps({
+            "type": "assistant", "uuid": uuid, "timestamp": stamp,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": f"msg {i}"}],
+                        "usage": {"input_tokens": 100}},
+        })
+        for i, (uuid, stamp) in enumerate(entries)
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_sleep_mark_without_a_timestamp_fails_instead_of_claiming_consistency(tmp_path: Path):
+    """`mark_of` writes `timestamp: None` when the exchange it marks carried no stamp.
+
+    That None short-circuited `sleep > capture` and the check fell through to "marks consistent"
+    — asserting consistency between two marks, one of which had never been read.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _raw_mark(cfg, "sleep", {"uuid": "abc", "timestamp": None, "count": 7})
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "fail", check
+    assert "sleep mark" in check.message
+    assert "consistent" not in check.message
+
+
+def test_a_truncated_sleep_mark_file_fails_instead_of_claiming_consistency(tmp_path: Path):
+    """`write_mark` is a plain write, so a killed hook leaves a partial file behind, and
+    `read_mark` swallows the JSONDecodeError into {} — indistinguishable from "no mark at all".
+
+    A corrupt sleep mark is the single state in which "consolidation claims material the capture
+    never read" cannot be ruled out, so it is the last one that may be reported as healthy.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _raw_mark(cfg, "sleep", '{"timestamp": "2026-09-2')
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "fail", check
+    assert "sleep mark" in check.message
+    assert "consistent" not in check.message
+
+
+def test_an_unparseable_capture_mark_fails_the_marks_check_as_well(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "sleep", _T0)
+    _raw_mark(cfg, "capture", {"uuid": "abc", "timestamp": "not-a-date", "count": 7})
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "fail", check
+    assert "capture mark" in check.message and "not-a-date" in check.message
+
+
+def test_marks_consistent_is_only_reachable_when_both_marks_were_read(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "sleep", _T0 - timedelta(minutes=5))
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "ok", check
+    assert "consistent" in check.message
+
+
+def test_a_capture_mark_alone_passes_without_claiming_a_comparison(tmp_path: Path):
+    """Captured and not yet consolidated is the ordinary state of a working project."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "ok", check
+    assert "no sleep mark" in check.message
+    assert "consistent" not in check.message
+
+
+def test_a_sleep_mark_with_no_capture_mark_cannot_be_compared(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "sleep", _T0)
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "skip", check
+    assert "no capture mark" in check.message
+
+
+def test_a_capture_mark_with_no_timestamp_is_not_reported_as_never_written(tmp_path: Path):
+    """`entries_after` could have resolved this mark exactly, by uuid — the file is right there,
+    so "no capture mark yet" is a false statement and "the next Stop hook writes one" misdirects.
+    """
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": None, "count": 1})
+    tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T12:20:00.000Z"])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
+    assert check.level == "skip", check
+    assert "no timestamp" in check.message
+    assert "no capture mark yet" not in check.message
+    assert "within" not in check.message
+
+
+def test_a_truncated_capture_mark_file_is_not_reported_as_never_written(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", '{"timestamp": "2026-09-2')
+    tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T12:20:00.000Z"])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
+    assert check.level == "skip", check
+    assert "could not be read" in check.message
+    assert "no capture mark yet" not in check.message
+    assert "within" not in check.message
+
+
+def test_a_backlog_older_than_its_own_mark_is_not_called_within_tolerance(tmp_path: Path):
+    """A rewritten transcript, reached through `entries_after`'s uuid branch: the backlog carries
+    stamps *older* than the mark, so the lag is negative and slipped under the threshold — and
+    "within 10 min of the newest exchange" was printed however far off it was."""
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": "2026-09-29T12:00:00.000Z", "count": 1})
+    tr = _uuid_transcript(tmp_path / "t.jsonl", [
+        ("u0", "2026-09-29T12:00:00.000Z"),
+        ("u1", "2026-09-29T09:00:00.000Z"),
+        ("u2", "2026-09-29T09:05:00.000Z"),
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
+    assert check.level == "fail", check
+    assert "within" not in check.message
+    assert "175 min" in check.message  # 12:00 back to 09:05, as a distance
+
+
+def test_an_unstamped_backlog_is_measured_to_now_and_says_which(tmp_path: Path):
+    """`transcript.read_exchanges` stores `timestamp: None` for a line without one, and the uuid
+    branch of `entries_after` returns those entries unfiltered — so the newest exchange can carry
+    no stamp, and the lag must then be measured to `now` and say so."""
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": "2026-09-29T03:00:00.000Z", "count": 1})
+    tr = _uuid_transcript(tmp_path / "t.jsonl", [
+        ("u0", "2026-09-29T03:00:00.000Z"), ("u1", None), ("u2", None),
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0), "capture")
+    assert check.level == "fail", check
+    assert "540 min" in check.message
+    assert "no readable timestamp" in check.message
+
+
+def test_a_transcript_path_that_is_not_there_skips(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    check = _by_id(health.run(cfg, transcript_path=tmp_path / "gone.jsonl", now=_T0), "capture")
+    assert check.level == "skip", check
+    assert "transcript not found" in check.message
+
+
+def test_an_anchor_with_no_session_notes_passes_saying_there_was_nothing_to_compare(
+    tmp_path: Path,
+):
+    cfg = _healthy(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                            last_session="new", active_topics=[], active_notes=[])
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "ok", check
+    assert "no session notes" in check.message
+
+
+def test_session_notes_that_cannot_be_statted_skip_instead_of_comparing(tmp_path: Path):
+    """A note listed but not stattable (it vanished between the two calls) leaves nothing to
+    compare the anchor against — and a skip no action can make measurable carries no fix."""
+    cfg = _healthy(tmp_path)
+    vault = _vault(tmp_path, {"session-memory": []})
+    (vault / "session-memory" / "Session_2026-09-29_1200.md").symlink_to(tmp_path / "gone.md")
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                            last_session="new", active_topics=[], active_notes=[])
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "skip", check
+    assert "could be read to compare" in check.message
+    assert check.fix is None
+
+
+def test_an_anchor_with_an_unreadable_updated_warns(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="whenever",
+                            last_session="new", active_topics=[], active_notes=[])
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "warn", check
+    assert "whenever" in check.message
+
+
+def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: Path):
+    """The regression net for one defect class, found three separate times in `lts.health`.
+
+    Each instance reported a check as passing while the comparison behind the claim had not run:
+
+    1. `hooks` printed "all 4 events wired, scripts present" when `_script_path` returned None
+       for a command it could not parse and that None was dropped;
+    2. `capture` printed "N exchanges behind the capture mark, within 10 min of the newest
+       exchange" when the mark was absent or unparseable, so no lag had been computed at all;
+    3. `marks` printed "marks consistent" when one of the two marks was unreadable, because the
+       None operand short-circuited the `sleep > capture` comparison.
+
+    So for every degenerate memory state below the affected check must land on skip, warn or
+    fail, and its message must be free of a quantitative claim it did not earn.
+    """
+    unearned = ("within", "consistent")
+
+    def no_mark_file(root: Path):
+        return _healthy(root), {}
+
+    def truncated_sleep_mark(root: Path):
+        cfg = _healthy(root)
+        _mark(cfg, "capture", _T0)
+        _raw_mark(cfg, "sleep", '{"timestamp": "2026-09-2')
+        return cfg, {}
+
+    def sleep_mark_without_a_timestamp(root: Path):
+        cfg = _healthy(root)
+        _mark(cfg, "capture", _T0)
+        _raw_mark(cfg, "sleep", {"uuid": "abc", "timestamp": None, "count": 7})
+        return cfg, {}
+
+    def truncated_capture_mark(root: Path):
+        cfg = _healthy(root)
+        _raw_mark(cfg, "capture", '{"timestamp": "2026-09-2')
+        return cfg, {"transcript_path": _transcript(
+            root / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])}
+
+    def an_unstamped_transcript(root: Path):
+        cfg = _healthy(root)
+        _raw_mark(cfg, "capture",
+                  {"uuid": "u0", "timestamp": "2026-09-29T03:00:00.000Z", "count": 1})
+        return cfg, {"transcript_path": _uuid_transcript(
+            root / "t.jsonl", [("u0", "2026-09-29T03:00:00.000Z"), ("u1", None), ("u2", None)])}
+
+    def unstattable_session_notes(root: Path):
+        cfg = _healthy(root)
+        vault = _vault(root, {"session-memory": []})
+        (vault / "session-memory" / "Session_2026-09-29_1200.md").symlink_to(root / "gone.md")
+        paths.ensure_sidecar(cfg)
+        anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                                last_session="new", active_topics=[], active_notes=[])
+        return cfg, {}
+
+    states = [
+        ("no mark file at all", no_mark_file, "marks"),
+        ("a sleep mark file truncated mid-write", truncated_sleep_mark, "marks"),
+        ("a sleep mark whose timestamp is None", sleep_mark_without_a_timestamp, "marks"),
+        ("a capture mark file truncated mid-write", truncated_capture_mark, "capture"),
+        ("a transcript whose entries carry no timestamps", an_unstamped_transcript, "capture"),
+        ("session notes that cannot be statted", unstattable_session_notes, "anchor_fresh"),
+    ]
+    for i, (label, build, check_id) in enumerate(states):
+        cfg, kwargs = build(tmp_path / f"state{i}")
+        check = _by_id(health.run(cfg, now=_T0, **kwargs), check_id)
+        assert check.level in {"skip", "warn", "fail"}, (label, check)
+        for phrase in unearned:
+            assert phrase not in check.message, (label, phrase, check)
