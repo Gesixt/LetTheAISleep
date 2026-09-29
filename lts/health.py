@@ -90,9 +90,11 @@ def run(
 
     `metrics` is a `status.collect` result, taken as an argument so that health never recomputes
     memory load and `status.collect` stays the single place that counts it. It is not a parse
-    budget: with a transcript and no `metrics`, `status.collect` parses the transcript and
-    `_check_capture` parses it again (once more still in the degenerate uuid branch). Once the CLI
-    passes `metrics`, the first of those goes away; nothing calls `run` yet.
+    budget: with a transcript, the file is parsed twice for two different things — `status.collect`
+    reads its usage counters, `_check_capture` reads its exchanges — and once more in the degenerate
+    uuid branch. Supplying `metrics` moves the first parse to the caller rather than removing it, so
+    there is nothing here to optimise away. `lts doctor` is the caller today; hooks pass no
+    transcript at all, which is what keeps them off this cost.
 
     `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
     given history as an input, not a separate mechanism. It stays a plain list of dicts; the reason
