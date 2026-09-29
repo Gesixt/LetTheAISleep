@@ -1,8 +1,10 @@
 """Check whether memory is working, and whether what it says about itself is true.
 
 Three failures have been found in this project, and every one was found by accident after running
-for a long time: `SessionStart` withheld the anchor for ~2 months, `lts pressure` reported 9900%,
-and the model stated a context percentage that no component had produced. A liveness poll — is the
+for a long time: `SessionStart` withheld the anchor for ~2 months, `lts pressure` reported a
+context percentage in the thousands (the exact figure it printed is not recoverable — see
+`healthchecks._check_pressure`), and the model stated a context percentage that no component had
+produced. A liveness poll — is the
 hook wired, does the index answer — would have caught **none** of them: in all three cases every
 component was alive and the *claims* were false.
 
@@ -101,8 +103,12 @@ def run(
     property): `context_tokens` 1.46 s and 1.57 s, `read_exchanges` 1.48 s and 1.52 s. One parse
     fits the 3–5 s session-load budget of ТЗ §6 with room to spare; the two that `--transcript`
     performs come to ~3.0 s, on top of what `SessionStart` already spends, on every `/compact` —
-    and both failure classes are covered more cheaply elsewhere. The full argument is §4.1 of the
-    memory-health design (2026-09-29).
+    and both failure classes are covered more cheaply elsewhere: the capture class by
+    `healthchecks._check_capture_progress`, which reads five journal records and no transcript at
+    all, and the impossible-percentage class by the invariant in
+    `claude/hooks/user_prompt_submit._context_line`. That is the whole argument; it used to point
+    at a design document that lives outside this repository, which a reader holding only the repo
+    cannot open.
 
     `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
     given history as an input, not a separate mechanism. It stays a plain list of dicts; the reason

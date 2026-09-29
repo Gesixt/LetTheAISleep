@@ -519,9 +519,19 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
 def _check_pressure(metrics: dict | None) -> Check:
     """Measured tokens must fit the window they are measured against.
 
-    `lts pressure` once reported 9900% on a real project: 45,413,420 tokens against a
-    1,000,000-token window, a character estimate divided by a hardcoded window. A percentage
-    above 100 is never real, so it is an assertion on the output rather than a bug hunt.
+    `lts pressure` once reported a context percentage in the thousands on a real project. It
+    estimated tokens as `len(file) // 4` over a transcript that is append-only across `--resume`
+    — so its size is the project's whole history, not the live window — and divided by a
+    hardcoded 200,000 instead of the configured window. On ppss that estimate was 45,413,420
+    tokens, i.e. 22,707% of that window, while the live session held 301,343 tokens of its
+    configured 1,000,000. The 22,707% is computed here from the recorded token count: the
+    percentage recorded beside it, "9900%", follows from no window, and this branch quoted the
+    two as one measurement for a while. The pair measured in the same pass on two other projects
+    does follow the rule (18,793,961 -> 9397%, 6,373,099 -> 3187%), so it is that one figure that
+    is wrong, not the account of the cause.
+
+    A percentage above 100 is never real, whatever produced it, so this is an assertion on the
+    output rather than a bug hunt — which is exactly why it survives a cause nobody can pin down.
     """
     measured = (metrics or {}).get("pressure")
     if not measured:
@@ -530,7 +540,8 @@ def _check_pressure(metrics: dict | None) -> Check:
     # A malformed measurement must not raise: an exception here propagates out of `run` and takes
     # every other check's answer with it, so the report that says whether memory is lying would not
     # appear at all. `_check_anchor_fresh` guards its `stat` for the same reason. And a measurement
-    # that is not numbers is itself the 9900% class — an output that cannot be true.
+    # that is not numbers is itself the impossible-percentage class — an output that cannot be
+    # true.
     if not isinstance(measured, dict):
         return Check("pressure", "fail",
                      f"the pressure measurement is not a measurement: {measured!r}",

@@ -127,3 +127,14 @@ def test_read_exchanges_drops_the_compaction_summary(tmp_path: Path):
 def test_read_exchanges_keeps_a_slash_command_that_carries_an_instruction(tmp_path: Path):
     t = _raw(tmp_path / "t.jsonl", [_user("/sleep and then explain the schema", "k1")])
     assert [e["uuid"] for e in transcript.read_exchanges(t)] == ["k1"]
+
+
+def test_pressure_level_has_no_verdict_on_an_impossible_measurement():
+    """More tokens than the window fit is not "full" — it is a measurement that cannot be true.
+
+    `force` on such a reading is a claim about pressure derived from a figure nothing stands
+    behind, and `none` would be the same claim in the other direction.
+    """
+    w = 1000
+    assert transcript.pressure_level(1001, w, 0.6, 0.8) == "unknown"
+    assert transcript.pressure_level(1000, w, 0.6, 0.8) == "force"     # the boundary still holds

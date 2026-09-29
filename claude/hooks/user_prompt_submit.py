@@ -34,13 +34,14 @@ def _context_line(tokens: int, window: int) -> str:
     buffer is a different meter, and the two were being conflated.
 
     A percentage above 100 is never real, so it is not printed. `lts pressure` produced one on a
-    real project — 45,413,420 tokens against a 1,000,000-token window, while the session was at
-    28% — which is the state this branch keeps quoting as "9900%"; the two figures divide to
-    4541%, so at least one of them is remembered rather than measured, and the mechanism is
-    recorded twice with two different causes. That is exactly why this is an invariant on the
-    output and not a fix for a cause: whatever produced the pair, the sentence it printed could
-    not be true. Here the same state prints both numbers and no percentage, which costs nothing —
-    both figures are already in hand.
+    real project: a `len(file) // 4` estimate over an append-only transcript, divided by a
+    hardcoded 200,000 rather than the configured window — 45,413,420 tokens, 22,707% of it, while
+    the live session held 301,343 of its 1,000,000. (`healthchecks._check_pressure` carries the
+    full account, including the "9900%" this branch quoted, which follows from no window.) That
+    the cause took three attempts to state correctly is the argument for asserting on the output
+    instead: whatever produced the pair, the sentence it printed could not be true. Here the same
+    state prints both numbers and no percentage, which costs nothing — both figures are already
+    in hand, and `pressure_level` returns "unknown" so no nudge is derived from them either.
     """
     if not tokens or window <= 0:
         return ""
@@ -66,6 +67,8 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     level = transcript.pressure_level(
         tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
     )
+    # "unknown" (tokens > window) falls through to "": a nudge derived from a figure the line
+    # above disowns would be two verdicts on one measurement, the second contradicting the first.
     pressure = _FORCE if level == "force" else (_WARN if level == "warn" else "")
     blocks = (memorymap.render(cfg), _context_line(tokens, cfg.context_window), pressure)
     return "\n\n".join(b for b in blocks if b)

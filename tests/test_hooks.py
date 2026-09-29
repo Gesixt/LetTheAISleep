@@ -732,3 +732,15 @@ def test_context_line_still_prints_a_real_percentage():
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     line = ups._context_line(276_013, 1_000_000)
     assert "276,013/1,000,000" in line and "28%" in line
+
+
+def test_user_prompt_submit_does_not_nudge_on_a_figure_it_has_just_disowned(tmp_path: Path):
+    """One measurement, one verdict. The block used to say the figure was unknown and then
+    demand a /sleep derived from it."""
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 45_413)      # far past the window: impossible
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
+    assert "impossible" in text
+    assert "/sleep" not in text

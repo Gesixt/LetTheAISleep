@@ -7,8 +7,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import (anchor, digest, health, memorymap, naming, paths, pending, status,
-                 stm, sync, transcript, watermark)
+from lts import (anchor, digest, health, healthchecks, journal, memorymap, naming, paths,
+                 pending, status, stm, sync, transcript, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
 
@@ -181,10 +181,12 @@ def _run(args) -> int:
         elif args.op == "clear":
             pending.clear_all(d)
     elif args.cmd == "pressure":
-        # Must match what the hook reports. This used to measure `len(file) / 4` against a
-        # hardcoded 200k window: a transcript is append-only across `--resume`, so its size is
-        # the whole history of the project. On a real one that read 45,413,420 tokens (9900%)
-        # while the session was at 28%.
+        # Must match what the hook reports. This used to measure `len(file) // 4` against a
+        # hardcoded 200,000-token window: a transcript is append-only across `--resume`, so its
+        # size is the whole history of the project. On ppss that estimate was 45,413,420 tokens —
+        # 22,707% of that window, computed from the recorded count — while the live session held
+        # 301,343 tokens of its configured 1,000,000. (The "9900%" this branch quoted alongside
+        # the same token count follows from no window; `_check_pressure` says what reconciles.)
         tokens = transcript.context_tokens(Path(args.transcript))
         print(transcript.pressure_level(
             tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
@@ -197,8 +199,15 @@ def _run(args) -> int:
         else:
             print(status.render(metrics))
     elif args.cmd == "doctor":
+        # The journal is read here for the same reason the hook reads it: `anchor_delivery` and
+        # `capture_progress` are the two checks with no filesystem evidence to work from, so
+        # without history they skip — and they skipped on every human-run `doctor`, in the one
+        # command whose job is to report health.
         checks = health.run(
-            cfg, transcript_path=Path(args.transcript) if args.transcript else None
+            cfg,
+            transcript_path=Path(args.transcript) if args.transcript else None,
+            history=journal.tail(paths.health_journal_file(cfg), healthchecks._TREND_WINDOW)
+            if cfg.configured else None,
         )
         if args.json:
             print(json.dumps(

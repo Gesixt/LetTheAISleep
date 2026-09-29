@@ -366,7 +366,11 @@ def test_capture_skips_with_a_reason_when_no_transcript_is_given(tmp_path: Path)
 
 
 def test_tokens_above_the_window_fail_and_name_both_numbers(tmp_path: Path):
-    """The 9900% bug, caught as an assertion on an output."""
+    """The impossible-percentage bug, caught as an assertion on an output.
+
+    The numbers are the ones recorded for ppss. The check does not care which of them is
+    trustworthy — that is the point of asserting on the output.
+    """
     cfg = _healthy(tmp_path)
     metrics = {"pressure": {"tokens": 45_413_420, "window": 1_000_000}}
     check = _by_id(health.run(cfg, metrics=metrics, now=_T0), "pressure")

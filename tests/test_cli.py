@@ -279,11 +279,13 @@ def test_memory_map_prints_the_map(tmp_path: Path, capsys):
 
 
 def test_pressure_measures_live_context_not_the_size_of_the_file(tmp_path: Path, capsys):
-    """`lts pressure` measured `len(transcript_file) / 4` against a hardcoded 200k window.
+    """`lts pressure` measured `len(transcript_file) // 4` against a hardcoded 200,000 window.
 
     A transcript is append-only across `--resume`, so its size is the whole history of the
-    project, not the live window: on the real ppss transcript this path reported 45,413,420
-    tokens — 9900% — while the session was actually at 28%.
+    project, not the live window: on the real ppss transcript this path estimated 45,413,420
+    tokens — 22,707% of that window — while the live session held 301,343 of its configured
+    1,000,000. (The percentage recorded beside that count, "9900%", follows from no window;
+    `healthchecks._check_pressure` carries the account.)
     """
     make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
     t = tmp_path / "t.jsonl"
@@ -458,3 +460,29 @@ def test_an_empty_transcript_value_is_a_bad_path_not_an_absent_one(tmp_path: Pat
             assert captured.out == "", (cmd, value)
             # The value is quoted, so whitespace is legible rather than an empty tail.
             assert repr(value) in captured.err, (cmd, value)
+
+
+def test_doctor_reads_the_journal_so_the_trend_checks_can_answer(tmp_path: Path, capsys):
+    """`doctor` passed no history, so both trend checks skipped however full the journal was.
+
+    They are the two checks that cannot be answered from the filesystem at all, so skipping them
+    in the one command whose job is to report health left them answerable only inside the hook.
+    """
+    from lts import journal, paths
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    for i in range(5):
+        journal.append(paths.health_journal_file(cfg), {
+            "at": f"2026-09-29T14:0{i}:00.000Z",
+            "event": "session_start",
+            "blocks": ["anchor", "digest"],
+            "checks": {},
+            "stm_entries": i,
+            "capture_mark": f"2026-09-29T14:0{i}:00.000Z",
+        })
+    main(["doctor", "--root", str(tmp_path), "--json"])
+    levels = {c["id"]: c["level"] for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert levels["anchor_delivery"] == "ok"
+    assert levels["capture_progress"] == "ok"

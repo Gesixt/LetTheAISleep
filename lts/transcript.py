@@ -114,8 +114,18 @@ def context_tokens(transcript_path: Path) -> int:
 
 
 def pressure_level(tokens: int, window: int, warn: float, force: float) -> str:
+    """"none" | "warn" | "force", or "unknown" when the measurement cannot be true.
+
+    More tokens than the window holds is not a full window: it is a reading nothing stands behind,
+    and every verdict about it would be invented. `none` would understate it and `force` would
+    overstate it with equal confidence, so there is no level to report. `UserPromptSubmit` states
+    the two numbers and emits no nudge in that case — one measurement must not produce a sentence
+    calling it unknown and a demand derived from it in the same block.
+    """
     if window <= 0:
         return "none"
+    if tokens > window:
+        return "unknown"
     ratio = tokens / window
     if ratio >= force:
         return "force"
