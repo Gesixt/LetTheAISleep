@@ -610,8 +610,8 @@ def run(
     `metrics` is a `status.collect` result, taken as an argument so that health never recomputes
     memory load and `status.collect` stays the single place that counts it. It is not a parse
     budget: with a transcript and no `metrics`, `status.collect` parses the transcript and
-    `_check_capture` parses it again (once more still in the degenerate uuid branch). The CLI
-    passing `metrics` is what removes the first of those.
+    `_check_capture` parses it again (once more still in the degenerate uuid branch). Once the CLI
+    passes `metrics`, the first of those goes away; nothing calls `run` yet.
 
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.

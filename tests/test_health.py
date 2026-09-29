@@ -704,7 +704,9 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
     So for every degenerate memory state below the affected check must land on skip, warn or
     fail, and its message must be free of a quantitative claim it did not earn.
     """
-    unearned = ("within", "consistent", "scripts present", "wired")
+    # "events wired," not "wired": the hooks *failure* message reads "not wired: <events>",
+    # so the bare word would make a correct fail trip this net.
+    unearned = ("within", "consistent", "scripts present", "events wired,")
 
     def no_mark_file(root: Path):
         return _healthy(root), {}
