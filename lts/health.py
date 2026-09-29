@@ -93,8 +93,11 @@ def run(
     budget: with a transcript, the file is parsed twice for two different things — `status.collect`
     reads its usage counters, `_check_capture` reads its exchanges — and once more in the degenerate
     uuid branch. Supplying `metrics` moves the first parse to the caller rather than removing it, so
-    there is nothing here to optimise away. `lts doctor` is the caller today; hooks pass no
-    transcript at all, which is what keeps them off this cost.
+    there is nothing here to optimise away. `lts doctor` is the only caller so far; the hook
+    integration is a later task, and it is to pass no transcript at all. A transcript is
+    append-only across `--resume`, so it accumulates the whole history of a project — the
+    largest on this machine measured 198 MiB — and parsing one on a hook's critical path
+    would not fit the 3–5 s budget the spec sets for loading a new session's context (§6).
 
     `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
     given history as an input, not a separate mechanism. It stays a plain list of dicts; the reason
@@ -125,11 +128,13 @@ def record(
 ) -> dict:
     """One journal record per run.
 
-    `blocks` is the load-bearing field: it states what the hook actually emitted, which is not
-    recoverable from the filesystem afterwards and is the only way `_check_anchor_delivery` can
-    work at all. Its vocabulary is fixed, because that check matches names: the `SessionStart`
-    hook passes `health_demand`, `sleep_demand`, `anchor` (`_ANCHOR_BLOCK`) and `digest`, one per
-    block it emitted. A name outside that list is recorded and never read.
+    `blocks` is the load-bearing field: it states which blocks the calling hook emitted, which is
+    not recoverable from the filesystem afterwards and is the only way `_check_anchor_delivery`
+    can work at all. Its vocabulary is fixed, because that check matches names: the `SessionStart`
+    hook is to pass `health_demand`, `sleep_demand`, `anchor` (`_ANCHOR_BLOCK`) and `digest`, one
+    per block it emitted. Nothing calls `record` yet — the hook that writes these records is a
+    later task — so that list is the contract its caller will be held to, not a description of
+    traffic on disk. A name outside it is recorded and never read.
     """
     if metrics is None:
         metrics = status.collect(cfg) if cfg.configured else {}

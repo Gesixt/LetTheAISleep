@@ -294,3 +294,79 @@ def test_pressure_measures_live_context_not_the_size_of_the_file(tmp_path: Path,
     }), encoding="utf-8")
     main(["pressure", "--root", str(tmp_path), "--transcript", str(t)])
     assert capsys.readouterr().out.strip() == "force"   # 900 / 1000, not 231 / 200000
+
+
+def test_doctor_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys):
+    """A typo in `--transcript` used to buy a clean bill of health.
+
+    `transcript.context_tokens` returns 0 for a file that is not there, `status.collect` wraps
+    that zero in a dict the `pressure` check accepts as a measurement, and the run ended at
+    "pressure: 0/1,000,000 tokens (0%)", exit 0 — a green report from a measurement that never
+    happened.
+    """
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    code = main(["doctor", "--root", str(tmp_path), "--transcript", "/nonexistent/path.jsonl"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert "/nonexistent/path.jsonl" in captured.err
+    assert "pressure" not in captured.out
+
+
+def test_doctor_refuses_a_transcript_that_is_not_a_file(tmp_path: Path, capsys):
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    directory = tmp_path / "not-a-transcript"
+    directory.mkdir()
+    code = main(["doctor", "--root", str(tmp_path), "--transcript", str(directory)])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert str(directory) in captured.err
+
+
+def test_doctor_json_carries_the_message_and_fix_of_every_check(tmp_path: Path, capsys):
+    """The JSON is what a caller other than a human reads; a level alone is not actionable."""
+    main(["doctor", "--root", str(tmp_path / "nowhere"), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    by_id = {c["id"]: c for c in payload["checks"]}
+    assert all(isinstance(c["message"], str) and c["message"] for c in payload["checks"])
+    assert all("fix" in c for c in payload["checks"])
+    assert by_id["config"]["level"] == "fail"
+    assert "install.py" in by_id["config"]["fix"]
+    # A skip that no action would make measurable carries no fix, and the JSON keeps that null.
+    assert by_id["sidecars"]["fix"] is None
+
+
+def test_doctor_exits_zero_when_the_worst_check_is_a_warning(tmp_path: Path, capsys):
+    """Exit 1 is reserved for `fail`: a warning must not stop a caller that checks the code."""
+    from tests.test_health import _cfg, _vault, _wire_hooks
+    _cfg(tmp_path)
+    _vault(tmp_path)  # a vault directory with no notes: `vault` warns, nothing fails
+    _wire_hooks(tmp_path, scripts_at=tmp_path / "tools" / "hooks")
+    code = main(["doctor", "--root", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["worst"] == "warn"
+    assert code == 0
+
+
+def test_doctor_transcript_reaches_the_capture_check(tmp_path: Path, capsys):
+    """`capture` skips without a transcript, so only a state that gives it one discriminates.
+
+    It also needs a capture mark: without one `capture` skips whatever the flag says, which is
+    why the `_healthy` fixture alone could not tell the two paths apart.
+    """
+    from tests.test_health import _T0, _healthy, _mark, _transcript
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T12:30:00.000Z"])
+
+    main(["doctor", "--root", str(tmp_path), "--json"])
+    without = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert without["capture"]["level"] == "skip"
+
+    main(["doctor", "--root", str(tmp_path), "--transcript", str(tr), "--json"])
+    with_it = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert with_it["capture"]["level"] == "ok"
+    assert "behind the capture mark" in with_it["capture"]["message"]

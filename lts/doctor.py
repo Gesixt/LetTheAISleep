@@ -1,8 +1,9 @@
 """Find sidecars that sprouted in the wrong place.
 
 A stray `.ai_memory/` is memory the rest of the system will never look at again: `/sleep` reads
-the buffer at the project root, so anything captured elsewhere is silently orphaned. `lts.health`
-turns this into the `sidecars` check; the reporting that used to live here is now `health.render`.
+the buffer at the project root, so anything captured elsewhere is silently orphaned. This list
+becomes the `sidecars` check in `lts.healthchecks._check_sidecars`, which `lts.health` orders
+and renders; the reporting that used to live here is now `health.render`.
 """
 
 from __future__ import annotations

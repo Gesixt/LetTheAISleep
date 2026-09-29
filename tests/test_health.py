@@ -1155,3 +1155,25 @@ def test_the_record_round_trips_through_the_journal(tmp_path: Path):
     rec = health.record(cfg, health.run(cfg, now=_T0), ["anchor"], now=_T0)
     journal.append(log, rec)
     assert journal.tail(log, 1)[0]["blocks"] == ["anchor"]
+
+
+def test_a_nested_lts_project_is_named_rather_than_passed_over_in_silence(tmp_path: Path):
+    """`doctor.collect` used to print "! nested lts project root: ...". The check that replaced
+    it computed the same discrimination and reported neither half, so the fact left the product."""
+    cfg = _healthy(tmp_path)
+    make_project(tmp_path / "sub")
+    (tmp_path / "sub" / ".ai_memory").mkdir(parents=True)
+    check = _by_id(health.run(cfg), "sidecars")
+    assert check.level == "ok"  # a nested project is legitimate, not a fault
+    assert str(tmp_path / "sub" / ".ai_memory") in check.message
+
+
+def test_a_named_nested_project_does_not_hide_a_real_stray(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    make_project(tmp_path / "sub")
+    (tmp_path / "sub" / ".ai_memory").mkdir(parents=True)
+    (tmp_path / "orphan" / ".ai_memory").mkdir(parents=True)
+    check = _by_id(health.run(cfg), "sidecars")
+    assert check.level == "fail"
+    assert str(tmp_path / "orphan" / ".ai_memory") in check.message
+    assert str(tmp_path / "sub" / ".ai_memory") in check.message

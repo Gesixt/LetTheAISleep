@@ -116,15 +116,27 @@ def _check_config(cfg: Config) -> Check:
 
 
 def _check_sidecars(cfg: Config) -> Check:
-    strays = [
-        sidecar for sidecar in doctor.find_sidecars(cfg.project_root)
-        if not is_lts_config(sidecar.parent / "config.toml")
-    ]
+    """Sidecars under the project root, split into strays and nested lts projects.
+
+    Only the strays decide the level: a sidecar sitting next to its own config.toml belongs to a
+    nested project and that project's own /sleep reads it, so it is legitimate. It is still named.
+    `doctor.collect` used to print "! nested lts project root: ..." and this check inherited the
+    discrimination without the report, which quietly dropped an operator-facing fact: a second
+    buffer under the tree is worth knowing about even when it is nobody's fault.
+    """
+    nested, strays = [], []
+    for sidecar in doctor.find_sidecars(cfg.project_root):
+        (nested if is_lts_config(sidecar.parent / "config.toml") else strays).append(sidecar)
+    also = ""
+    if nested:
+        also = (" — nested lts project root(s), each read by its own /sleep: "
+                + ", ".join(str(p) for p in nested))
     if not strays:
-        return Check("sidecars", "ok", "no stray sidecars")
+        return Check("sidecars", "ok", "no stray sidecars" + also)
     return Check(
         "sidecars", "fail",
-        "orphaned memory that /sleep will never read: " + ", ".join(str(p) for p in strays),
+        "orphaned memory that /sleep will never read: "
+        + ", ".join(str(p) for p in strays) + also,
         "merge anything you need into the root buffer, then delete them",
     )
 

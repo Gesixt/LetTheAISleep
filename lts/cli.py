@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import (anchor, digest, doctor, health, memorymap, naming, paths, pending, status,
+from lts import (anchor, digest, health, memorymap, naming, paths, pending, status,
                  stm, sync, transcript, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
@@ -18,6 +19,17 @@ def _cfg(root: str | None):
 
 def _add_root(sp) -> None:
     sp.add_argument("--root", default=None)
+
+
+def _unusable_transcript(path: Path) -> str | None:
+    """Why `path` cannot be read as a transcript, or None when it can."""
+    if not path.exists():
+        return f"transcript not found: {path}"
+    if not path.is_file():
+        return f"transcript is not a file: {path}"
+    if not os.access(path, os.R_OK):
+        return f"transcript is not readable: {path}"
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,8 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--json", action="store_true")
     p_doctor.add_argument(
         "--transcript",
-        help="transcript path, enabling the capture and pressure checks (a hook omits it: "
-             "parsing a months-long transcript is too slow for the critical path)",
+        help="transcript path, enabling the capture and pressure checks (the planned hook "
+             "caller will omit it: parsing a months-long transcript is too slow for the "
+             "critical path)",
     )
     _add_root(p_doctor)
 
@@ -158,6 +171,14 @@ def _run(args) -> int:
         else:
             print(status.render(metrics))
     elif args.cmd == "doctor":
+        # Refuse rather than report without it: an absent transcript is not an absent measurement
+        # downstream but a green one — `context_tokens` returns 0 for a file that is not there and
+        # `pressure` prints "0 tokens (0%)" — so a typo would buy a clean bill of health, which is
+        # the one outcome this subsystem exists to prevent.
+        unusable = args.transcript and _unusable_transcript(Path(args.transcript))
+        if unusable:
+            print(f"lts: {unusable}", file=sys.stderr)
+            return 2
         checks = health.run(
             cfg, transcript_path=Path(args.transcript) if args.transcript else None
         )
@@ -170,7 +191,7 @@ def _run(args) -> int:
                         for c in checks
                     ],
                 },
-                ensure_ascii=False, indent=2, default=str,
+                ensure_ascii=False, indent=2,
             ))
         else:
             print(health.render(checks))
