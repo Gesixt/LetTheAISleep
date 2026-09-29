@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import anchor, digest, health, healthchecks, journal, paths, pending, stm
+from lts import (anchor, digest, health, healthchecks, journal, paths, pending,
+                 status, stm)
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -73,18 +74,33 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     #
     # `_TREND_WINDOW` is the window the trend checks require: handing them fewer records makes
     # them skip, and more is history they discard.
-    journal_file = paths.health_journal_file(cfg)
-    checks = health.run(cfg, history=journal.tail(journal_file, healthchecks._TREND_WINDOW))
-    failure = health.demand(checks)
-    if failure:
-        # First, because it is the one block that says the others may be untrustworthy.
-        blocks.insert(0, ("health_demand", failure))
+    #
+    # Wrapped for the same reason the digest is, and more urgently: `main()` turns any exception
+    # into `{}`, so a raise here would withhold the anchor, the digest and the sleep demand at
+    # once — the two-month bug, reproduced by the code written to detect it. The raise is
+    # reachable, not theoretical: `status.collect` stats every pending snapshot, and a concurrent
+    # /sleep calls `pending.clear_all` between the listing and the stat. A failure in the health
+    # path must cost the health output and nothing else.
+    try:
+        # One `status.collect` per run: `health.run` and `health.record` each compute their own
+        # when none is given, which is a full STM read, a pending stat and a vault rglob twice on
+        # every /compact. `metrics` is the argument that exists to prevent exactly that.
+        metrics = status.collect(cfg)
+        journal_file = paths.health_journal_file(cfg)
+        checks = health.run(cfg, metrics=metrics,
+                            history=journal.tail(journal_file, healthchecks._TREND_WINDOW))
+        failure = health.demand(checks)
+        if failure:
+            # First, because it is the one block that says the others may be untrustworthy.
+            blocks.insert(0, ("health_demand", failure))
 
-    # After the blocks are chosen, never before: the record's whole value is stating what was
-    # actually emitted, which is the only input `_check_anchor_delivery` has. `journal.append`
-    # swallows every exception, so a broken journal costs the record and never the blocks.
-    emitted = [name for name, body in blocks if body]
-    journal.append(journal_file, health.record(cfg, checks, emitted))
+        # After the blocks are chosen, never before: the record's whole value is stating what was
+        # actually emitted, which is the only input `_check_anchor_delivery` has. `journal.append`
+        # swallows every exception, so a broken journal costs the record and never the blocks.
+        emitted = [name for name, body in blocks if body]
+        journal.append(journal_file, health.record(cfg, checks, emitted, metrics=metrics))
+    except Exception:
+        pass
     return "\n\n".join(body for _name, body in blocks if body)
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import memorymap, transcript
+from lts import memorymap, status, transcript
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -25,7 +25,7 @@ _FORCE = (
 )
 
 
-def _context_line(tokens: int, window: int) -> str:
+def _context_line(tokens: int, window: int, source: str = transcript.USAGE) -> str:
     """The measured occupancy of the context window, or an honest refusal when it cannot be true.
 
     Below the warn threshold this hook used to say nothing, and no skill passes `--transcript`
@@ -42,16 +42,24 @@ def _context_line(tokens: int, window: int) -> str:
     instead: whatever produced the pair, the sentence it printed could not be true. Here the same
     state prints both numbers and no percentage, which costs nothing — both figures are already
     in hand, and `pressure_level` returns "unknown" so no nudge is derived from them either.
+
+    `source` is the other half of the same rule. Without a `usage` record the figure is
+    `len(file) // 4`, and this is the one surface the model reads and quotes, so an unmarked
+    estimate here is the mistake `lts status` and `lts doctor` were just corrected for. Real
+    sessions carry usage counters, so the marked line is rare — which is a reason to state it,
+    not a reason to leave it looking like a measurement.
     """
     if not tokens or window <= 0:
         return ""
+    estimated = "" if source == transcript.USAGE else f" ({status.ESTIMATED})"
     if tokens > window:
         return (
-            f"Context window: {tokens:,} tokens measured against a {window:,}-token window — "
+            f"Context window: {tokens:,} tokens against a {window:,}-token window{estimated} — "
             "this is impossible, so the measurement or the configured window is wrong. "
             "Treat the figure as unknown."
         )
-    return f"Context window: {tokens:,}/{window:,} tokens ({round(tokens / window * 100)}%)"
+    return (f"Context window: {tokens:,}/{window:,} tokens "
+            f"({round(tokens / window * 100)}%){estimated}")
 
 
 def build_context(event: dict, *, root: Path | None = None) -> str:
@@ -63,14 +71,15 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     the model that a vault of notes exists.
     """
     cfg = load_config(root or event.get("cwd"))
-    tokens = transcript.context_tokens(Path(event.get("transcript_path", "")))
+    tokens, source = transcript.measure_context(Path(event.get("transcript_path", "")))
     level = transcript.pressure_level(
         tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
     )
     # "unknown" (tokens > window) falls through to "": a nudge derived from a figure the line
     # above disowns would be two verdicts on one measurement, the second contradicting the first.
     pressure = _FORCE if level == "force" else (_WARN if level == "warn" else "")
-    blocks = (memorymap.render(cfg), _context_line(tokens, cfg.context_window), pressure)
+    blocks = (memorymap.render(cfg),
+              _context_line(tokens, cfg.context_window, source), pressure)
     return "\n\n".join(b for b in blocks if b)
 
 

@@ -661,14 +661,24 @@ def test_the_pressure_nudge_never_quotes_a_band_of_its_own(tmp_path: Path):
 
 def test_session_start_prepends_the_demand_when_a_check_fails(tmp_path: Path):
     """A failing check must be the first thing the model reads, because it says the
-    rest may be untrustworthy."""
+    rest may be untrustworthy.
+
+    The anchor is written on purpose: with an empty vault the demand is the only block that
+    renders, and then `append` and `insert(0, ...)` are indistinguishable — the ordering this
+    test exists for could not break it.
+    """
+    from lts import anchor, paths
     from tests.test_health import _cfg, _vault
-    _cfg(tmp_path)
+    cfg = _cfg(tmp_path)
     _vault(tmp_path, {"knowledge-base": ["A"]})       # no .claude/settings.json -> hooks fail
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                        last_session="s", active_topics=["t"], active_notes=["n"])
     ss = _load("session_start", HOOKS / "session_start.py")
     out = ss.build_context({"cwd": str(tmp_path)})
     assert out.startswith("## Memory health:")
     assert "hooks:" in out
+    assert out.index("## Memory health:") < out.index("## Session Anchor")
 
 
 def test_session_start_says_nothing_new_when_memory_is_sound(tmp_path: Path):
@@ -707,17 +717,38 @@ def test_session_start_records_the_demand_it_emitted(tmp_path: Path):
     assert "health_demand" in journal.tail(paths.health_journal_file(cfg), 1)[0]["blocks"]
 
 
-def test_session_start_survives_an_unreadable_journal(tmp_path: Path):
+def test_session_start_survives_a_corrupt_line_in_the_journal(tmp_path: Path):
     """A journal that can break a hook would be a new way for memory to die."""
-    from lts import paths
+    from lts import anchor, paths
     from lts.config import load_config
     from tests.test_health import _healthy
     _healthy(tmp_path)
     cfg = load_config(tmp_path)
     paths.ensure_sidecar(cfg)
+    anchor.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                        last_session="s", active_topics=["t"], active_notes=["n"])
     paths.health_journal_file(cfg).write_text("{broken\n", encoding="utf-8")
     ss = _load("session_start", HOOKS / "session_start.py")
-    ss.build_context({"cwd": str(tmp_path)})     # must not raise
+    assert "## Session Anchor" in ss.build_context({"cwd": str(tmp_path)})
+
+
+def test_session_start_survives_a_journal_it_cannot_read_at_all(tmp_path: Path):
+    """The other half of `lts.journal`'s promise: `_records` swallows `OSError`, not just bad JSON.
+
+    A directory where the file belongs makes every read and every append raise, which the corrupt
+    line does not.
+    """
+    from lts import anchor, paths
+    from lts.config import load_config
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                        last_session="s", active_topics=["t"], active_notes=["n"])
+    paths.health_journal_file(cfg).mkdir(parents=True, exist_ok=True)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    assert "## Session Anchor" in ss.build_context({"cwd": str(tmp_path)})
 
 
 def test_context_line_refuses_to_print_an_impossible_percentage():
@@ -744,3 +775,66 @@ def test_user_prompt_submit_does_not_nudge_on_a_figure_it_has_just_disowned(tmp_
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
     assert "impossible" in text
     assert "/sleep" not in text
+
+
+def test_session_start_still_delivers_the_anchor_when_the_health_path_raises(tmp_path: Path):
+    """The detector must not be able to reproduce the bug it detects.
+
+    `main()` catches everything and emits `{}`, so an exception anywhere between choosing the
+    blocks and returning them withholds the anchor, the digest and the sleep demand at once —
+    which is the two-month bug exactly. The raise is reachable: `status.collect` stats each
+    pending snapshot, and a concurrent /sleep clears them between the listing and the stat.
+    """
+    from lts import health, paths
+    from tests.test_health import _healthy
+    cfg = _healthy(tmp_path)
+    paths.ensure_sidecar(cfg)
+    from lts import anchor
+    anchor.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                        last_session="s", active_topics=["t"], active_notes=["[[N1]]"])
+
+    def boom(*a, **kw):
+        raise FileNotFoundError("a snapshot vanished mid-scan")
+
+    original = health.run
+    health.run = boom
+    try:
+        ss = _load("session_start", HOOKS / "session_start.py")
+        out = ss.build_context({"cwd": str(tmp_path)})
+    finally:
+        health.run = original
+    assert "[[N1]]" in out                      # the anchor survived
+    assert "Memory health" not in out           # and the health output is what was lost
+
+
+def test_session_start_collects_memory_metrics_once(tmp_path: Path):
+    """`health.run` and `health.record` each recompute `status.collect` when it is not given —
+    a full STM read, a pending stat and a vault rglob, twice, on every /compact."""
+    from lts import status
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    calls = []
+    original = status.collect
+
+    def counting(cfg, **kw):
+        calls.append(kw.get("transcript_path"))
+        return original(cfg, **kw)
+
+    status.collect = counting
+    try:
+        ss = _load("session_start", HOOKS / "session_start.py")
+        ss.build_context({"cwd": str(tmp_path)})
+    finally:
+        status.collect = original
+    assert len(calls) == 1
+
+
+def test_user_prompt_submit_says_when_the_context_figure_was_estimated(tmp_path: Path):
+    """The one surface the model reads must not present an estimate as a measurement."""
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000000\n")
+    junk = tmp_path / "notes.txt"
+    junk.write_text("x" * 48, encoding="utf-8")   # no usage record anywhere
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    text = ups.build_context({"transcript_path": str(junk)}, root=tmp_path)
+    assert "12/1,000,000" in text
+    assert "estimated from file size" in text

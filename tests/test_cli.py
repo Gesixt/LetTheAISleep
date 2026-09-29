@@ -545,9 +545,9 @@ def test_pressure_prints_a_bare_level_when_the_figure_was_measured(tmp_path: Pat
 
 
 def test_doctor_never_greens_capture_from_a_file_with_no_exchanges(tmp_path: Path, capsys):
-    """An empty file and a 48-byte note both returned "✓ capture: 0 exchange(s) behind the
-    capture mark — the normal flush lag": a specific benign explanation for a state where no
-    exchange was read at all. The caught-up session is the case the skip must not swallow.
+    """An empty file and a short note both returned "✓ capture: 0 exchange(s) behind the capture
+    mark — the normal flush lag": a specific benign explanation for a state where no exchange was
+    read at all. The caught-up session is the case the skip must not swallow.
     """
     from datetime import datetime, timezone
     from lts import paths, watermark

@@ -134,9 +134,10 @@ def measure_context(transcript_path: Path) -> tuple[int, str]:
 def context_tokens(transcript_path: Path) -> int:
     """Current context size in tokens, however it was arrived at.
 
-    Kept for callers that legitimately want a number and nothing else — the hooks, which state it
-    and act on it in one place. A caller that must not confuse an estimate with a measurement asks
-    `measure_context` for both halves.
+    The number alone. `measure_context` returns the same number with its provenance, and anything
+    that will present the figure to a human or to the model asks for both halves — `lts status`,
+    `lts pressure`, `_check_pressure` and `UserPromptSubmit` all do, because an estimate shown as
+    a reading is the defect this pair exists to separate.
     """
     return measure_context(transcript_path)[0]
 

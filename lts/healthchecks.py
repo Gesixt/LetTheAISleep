@@ -421,8 +421,8 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
     if not exchanges:
         # The old `ok` read an empty backlog as "you are caught up" and explained it with the
         # flush lag — a specific benign claim about a file that held no exchange at all. An empty
-        # file and a 48-byte note both bought it. `skip`, because nothing here is proven broken:
-        # what is missing is the measurement.
+        # file and a short note that is not a transcript both bought it. `skip`, because nothing
+        # here is proven broken: what is missing is the measurement.
         return Check(
             "capture", "skip",
             f"the transcript yielded no exchanges ({path}), so there is nothing to measure the "
@@ -573,6 +573,10 @@ def _check_pressure(metrics: dict | None) -> Check:
     if window <= 0:
         return Check("pressure", "fail", f"the context window is {window}",
                      "set `[context] window` in config.toml")
+    # A measurement with no `source` is read as measured, because `status.collect` is the only
+    # producer of this dict and it always sets one: the alternative would skip this check for
+    # every caller that hand-builds a metrics dict, including the tests that pin the impossible
+    # reading. If a second producer ever appears, this default is where it must be revisited.
     source = measured.get("source", transcript.USAGE)
     if source != transcript.USAGE:
         # The figure is `len(file) // 4`, not a reading of the window, and comparing it to a

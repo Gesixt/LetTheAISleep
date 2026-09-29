@@ -168,3 +168,19 @@ def test_measure_context_says_where_the_number_came_from(tmp_path: Path):
     # The old entry point keeps working, and asks for no second parse.
     assert transcript.context_tokens(real) == 900
     assert transcript.context_tokens(junk) == 12
+
+
+def test_a_usage_record_summing_to_zero_is_a_measurement(tmp_path: Path):
+    """An empty window that was read is not the same as a window nobody read.
+
+    `return last if last else estimate_tokens(...)` could not tell them apart, and would have
+    answered this file with a size estimate labelled as a reading.
+    """
+    t = tmp_path / "fresh.jsonl"
+    t.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "usage": {
+            "input_tokens": 0, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}},
+    }) + "\n" + "padding that would estimate to nonzero tokens" * 10, encoding="utf-8")
+    assert transcript.measure_context(t) == (0, transcript.USAGE)
