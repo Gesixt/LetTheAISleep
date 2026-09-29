@@ -37,6 +37,36 @@ def _wire_hooks(root: Path, *, scripts_at: Path, events: list[str] | None = None
     settings.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
 
 
+def _wire_commands(root: Path, commands: dict[str, str]) -> None:
+    """Write a .claude/settings.json with a literal command per event, verbatim.
+
+    `_wire_hooks` only produces the wiring `sync` writes; this one exists for the hand-edited
+    shapes the check has to survive (a trailing flag, a quoted interpreter, a wrapper).
+    """
+    hooks = {
+        event: [{"hooks": [{"type": "command", "command": command}]}]
+        for event, command in commands.items()
+    }
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+
+def _wired_project(tmp_path: Path, commands: dict[str, str]):
+    """A project wired at real scripts, with `commands` replacing those events verbatim."""
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})
+    scripts = tmp_path / "tools"
+    scripts.mkdir(parents=True, exist_ok=True)
+    full = {}
+    for event, script in sync.HOOK_EVENTS.items():
+        (scripts / script).write_text("", encoding="utf-8")
+        full[event] = f'python3 "{scripts / script}"'
+    full.update(commands)
+    _wire_commands(tmp_path, full)
+    return cfg
+
+
 def _healthy(root: Path):
     """A project where every inventory check passes."""
     cfg = _cfg(root)
@@ -168,3 +198,74 @@ def test_a_missing_vault_fails_but_an_empty_one_only_warns(tmp_path: Path):
     _vault(tmp_path / "b")
     _wire_hooks(tmp_path / "b", scripts_at=tmp_path / "b" / "tools")
     assert _by_id(health.run(empty), "vault").level == "warn"
+
+
+def test_a_trailing_flag_does_not_hide_a_missing_script(tmp_path: Path):
+    """`python3 /abs/stop.py --verbose`: the last word is the flag, and capture is still dead."""
+    cfg = _wired_project(
+        tmp_path, {"Stop": f"python3 {tmp_path / 'gone' / 'stop.py'} --verbose"}
+    )
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail", check
+    assert "Stop" in check.message and "stop.py" in check.message
+
+
+def test_a_quoted_interpreter_does_not_hide_a_missing_script(tmp_path: Path):
+    """The first quoted group can be the interpreter; the script is the next bare word."""
+    cfg = _wired_project(
+        tmp_path, {"Stop": f'"/usr/bin/python3" {tmp_path / "gone" / "stop.py"}'}
+    )
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail", check
+    assert "Stop" in check.message and "stop.py" in check.message
+
+
+def test_a_wrapper_command_is_reported_as_unverified_not_as_healthy(tmp_path: Path):
+    """No `.py` anywhere: the wrapper may be fine, but nothing here was checked."""
+    cfg = _wired_project(tmp_path, {"Stop": 'bash -c "lts hook stop"'})
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "skip", check
+    assert "Stop" in check.message
+    assert 'bash -c "lts hook stop"' in check.message
+
+
+def test_a_wrapper_command_does_not_mask_a_real_failure(tmp_path: Path):
+    """An unverifiable command never softens a failure found elsewhere."""
+    cfg = _wired_project(
+        tmp_path,
+        {"Stop": 'bash -c "lts hook stop"',
+         "PreCompact": f'python3 "{tmp_path / "gone" / "pre_compact.py"}"'},
+    )
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail", check
+    assert "PreCompact" in check.message
+
+
+def test_a_script_wired_to_the_wrong_event_fails(tmp_path: Path):
+    """An existing script is not the right script: Stop must not run session_start.py."""
+    cfg = _wired_project(
+        tmp_path, {"Stop": f'python3 "{tmp_path / "tools" / "session_start.py"}"'}
+    )
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail", check
+    assert "Stop" in check.message
+    assert "stop.py" in check.message and "session_start.py" in check.message
+
+
+def test_a_demand_counts_more_than_one_failure(tmp_path: Path):
+    out = health.demand([
+        health.Check("hooks", "fail", "not wired"),
+        health.Check("vault", "fail", "vault directory missing"),
+    ])
+    assert "2 checks FAILED" in out
+    assert "hooks: not wired" in out and "vault: vault directory missing" in out
+
+
+def test_render_shows_a_fix_only_where_something_is_wrong(tmp_path: Path):
+    """A passing check has nothing to fix, so its fix text must not be printed."""
+    out = health.render([
+        health.Check("config", "ok", "configured", "never print this"),
+        health.Check("vault", "warn", "vault is empty", "run /sleep"),
+    ])
+    assert "never print this" not in out
+    assert "Fix: run /sleep" in out
