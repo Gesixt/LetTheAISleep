@@ -93,8 +93,8 @@ def run(
     budget: with a transcript, the file is parsed twice for two different things — `status.collect`
     reads its usage counters, `_check_capture` reads its exchanges — and once more in the degenerate
     uuid branch. Supplying `metrics` moves the first parse to the caller rather than removing it, so
-    there is nothing here to optimise away. `lts doctor` is the only caller so far; the hook
-    integration is a later task, and it is to pass no transcript at all — not because a parse is
+    there is nothing here to optimise away. The callers are `lts doctor`, which passes a transcript
+    when it is given one, and the `SessionStart` hook, which passes none — not because a parse is
     too slow, which was asserted here for a while and is false, but because it is not worth its
     share of the budget. Measured 2026-09-29 on a 208,142,001-byte transcript (the same file was
     recorded at 187.5 MB four days earlier, so the size is a snapshot of a growing file, not a
@@ -136,10 +136,9 @@ def record(
     `blocks` is the load-bearing field: it states which blocks the calling hook emitted, which is
     not recoverable from the filesystem afterwards and is the only way `_check_anchor_delivery`
     can work at all. Its vocabulary is fixed, because that check matches names: the `SessionStart`
-    hook is to pass `health_demand`, `sleep_demand`, `anchor` (`_ANCHOR_BLOCK`) and `digest`, one
-    per block it emitted. Nothing calls `record` yet — the hook that writes these records is a
-    later task — so that list is the contract its caller will be held to, not a description of
-    traffic on disk. A name outside it is recorded and never read.
+    hook passes `health_demand`, `sleep_demand`, `anchor` (`_ANCHOR_BLOCK`) and `digest`, one per
+    block it emitted, and it is the only caller. A name outside that vocabulary is recorded and
+    never read.
     """
     if metrics is None:
         metrics = status.collect(cfg) if cfg.configured else {}
