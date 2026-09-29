@@ -134,18 +134,40 @@ def test_reads_outside_a_project_are_harmless(tmp_path: Path, capsys):
     assert not (stray / ".ai_memory").exists()
 
 
-def test_doctor_flags_unconfigured_root(tmp_path: Path, capsys):
-    stray = tmp_path / "arm-scripts"
-    stray.mkdir()
-    assert main(["doctor", "--root", str(stray)]) == 1
-    assert "no config.toml" in capsys.readouterr().out
+def test_doctor_reports_health_and_exits_zero_when_sound(tmp_path: Path, capsys):
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    code = main(["doctor", "--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Memory health" in out
+    assert "hooks:" in out
 
 
-def test_doctor_json_on_healthy_project(tmp_path: Path, capsys):
-    make_project(tmp_path)
-    assert main(["doctor", "--root", str(tmp_path), "--json"]) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is True and data["configured"] is True
+def test_doctor_exits_one_when_a_check_fails(tmp_path: Path, capsys):
+    code = main(["doctor", "--root", str(tmp_path / "nowhere")])
+    assert code == 1
+    assert "config:" in capsys.readouterr().out
+
+
+def test_doctor_json_lists_every_check(tmp_path: Path, capsys):
+    from lts import health
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    main(["doctor", "--root", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert [c["id"] for c in payload["checks"]] == list(health._IDS)
+    assert payload["worst"] in ("ok", "warn", "skip", "fail")
+
+
+def test_doctor_transcript_enables_the_transcript_bound_checks(tmp_path: Path, capsys):
+    from tests.test_health import _healthy, _transcript
+    _healthy(tmp_path)
+    tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T12:00:00.000Z"])
+    main(["doctor", "--root", str(tmp_path), "--transcript", str(tr), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    by_id = {c["id"]: c for c in payload["checks"]}
+    assert by_id["pressure"]["level"] != "skip"
 
 
 def test_session_name_single_developer(tmp_path: Path, capsys):

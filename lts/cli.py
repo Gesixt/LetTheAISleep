@@ -6,8 +6,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import (anchor, digest, doctor, memorymap, naming, paths, pending, status, stm,
-                 sync, transcript, watermark)
+from lts import (anchor, digest, doctor, health, memorymap, naming, paths, pending, status,
+                 stm, sync, transcript, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
 
@@ -62,8 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true")
 
     p_doctor = sub.add_parser("doctor")
-    _add_root(p_doctor)
     p_doctor.add_argument("--json", action="store_true")
+    p_doctor.add_argument(
+        "--transcript",
+        help="transcript path, enabling the capture and pressure checks (a hook omits it: "
+             "parsing a months-long transcript is too slow for the critical path)",
+    )
+    _add_root(p_doctor)
 
     p_digest = sub.add_parser("digest")
     _add_root(p_digest)
@@ -153,12 +158,23 @@ def _run(args) -> int:
         else:
             print(status.render(metrics))
     elif args.cmd == "doctor":
-        report = doctor.collect(cfg)
+        checks = health.run(
+            cfg, transcript_path=Path(args.transcript) if args.transcript else None
+        )
         if args.json:
-            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+            print(json.dumps(
+                {
+                    "worst": health.worst(checks),
+                    "checks": [
+                        {"id": c.id, "level": c.level, "message": c.message, "fix": c.fix}
+                        for c in checks
+                    ],
+                },
+                ensure_ascii=False, indent=2, default=str,
+            ))
         else:
-            print(doctor.render(report))
-        return 0 if report["ok"] else 1
+            print(health.render(checks))
+        return 1 if health.worst(checks) == "fail" else 0
     elif args.cmd == "digest":
         report = digest.collect(cfg, since=args.since)
         if args.json:
