@@ -50,6 +50,9 @@ _CAPTURE_TOLERANCE = timedelta(minutes=10)
 # The anchor's `updated` is minute-granular local time, so a sleep can look up to a minute older
 # than the note it just wrote.
 _ANCHOR_SKEW = timedelta(minutes=2)
+# How many journalled runs a trend looks at. Five compactions is days of work in a continuous
+# session — long enough that a one-off is not a trend, short enough to notice within a day.
+_TREND_WINDOW = 5
 
 _DEMAND_HEAD = (
     "## Memory health: {n} check{s} FAILED\n"
@@ -598,11 +601,59 @@ def _check_anchor_fresh(cfg: Config) -> Check:
     return Check("anchor_fresh", "ok", f"anchor updated {entry['updated']}")
 
 
+def _check_anchor_delivery(history: list[dict] | None) -> Check:
+    """Did the anchor actually reach the model recently?
+
+    This is the two-month bug expressed as a check. It cannot be answered from the filesystem: at
+    every instant the anchor file existed and had content. Only the record of what each run emitted
+    shows that it was never handed over.
+    """
+    runs = list(history or [])
+    if len(runs) < _TREND_WINDOW:
+        return Check("anchor_delivery", "skip",
+                     f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
+                     f"{_TREND_WINDOW}")
+    recent = runs[-_TREND_WINDOW:]
+    if any("anchor" in (run.get("blocks") or []) for run in recent):
+        return Check("anchor_delivery", "ok",
+                     f"the anchor reached the model within the last {_TREND_WINDOW} sessions")
+    return Check(
+        "anchor_delivery", "fail",
+        f"the anchor has not reached the model in the last {_TREND_WINDOW} sessions",
+        "run `lts anchor render` — if it prints nothing the anchor file is empty",
+    )
+
+
+def _check_capture_progress(history: list[dict] | None) -> Check:
+    """Is the Stop hook still capturing? The cheap form of the `capture` check.
+
+    Both conditions are needed. A session that sleeps every time keeps `stm_entries` at 0
+    legitimately while its mark still moves, so a flat buffer alone proves nothing.
+    """
+    runs = list(history or [])
+    if len(runs) < _TREND_WINDOW:
+        return Check("capture_progress", "skip",
+                     f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
+                     f"{_TREND_WINDOW}")
+    recent = runs[-_TREND_WINDOW:]
+    marks = {run.get("capture_mark") for run in recent}
+    counts = [int(run.get("stm_entries") or 0) for run in recent]
+    if len(marks) > 1 or any(b > a for a, b in zip(counts, counts[1:])):
+        return Check("capture_progress", "ok", "STM capture is progressing")
+    return Check(
+        "capture_progress", "fail",
+        f"the capture mark has not moved and the buffer has not grown in {_TREND_WINDOW} "
+        "sessions — the Stop hook is not capturing",
+        "check /tmp/lts-hook-errors.log, and the hooks check above",
+    )
+
+
 def run(
     cfg: Config,
     *,
     transcript_path: Path | None = None,
     metrics: dict | None = None,
+    history: list[dict] | None = None,
     now: datetime | None = None,
 ) -> list[Check]:
     """Every check, in `_IDS` order.
@@ -612,6 +663,10 @@ def run(
     budget: with a transcript and no `metrics`, `status.collect` parses the transcript and
     `_check_capture` parses it again (once more still in the degenerate uuid branch). Once the CLI
     passes `metrics`, the first of those goes away; nothing calls `run` yet.
+
+    `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
+    given history as an input, not a separate mechanism. It arrives as a plain list of dicts so
+    that `health` never imports `journal`.
 
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.
@@ -633,4 +688,39 @@ def run(
         _check_capture(cfg, transcript_path, now),
         _check_pressure(metrics),
         _check_anchor_fresh(cfg),
+        _check_anchor_delivery(history),
+        _check_capture_progress(history),
     ]
+
+
+def record(
+    cfg: Config,
+    checks: list[Check],
+    blocks: list[str],
+    *,
+    metrics: dict | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """One journal record per run.
+
+    `blocks` is the load-bearing field: it states what the hook actually emitted, which is not
+    recoverable from the filesystem afterwards and is the only way `_check_anchor_delivery` can
+    work at all.
+    """
+    if metrics is None:
+        metrics = status.collect(cfg) if cfg.configured else {}
+    stm_info = (metrics or {}).get("stm") or {}
+    pending_info = (metrics or {}).get("pending") or {}
+    vault = paths.vault_root(cfg)
+    return {
+        "at": watermark.mark_at(now)["timestamp"],
+        "event": "session_start",
+        "blocks": list(blocks),
+        "checks": {check.id: check.level for check in checks},
+        "stm_entries": stm_info.get("lines", 0),
+        "stm_bytes": stm_info.get("bytes", 0),
+        "capture_mark": watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp"),
+        "sleep_mark": watermark.read_mark(paths.sleep_mark_file(cfg)).get("timestamp"),
+        "pending": pending_info.get("snapshots", 0),
+        "notes": len(list(vault.rglob("*.md"))) if vault.is_dir() else 0,
+    }

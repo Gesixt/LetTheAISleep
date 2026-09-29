@@ -903,3 +903,98 @@ def test_a_pressure_measurement_that_is_not_a_measurement_does_not_raise(tmp_pat
     check = _by_id(health.run(cfg, metrics={"pressure": "yes"}, now=_T0), "pressure")
     assert check.level in {"fail", "skip"}, check
     assert "yes" in check.message
+
+
+def _runs(n: int, *, blocks=("anchor",), mark="M1", entries=0) -> list[dict]:
+    return [
+        {"event": "session_start", "blocks": list(blocks),
+         "capture_mark": mark, "stm_entries": entries}
+        for _ in range(n)
+    ]
+
+
+def test_five_sessions_without_the_anchor_fail(tmp_path: Path):
+    """The two-month bug, in one check. Undetectable from a filesystem snapshot."""
+    cfg = _healthy(tmp_path)
+    history = _runs(5, blocks=("sleep_demand",))
+    check = _by_id(health.run(cfg, history=history, now=_T0), "anchor_delivery")
+    assert check.level == "fail"
+    assert "has not reached the model" in check.message
+
+
+def test_one_anchor_in_the_window_is_enough(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    history = _runs(4, blocks=("sleep_demand",)) + _runs(1, blocks=("anchor",))
+    assert _by_id(health.run(cfg, history=history, now=_T0),
+                  "anchor_delivery").level == "ok"
+
+
+def test_a_short_history_skips_the_trend_rather_than_passing_it(tmp_path: Path):
+    """The journal starts empty in every project; a young trend must say so, not say ok."""
+    cfg = _healthy(tmp_path)
+    check = _by_id(health.run(cfg, history=_runs(4, blocks=("sleep_demand",)), now=_T0),
+                   "anchor_delivery")
+    assert check.level == "skip"
+    assert "5" in check.message
+
+
+def test_a_frozen_mark_and_a_flat_buffer_fail_capture_progress(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    check = _by_id(health.run(cfg, history=_runs(5, mark="FROZEN", entries=0), now=_T0),
+                   "capture_progress")
+    assert check.level == "fail"
+    assert "not capturing" in check.message
+
+
+def test_a_moving_mark_passes_even_with_an_always_empty_buffer(tmp_path: Path):
+    """Sleeping every session keeps stm_entries at 0 legitimately, so the mark decides."""
+    cfg = _healthy(tmp_path)
+    history = [
+        {"blocks": ["anchor"], "capture_mark": f"M{i}", "stm_entries": 0} for i in range(5)
+    ]
+    assert _by_id(health.run(cfg, history=history, now=_T0),
+                  "capture_progress").level == "ok"
+
+
+def test_a_growing_buffer_passes_even_with_a_frozen_mark_field(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    history = [
+        {"blocks": ["anchor"], "capture_mark": "SAME", "stm_entries": i} for i in range(5)
+    ]
+    assert _by_id(health.run(cfg, history=history, now=_T0),
+                  "capture_progress").level == "ok"
+
+
+def test_no_history_skips_both_trend_checks(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    checks = health.run(cfg, now=_T0)
+    assert _by_id(checks, "anchor_delivery").level == "skip"
+    assert _by_id(checks, "capture_progress").level == "skip"
+
+
+def test_run_now_returns_every_declared_check_in_id_order(tmp_path: Path):
+    """`_IDS` is the vocabulary the record and the short-circuit share, so `run` must cover it."""
+    cfg = _healthy(tmp_path)
+    assert [c.id for c in health.run(cfg, now=_T0)] == list(health._IDS)
+
+
+def test_the_record_states_what_the_run_emitted(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    checks = health.run(cfg, now=_T0)
+    rec = health.record(cfg, checks, ["sleep_demand", "anchor"], now=_T0)
+    assert rec["event"] == "session_start"
+    assert rec["blocks"] == ["sleep_demand", "anchor"]
+    assert rec["checks"]["config"] == "ok"
+    assert set(rec["checks"]) == set(health._IDS)
+    assert rec["at"].endswith("Z")
+    assert rec["notes"] == 1                      # the one knowledge-base note from _healthy
+    assert rec["stm_entries"] == 0 and rec["pending"] == 0
+
+
+def test_the_record_round_trips_through_the_journal(tmp_path: Path):
+    from lts import journal
+    cfg = _healthy(tmp_path)
+    log = paths.health_journal_file(cfg)
+    rec = health.record(cfg, health.run(cfg, now=_T0), ["anchor"], now=_T0)
+    journal.append(log, rec)
+    assert journal.tail(log, 1)[0]["blocks"] == ["anchor"]
