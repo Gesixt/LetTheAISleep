@@ -657,3 +657,78 @@ def test_the_pressure_nudge_never_quotes_a_band_of_its_own(tmp_path: Path):
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
     assert "90%" in text and "/sleep" in text
     assert "60%+" not in text and "80%+" not in text
+
+
+def test_session_start_prepends_the_demand_when_a_check_fails(tmp_path: Path):
+    """A failing check must be the first thing the model reads, because it says the
+    rest may be untrustworthy."""
+    from tests.test_health import _cfg, _vault
+    _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})       # no .claude/settings.json -> hooks fail
+    ss = _load("session_start", HOOKS / "session_start.py")
+    out = ss.build_context({"cwd": str(tmp_path)})
+    assert out.startswith("## Memory health:")
+    assert "hooks:" in out
+
+
+def test_session_start_says_nothing_new_when_memory_is_sound(tmp_path: Path):
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    out = ss.build_context({"cwd": str(tmp_path)})
+    assert "Memory health" not in out
+
+
+def test_session_start_journals_one_record_naming_what_it_emitted(tmp_path: Path):
+    from lts import journal, paths
+    from lts import anchor as anchor_mod
+    from tests.test_health import _healthy
+    cfg = _healthy(tmp_path)
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2099-01-01 00:00",
+                            last_session="s", active_topics=["t"], active_notes=["n"])
+    ss = _load("session_start", HOOKS / "session_start.py")
+    ss.build_context({"cwd": str(tmp_path)})
+    records = journal.tail(paths.health_journal_file(cfg), 5)
+    assert len(records) == 1
+    assert "anchor" in records[0]["blocks"]
+    assert records[0]["checks"]["hooks"] == "ok"
+
+
+def test_session_start_records_the_demand_it_emitted(tmp_path: Path):
+    from lts import journal, paths
+    from lts.config import load_config
+    from tests.test_health import _cfg, _vault
+    _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})
+    ss = _load("session_start", HOOKS / "session_start.py")
+    ss.build_context({"cwd": str(tmp_path)})
+    cfg = load_config(tmp_path)
+    assert "health_demand" in journal.tail(paths.health_journal_file(cfg), 1)[0]["blocks"]
+
+
+def test_session_start_survives_an_unreadable_journal(tmp_path: Path):
+    """A journal that can break a hook would be a new way for memory to die."""
+    from lts import paths
+    from lts.config import load_config
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    paths.health_journal_file(cfg).write_text("{broken\n", encoding="utf-8")
+    ss = _load("session_start", HOOKS / "session_start.py")
+    ss.build_context({"cwd": str(tmp_path)})     # must not raise
+
+
+def test_context_line_refuses_to_print_an_impossible_percentage():
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    line = ups._context_line(45_413_420, 1_000_000)
+    assert "%" not in line
+    assert "45,413,420" in line and "1,000,000" in line
+    assert "impossible" in line
+
+
+def test_context_line_still_prints_a_real_percentage():
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    line = ups._context_line(276_013, 1_000_000)
+    assert "276,013/1,000,000" in line and "28%" in line

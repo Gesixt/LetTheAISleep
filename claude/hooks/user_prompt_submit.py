@@ -26,15 +26,30 @@ _FORCE = (
 
 
 def _context_line(tokens: int, window: int) -> str:
-    """The measured occupancy of the context window, stated on every turn.
+    """The measured occupancy of the context window, or an honest refusal when it cannot be true.
 
     Below the warn threshold this hook used to say nothing, and no skill passes `--transcript`
     to `lts status`, so the one real number in the system was never quotable. With nothing to
     cite, the model produced a figure of its own. "window" is in the label on purpose: the STM
     buffer is a different meter, and the two were being conflated.
+
+    A percentage above 100 is never real, so it is not printed. `lts pressure` produced one on a
+    real project — 45,413,420 tokens against a 1,000,000-token window, while the session was at
+    28% — which is the state this branch keeps quoting as "9900%"; the two figures divide to
+    4541%, so at least one of them is remembered rather than measured, and the mechanism is
+    recorded twice with two different causes. That is exactly why this is an invariant on the
+    output and not a fix for a cause: whatever produced the pair, the sentence it printed could
+    not be true. Here the same state prints both numbers and no percentage, which costs nothing —
+    both figures are already in hand.
     """
     if not tokens or window <= 0:
         return ""
+    if tokens > window:
+        return (
+            f"Context window: {tokens:,} tokens measured against a {window:,}-token window — "
+            "this is impossible, so the measurement or the configured window is wrong. "
+            "Treat the figure as unknown."
+        )
     return f"Context window: {tokens:,}/{window:,} tokens ({round(tokens / window * 100)}%)"
 
 

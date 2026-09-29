@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import anchor, digest, paths, pending, stm
+from lts import anchor, digest, health, healthchecks, journal, paths, pending, stm
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -40,9 +40,13 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     # return early — "one demand at a time" — which assumed sessions end often. A session that
     # runs for months on /sleep + /compact never has an empty buffer, so the anchor and the
     # digest were withheld permanently and the model had no idea which notes existed.
-    blocks = []
+    # Each block is carried with the name `health.record` knows it by, so that what is journalled
+    # is derived from what is emitted rather than restated alongside it.
+    blocks: list[tuple[str, str]] = []
     if snapshots or stm_entries:
-        blocks.append(_FORCE_MSG.format(stm=stm_entries, snapshots=len(snapshots)))
+        blocks.append(
+            ("sleep_demand", _FORCE_MSG.format(stm=stm_entries, snapshots=len(snapshots)))
+        )
 
     # The digest scans the vault (e.g. note.stat()), which can raise on a dangling symlink or
     # a mid-scan race. That must never suppress the anchor, so degrade the digest to "".
@@ -51,10 +55,37 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     except Exception:
         digest_block = ""
     blocks += [
-        anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))),
-        digest_block,
+        # `_ANCHOR_BLOCK` rather than a retyped "anchor": `_check_anchor_delivery` matches this
+        # name against the journal, and a typo here would fail that check forever.
+        (healthchecks._ANCHOR_BLOCK,
+         anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg)))),
+        ("digest", digest_block),
     ]
-    return "\n\n".join(b for b in blocks if b)
+
+    # No transcript, deliberately — and not because a parse is too slow. Measured 2026-09-29 on a
+    # 208,142,001-byte transcript: `context_tokens` 1.46 s and 1.57 s, `read_exchanges` 1.48 s and
+    # 1.52 s, so one parse fits the 3-5 s session-load budget of ТЗ §6 with room to spare. The
+    # reason is that `--transcript` costs both parses, ~3.0 s on top of what this hook already
+    # spends, on every /compact, while both failure classes are covered more cheaply: the capture
+    # class by `capture_progress`, which reads five journal records and no transcript at all, and
+    # the impossible-percentage class by the invariant in `user_prompt_submit._context_line`.
+    # `lts.health.run` carries the same argument with the same figures.
+    #
+    # `_TREND_WINDOW` is the window the trend checks require: handing them fewer records makes
+    # them skip, and more is history they discard.
+    journal_file = paths.health_journal_file(cfg)
+    checks = health.run(cfg, history=journal.tail(journal_file, healthchecks._TREND_WINDOW))
+    failure = health.demand(checks)
+    if failure:
+        # First, because it is the one block that says the others may be untrustworthy.
+        blocks.insert(0, ("health_demand", failure))
+
+    # After the blocks are chosen, never before: the record's whole value is stating what was
+    # actually emitted, which is the only input `_check_anchor_delivery` has. `journal.append`
+    # swallows every exception, so a broken journal costs the record and never the blocks.
+    emitted = [name for name, body in blocks if body]
+    journal.append(journal_file, health.record(cfg, checks, emitted))
+    return "\n\n".join(body for _name, body in blocks if body)
 
 
 def run(event: dict, *, root: Path | None = None) -> dict:
