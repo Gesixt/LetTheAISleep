@@ -21,14 +21,25 @@ def _add_root(sp) -> None:
     sp.add_argument("--root", default=None)
 
 
-def _unusable_transcript(path: Path) -> str | None:
-    """Why `path` cannot be read as a transcript, or None when it can."""
+def _unusable_transcript(value: str) -> str | None:
+    """Why `value` cannot be read as a transcript, or None when it can.
+
+    The value is quoted in every message: a whitespace argument otherwise prints as an empty tail
+    and the reader cannot see what was wrong with it.
+    """
+    # An empty or blank value is a bad path, not an absent flag. It is what an unset shell
+    # variable expands to — and `Path("")` is `.`, so letting it through reached the filesystem
+    # as the current directory: `pressure` raised IsADirectoryError, `status` silently dropped
+    # its context line.
+    if not value.strip():
+        return f"transcript path is empty: {value!r}"
+    path = Path(value)
     if not path.exists():
-        return f"transcript not found: {path}"
+        return f"transcript not found: {str(path)!r}"
     if not path.is_file():
-        return f"transcript is not a file: {path}"
+        return f"transcript is not a file: {str(path)!r}"
     if not os.access(path, os.R_OK):
-        return f"transcript is not readable: {path}"
+        return f"transcript is not readable: {str(path)!r}"
     return None
 
 
@@ -78,8 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument(
         "--transcript",
         help="transcript path, enabling the capture and pressure checks (the planned hook "
-             "caller will omit it: parsing a months-long transcript is too slow for the "
-             "critical path)",
+             "caller will omit it: one parse of a large transcript measured ~1.5 s, and the two "
+             "these checks need would consume most of the session-load budget on every run)",
     )
     _add_root(p_doctor)
 
@@ -114,11 +125,13 @@ def _run(args) -> int:
     # command: downstream, an unreadable transcript is not an absent measurement but a green one.
     # `transcript.context_tokens` returns 0 for a file that is not there, so `lts pressure` prints
     # "none", `status`'s pressure block reads 0%, and `doctor`'s `pressure` check lands on `ok` —
-    # each a confident answer from a read that never happened, and `pressure` is the one skills
-    # invoke through the shell. An *omitted* flag is left alone: it asks a narrower question, and
-    # the commands that allow it already say which measurements they did not make.
+    # each a confident answer from a read that never happened. All three take the path from a
+    # human at a terminal, where a typo is the ordinary case; nothing shells out to them.
+    # Only `None` — the flag omitted — skips the guard. An omitted flag asks a narrower question,
+    # and the commands that allow it already say which measurements they did not make; an empty
+    # string is a path that was given and is unusable, and `_unusable_transcript` says so.
     given = getattr(args, "transcript", None)
-    unusable = _unusable_transcript(Path(given)) if given else None
+    unusable = _unusable_transcript(given) if given is not None else None
     if unusable:
         print(f"lts: {unusable}", file=sys.stderr)
         return 2
@@ -192,6 +205,9 @@ def _run(args) -> int:
                 {
                     "worst": health.worst(checks),
                     "checks": [
+                        # No `default=` encoder: `Check`'s four fields are `str | None` by
+                        # construction, so a field that is not one should raise here rather than
+                        # be stringified into a shape the caller cannot parse back.
                         {"id": c.id, "level": c.level, "message": c.message, "fix": c.fix}
                         for c in checks
                     ],

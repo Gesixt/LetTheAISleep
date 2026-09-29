@@ -310,7 +310,7 @@ def test_doctor_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys)
     captured = capsys.readouterr()
     assert code == 2
     assert captured.out == ""
-    assert "/nonexistent/path.jsonl" in captured.err
+    assert "transcript not found: '/nonexistent/path.jsonl'" in captured.err
     assert "pressure" not in captured.out
 
 
@@ -323,7 +323,7 @@ def test_doctor_refuses_a_transcript_that_is_not_a_file(tmp_path: Path, capsys):
     captured = capsys.readouterr()
     assert code == 2
     assert captured.out == ""
-    assert str(directory) in captured.err
+    assert f"transcript is not a file: {str(directory)!r}" in captured.err
 
 
 def test_doctor_json_carries_the_message_and_fix_of_every_check(tmp_path: Path, capsys):
@@ -373,17 +373,20 @@ def test_doctor_transcript_reaches_the_capture_check(tmp_path: Path, capsys):
 
 
 def test_pressure_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys):
-    """Skills shell out to `lts pressure`, so a typo used to come back as a confident "ok".
+    """A mistyped path used to come back as a confident `none`.
 
     `transcript.context_tokens` returns 0 for a file that is not there, and 0 tokens is below
     every threshold — the caller was told there is no pressure by a read that never happened.
+    Both this command and `status` take the path from a human at a terminal; no skill or hook
+    shells out to `lts pressure` (the only consumer of the level is
+    `claude/hooks/user_prompt_submit.py`, which calls `transcript.pressure_level` in-process).
     """
     make_project(tmp_path)
     code = main(["pressure", "--root", str(tmp_path), "--transcript", "/nonexistent/path.jsonl"])
     captured = capsys.readouterr()
     assert code == 2
     assert captured.out == ""
-    assert "transcript not found: /nonexistent/path.jsonl" in captured.err
+    assert "transcript not found: '/nonexistent/path.jsonl'" in captured.err
 
 
 def test_status_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys):
@@ -392,7 +395,7 @@ def test_status_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys)
     captured = capsys.readouterr()
     assert code == 2
     assert captured.out == ""
-    assert "transcript not found: /nonexistent/path.jsonl" in captured.err
+    assert "transcript not found: '/nonexistent/path.jsonl'" in captured.err
 
 
 def test_an_omitted_transcript_is_not_a_bad_one(tmp_path: Path, capsys):
@@ -420,3 +423,38 @@ def test_a_usable_transcript_still_reaches_pressure_and_status(tmp_path: Path, c
     assert capsys.readouterr().out.strip() == "force"
     assert main(["status", "--root", str(tmp_path), "--transcript", str(t), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["pressure"]["tokens"] == 900
+
+
+def test_the_json_shape_needs_no_encoder_because_every_field_is_a_string(tmp_path: Path, capsys):
+    """`json.dumps(..., default=str)` was a leftover of the old report shape, which held `Path`
+    objects. `Check`'s four fields are `str | None` by construction, so the encoder guarded
+    nothing — and with it gone a future field that is not a string raises here instead of being
+    quietly stringified. This pins the shape that makes the removal safe."""
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    main(["doctor", "--root", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    for check in payload["checks"]:
+        assert isinstance(check["id"], str)
+        assert isinstance(check["level"], str)
+        assert isinstance(check["message"], str)
+        assert check["fix"] is None or isinstance(check["fix"], str)
+
+
+def test_an_empty_transcript_value_is_a_bad_path_not_an_absent_one(tmp_path: Path, capsys):
+    """An unset shell variable expands to "", which is the case the guard exists for.
+
+    It used to slip through as though the flag had been omitted: `pressure --transcript ""`
+    raised an uncaught `IsADirectoryError` (`Path("")` is `.`) and `status --transcript ""`
+    printed a full report with no context line at all, both without saying anything was wrong.
+    """
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    for cmd in ("pressure", "status", "doctor"):
+        for value in ("", "   "):
+            code = main([cmd, "--root", str(tmp_path), "--transcript", value])
+            captured = capsys.readouterr()
+            assert code == 2, (cmd, value)
+            assert captured.out == "", (cmd, value)
+            # The value is quoted, so whitespace is legible rather than an empty tail.
+            assert repr(value) in captured.err, (cmd, value)
