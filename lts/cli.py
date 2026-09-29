@@ -110,6 +110,19 @@ def build_parser() -> argparse.ArgumentParser:
 def _run(args) -> int:
     cfg = _cfg(getattr(args, "root", None))
 
+    # One rule for every command that takes `--transcript`, read once here rather than per
+    # command: downstream, an unreadable transcript is not an absent measurement but a green one.
+    # `transcript.context_tokens` returns 0 for a file that is not there, so `lts pressure` prints
+    # "none", `status`'s pressure block reads 0%, and `doctor`'s `pressure` check lands on `ok` —
+    # each a confident answer from a read that never happened, and `pressure` is the one skills
+    # invoke through the shell. An *omitted* flag is left alone: it asks a narrower question, and
+    # the commands that allow it already say which measurements they did not make.
+    given = getattr(args, "transcript", None)
+    unusable = _unusable_transcript(Path(given)) if given else None
+    if unusable:
+        print(f"lts: {unusable}", file=sys.stderr)
+        return 2
+
     if args.cmd == "stm":
         if args.op in ("append", "clear"):
             require_project(cfg)
@@ -171,14 +184,6 @@ def _run(args) -> int:
         else:
             print(status.render(metrics))
     elif args.cmd == "doctor":
-        # Refuse rather than report without it: an absent transcript is not an absent measurement
-        # downstream but a green one — `context_tokens` returns 0 for a file that is not there and
-        # `pressure` prints "0 tokens (0%)" — so a typo would buy a clean bill of health, which is
-        # the one outcome this subsystem exists to prevent.
-        unusable = args.transcript and _unusable_transcript(Path(args.transcript))
-        if unusable:
-            print(f"lts: {unusable}", file=sys.stderr)
-            return 2
         checks = health.run(
             cfg, transcript_path=Path(args.transcript) if args.transcript else None
         )

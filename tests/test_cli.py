@@ -370,3 +370,53 @@ def test_doctor_transcript_reaches_the_capture_check(tmp_path: Path, capsys):
     with_it = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
     assert with_it["capture"]["level"] == "ok"
     assert "behind the capture mark" in with_it["capture"]["message"]
+
+
+def test_pressure_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys):
+    """Skills shell out to `lts pressure`, so a typo used to come back as a confident "ok".
+
+    `transcript.context_tokens` returns 0 for a file that is not there, and 0 tokens is below
+    every threshold — the caller was told there is no pressure by a read that never happened.
+    """
+    make_project(tmp_path)
+    code = main(["pressure", "--root", str(tmp_path), "--transcript", "/nonexistent/path.jsonl"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert "transcript not found: /nonexistent/path.jsonl" in captured.err
+
+
+def test_status_refuses_a_transcript_path_it_cannot_read(tmp_path: Path, capsys):
+    make_project(tmp_path)
+    code = main(["status", "--root", str(tmp_path), "--transcript", "/nonexistent/path.jsonl"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert "transcript not found: /nonexistent/path.jsonl" in captured.err
+
+
+def test_an_omitted_transcript_is_not_a_bad_one(tmp_path: Path, capsys):
+    """`status` and `doctor` take the flag optionally; omitting it asks a narrower question, and
+    both already say which checks went unmeasured. Only a path that was given and cannot be read
+    is a refusal."""
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+    assert main(["status", "--root", str(tmp_path)]) == 0
+    assert "STM buffer" in capsys.readouterr().out
+    assert main(["doctor", "--root", str(tmp_path)]) == 0
+    assert "no transcript given" in capsys.readouterr().out
+
+
+def test_a_usable_transcript_still_reaches_pressure_and_status(tmp_path: Path, capsys):
+    """The guard must not change what either command prints when the path is readable."""
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps({
+        "type": "assistant", "uuid": "u0", "timestamp": "2026-09-29T12:00:00.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}],
+                    "usage": {"input_tokens": 900}},
+    }) + "\n", encoding="utf-8")
+    assert main(["pressure", "--root", str(tmp_path), "--transcript", str(t)]) == 0
+    assert capsys.readouterr().out.strip() == "force"
+    assert main(["status", "--root", str(tmp_path), "--transcript", str(t), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["pressure"]["tokens"] == 900
