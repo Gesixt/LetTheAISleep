@@ -57,6 +57,46 @@ class Check:
     fix: str | None = None
 
 
+def all_checks(
+    cfg: Config,
+    *,
+    transcript_path: Path | None = None,
+    metrics: dict | None = None,
+    history: list[dict] | None = None,
+    now: datetime | None = None,
+) -> list[Check]:
+    """Every check this module can make about `cfg`, in the order the report states them.
+
+    The one public entry point. The checks and the helpers they own stay private, so the interface
+    between this module and `lts.health` is `Check` plus this function — a surface that is free to
+    settle now, while nothing outside the tests calls it.
+
+    `now` is normalised here because every check that compares anything mixes a caller's `now` with
+    a mark parsed out of a file, and one naive operand raises rather than answering. The order is
+    fixed here too: it is the order the rendered report and the journal record share.
+
+    A configured project is assumed. Without one, the config verdict is the only thing that can be
+    established — there is nothing for the other nine to measure — so that is all this returns, and
+    `lts.health` says what the rest of the report reads like in that case.
+    """
+    now = _utc(now) or datetime.now(timezone.utc)
+    config_check = _check_config(cfg)
+    if not cfg.configured:
+        return [config_check]
+    return [
+        config_check,
+        _check_sidecars(cfg),
+        _check_hooks(cfg),
+        _check_vault(cfg),
+        _check_marks(cfg, now),
+        _check_capture(cfg, transcript_path, now),
+        _check_pressure(metrics),
+        _check_anchor_fresh(cfg),
+        _check_anchor_delivery(history),
+        _check_capture_progress(history),
+    ]
+
+
 # --- inventory -------------------------------------------------------------------------------
 
 

@@ -18,7 +18,7 @@ documented and never called. A health report that is merely present would be ign
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from lts import healthchecks, paths, status, watermark
@@ -86,7 +86,7 @@ def run(
     history: list[dict] | None = None,
     now: datetime | None = None,
 ) -> list[Check]:
-    """Every check, in `_IDS` order.
+    """Every check, in `_IDS` order, assembled by `healthchecks.all_checks`.
 
     `metrics` is a `status.collect` result, taken as an argument so that health never recomputes
     memory load and `status.collect` stays the single place that counts it. It is not a parse
@@ -101,26 +101,16 @@ def run(
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.
     """
-    now = healthchecks._utc(now) or datetime.now(timezone.utc)
-    config_check = healthchecks._check_config(cfg)
     if not cfg.configured:
-        return [config_check] + [
+        # `all_checks` can establish the config verdict and nothing else without a project; the
+        # nine skips are this module's vocabulary, so they are written here.
+        return healthchecks.all_checks(cfg, now=now) + [
             Check(check_id, "skip", "no lts project here") for check_id in _IDS[1:]
         ]
     if metrics is None:
         metrics = status.collect(cfg, transcript_path=transcript_path)
-    return [
-        config_check,
-        healthchecks._check_sidecars(cfg),
-        healthchecks._check_hooks(cfg),
-        healthchecks._check_vault(cfg),
-        healthchecks._check_marks(cfg, now),
-        healthchecks._check_capture(cfg, transcript_path, now),
-        healthchecks._check_pressure(metrics),
-        healthchecks._check_anchor_fresh(cfg),
-        healthchecks._check_anchor_delivery(history),
-        healthchecks._check_capture_progress(history),
-    ]
+    return healthchecks.all_checks(cfg, transcript_path=transcript_path, metrics=metrics,
+                                   history=history, now=now)
 
 
 def record(
