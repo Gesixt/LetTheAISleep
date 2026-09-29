@@ -979,11 +979,14 @@ def test_no_history_skips_both_trend_checks(tmp_path: Path):
     assert _by_id(checks, "capture_progress").level == "skip"
 
 
-def test_a_malformed_journal_record_costs_itself_and_not_the_whole_report(tmp_path: Path):
+def test_a_malformed_journal_record_costs_itself_and_not_the_trend(tmp_path: Path):
     """A record read off disk may hold any JSON type, and the trend checks used to raise on each
     shape below — taking all ten checks down with them, and (once `SessionStart` reads the journal
     from disk) the hook itself. `lts.journal` filters non-JSON and non-dict lines but not field
-    types, and its contract is that a bad line costs itself, never the history.
+    types, and its promise is that a bad line costs itself, never the history. Skipping the whole
+    check would break that promise one layer up: one corrupt line would blind the trend for five
+    sessions. So the record is dropped, the rest is measured, and the message says how much of the
+    window was read.
     """
     cfg = _healthy(tmp_path)
     shapes = [
@@ -999,9 +1002,46 @@ def test_a_malformed_journal_record_costs_itself_and_not_the_whole_report(tmp_pa
         checks = health.run(cfg, history=history, now=_T0)
         assert [c.id for c in checks] == list(health._IDS), (field, value)
         check = _by_id(checks, check_id)
-        assert check.level == "skip", (field, check)
-        assert field in check.message, (field, check)
-        assert check.fix is None, (field, check)
+        # The four usable records still carry the failure, and the claim is about four, not five.
+        assert check.level == "fail", (field, check)
+        assert f"4 of the last {health._TREND_WINDOW}" in check.message, (field, check)
+        assert "records could be read" in check.message, (field, check)
+        # …and it does not describe itself as a measurement over the whole window.
+        assert f"in the last {health._TREND_WINDOW} sessions" not in check.message, (field, check)
+
+
+def test_the_records_left_after_a_bad_one_are_measured_not_assumed_to_fail(tmp_path: Path):
+    """Dropping the record must not degrade into a default `fail`: what is left is read."""
+    cfg = _healthy(tmp_path)
+    history = [
+        {"blocks": ["anchor"], "capture_mark": f"M{i}", "stm_entries": 0} for i in range(5)
+    ]
+    history[1]["stm_entries"] = "lots"
+    check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
+    assert check.level == "ok", check
+    assert "capture mark moved" in check.message, check
+    assert f"4 of the last {health._TREND_WINDOW}" in check.message, check
+
+
+def test_too_few_usable_records_skip_the_trend_naming_both_counts(tmp_path: Path):
+    """Below two records there is no change to see, so the trend says so instead of judging."""
+    cfg = _healthy(tmp_path)
+    history = _runs(5)
+    for record in history[:4]:
+        record["capture_mark"] = {"timestamp": "x"}
+    check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
+    assert check.level == "skip", check
+    assert f"1 of the last {health._TREND_WINDOW}" in check.message, check   # usable
+    assert f"at least {health._TREND_MIN}" in check.message, check           # required
+    assert "capture_mark" in check.message, check                            # what was unusable
+    assert check.fix is None, check
+    # Two usable records are enough to see a change, so the trend is measured rather than skipped.
+    two = _runs(5, mark="FROZEN")
+    for record in two[:3]:
+        record["capture_mark"] = {"timestamp": "x"}
+    measured = _by_id(health.run(cfg, history=two, now=_T0), "capture_progress")
+    assert measured.level == "fail", measured
+    assert f"2 of the last {health._TREND_WINDOW}" in measured.message, measured
 
 
 def test_no_history_is_not_the_same_as_an_empty_journal(tmp_path: Path):

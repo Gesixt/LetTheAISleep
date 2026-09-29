@@ -610,17 +610,43 @@ def _check_anchor_fresh(cfg: Config) -> Check:
 # arrive; each of these used to raise instead, aborting all ten checks.
 _TREND_FIELDS = {"blocks": (list, tuple), "capture_mark": (str, int, float),
                  "stm_entries": (int, float)}
+# The fewest readable records a trend can be measured on: two, because a change between runs is
+# what a trend reads and one record shows none. Below that the check says so rather than judging.
+_TREND_MIN = 2
+
+
+def _readable(run: dict, field: str) -> bool:
+    """Can this trend read `run[field]`?
+
+    A missing field is legitimate — nothing emitted, nothing captured — and reads as empty. A field
+    of the wrong type is a record this trend cannot read, and it costs itself alone.
+    """
+    value = run.get(field)
+    return value is None or isinstance(value, _TREND_FIELDS[field])
+
+
+def _trend_scope(usable: int) -> str:
+    """The window a trend actually read, for a message that may claim no more than was measured."""
+    if usable == _TREND_WINDOW:
+        return f"the last {_TREND_WINDOW} sessions"
+    return f"the {usable} of the last {_TREND_WINDOW} sessions whose records could be read"
 
 
 def _trend_window(
     history: list[dict] | None, check_id: str, *fields: str
 ) -> tuple[list[dict], Check | None]:
-    """The last `_TREND_WINDOW` records with `fields` readable, or the `skip` saying why not.
+    """The records of the last `_TREND_WINDOW` that are readable on `fields`, or the `skip` saying
+    why there is no trend to read.
 
     `history is None` and an empty journal are different facts and must not share a message: if the
     wiring passes no `history`, "0 of 5 runs journalled" is a claim about a file nobody read, and it
     would stand for ever while the journal filled up. That skip carries no `fix`: it is a wiring
     fault, and there is nothing the reader of the report can do about it.
+
+    An unreadable record is dropped, not fatal to the check: skipping the whole trend would blind
+    it for `_TREND_WINDOW` sessions over one corrupt line, which breaks `lts.journal`'s promise
+    that a bad line costs itself and never the history. The caller states how many records it
+    measured, via `_trend_scope`, so the claim never covers records that were not read.
     """
     if history is None:
         return [], Check(check_id, "skip",
@@ -631,15 +657,15 @@ def _trend_window(
                          f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
                          f"{_TREND_WINDOW}")
     recent = runs[-_TREND_WINDOW:]
-    # A missing field is legitimate (nothing emitted, nothing captured); a wrong-typed one costs
-    # this check, not the report. No `fix`: the next run records a well-formed line by itself.
-    for field, run in ((f, r) for f in fields for r in recent):
-        value = run.get(field)
-        if value is not None and not isinstance(value, _TREND_FIELDS[field]):
-            return [], Check(check_id, "skip",
-                             f"a journal record's `{field}` cannot be read: {value!r} — the trend "
-                             "was not measured")
-    return recent, None
+    usable = [run for run in recent if all(_readable(run, field) for field in fields)]
+    if len(usable) < _TREND_MIN:
+        # No `fix`: nothing the reader can do makes these records readable, and the next runs write
+        # well-formed ones by themselves. The fields are named so the reader knows what was unusable.
+        named = ", ".join(f"`{field}`" for field in fields)
+        return [], Check(check_id, "skip",
+                         f"only {len(usable)} of the last {_TREND_WINDOW} journal records could be "
+                         f"read on {named} — a trend needs at least {_TREND_MIN}")
+    return usable, None
 
 
 def _check_anchor_delivery(history: list[dict] | None) -> Check:
@@ -649,14 +675,13 @@ def _check_anchor_delivery(history: list[dict] | None) -> Check:
     every instant the anchor file existed and had content. Only the record of what each run emitted
     shows that it was never handed over.
     """
-    recent, no_trend = _trend_window(history, "anchor_delivery", "blocks")
+    usable, no_trend = _trend_window(history, "anchor_delivery", "blocks")
     if no_trend is not None:
         return no_trend
-    if any(_ANCHOR_BLOCK in (run.get("blocks") or []) for run in recent):
-        return Check("anchor_delivery", "ok",
-                     f"the anchor reached the model within the last {_TREND_WINDOW} sessions")
-    return Check("anchor_delivery", "fail",
-                 f"the anchor has not reached the model in the last {_TREND_WINDOW} sessions",
+    scope = _trend_scope(len(usable))
+    if any(_ANCHOR_BLOCK in (run.get("blocks") or []) for run in usable):
+        return Check("anchor_delivery", "ok", f"the anchor reached the model within {scope}")
+    return Check("anchor_delivery", "fail", f"the anchor has not reached the model in {scope}",
                  "run `lts anchor render` — if it prints nothing the anchor file is empty")
 
 
@@ -666,11 +691,12 @@ def _check_capture_progress(history: list[dict] | None) -> Check:
     Both conditions are needed. A session that sleeps every time keeps `stm_entries` at 0
     legitimately while its mark still moves, so a flat buffer alone proves nothing.
     """
-    recent, no_trend = _trend_window(history, "capture_progress", "capture_mark", "stm_entries")
+    usable, no_trend = _trend_window(history, "capture_progress", "capture_mark", "stm_entries")
     if no_trend is not None:
         return no_trend
-    marks = {run.get("capture_mark") for run in recent}
-    counts = [run.get("stm_entries") or 0 for run in recent]
+    scope = _trend_scope(len(usable))
+    marks = {run.get("capture_mark") for run in usable}
+    counts = [run.get("stm_entries") or 0 for run in usable]
     moved = len(marks) > 1
     grew = any(b > a for a, b in zip(counts, counts[1:]))
     if moved or grew:
@@ -678,19 +704,18 @@ def _check_capture_progress(history: list[dict] | None) -> Check:
         # carrying no quantity leaves only the level for the regression net to check.
         signals = [name for name, seen in (("the capture mark moved", moved),
                                            ("the STM buffer grew", grew)) if seen]
-        return Check("capture_progress", "ok",
-                     f"{' and '.join(signals)} in the last {_TREND_WINDOW} sessions")
+        return Check("capture_progress", "ok", f"{' and '.join(signals)} in {scope}")
     if marks == {None}:
         # A fresh project's first runs record no mark at all: same direction, but blaming the Stop
         # hook misattributes it — nothing was captured because nothing has happened yet.
         return Check("capture_progress", "fail",
-                     f"no capture mark was recorded in any of the last {_TREND_WINDOW} sessions "
-                     "and the buffer has not grown — nothing has been captured here yet",
+                     f"no capture mark was recorded in any of {scope} and the buffer has not "
+                     "grown — nothing has been captured here yet",
                      "expected before the first exchange; if these sessions had exchanges, check "
                      "/tmp/lts-hook-errors.log and the hooks check above")
     return Check("capture_progress", "fail",
                  f"the capture mark has been frozen at {next(iter(marks))!r} and the buffer has "
-                 f"not grown in {_TREND_WINDOW} sessions — the Stop hook is not capturing",
+                 f"not grown in {scope} — the Stop hook is not capturing",
                  "check /tmp/lts-hook-errors.log, and the hooks check above")
 
 
