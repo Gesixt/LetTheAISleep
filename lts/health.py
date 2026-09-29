@@ -53,6 +53,10 @@ _ANCHOR_SKEW = timedelta(minutes=2)
 # How many journalled runs a trend looks at. Five compactions is days of work in a continuous
 # session — long enough that a one-off is not a trend, short enough to notice within a day.
 _TREND_WINDOW = 5
+# The block name `_check_anchor_delivery` looks for in a journal record: a constant because the hook
+# calling `record` decides the names it passes, and a typo there would fail the check for ever.
+# `record`'s docstring spells the whole vocabulary for that caller.
+_ANCHOR_BLOCK = "anchor"
 
 _DEMAND_HEAD = (
     "## Memory health: {n} check{s} FAILED\n"
@@ -601,6 +605,43 @@ def _check_anchor_fresh(cfg: Config) -> Check:
     return Check("anchor_fresh", "ok", f"anchor updated {entry['updated']}")
 
 
+# What a journal record's fields must hold for a trend to be read off them. Records come off disk
+# and `lts.journal` filters non-JSON and non-dict lines but not field types, so any JSON type can
+# arrive; each of these used to raise instead, aborting all ten checks.
+_TREND_FIELDS = {"blocks": (list, tuple), "capture_mark": (str, int, float),
+                 "stm_entries": (int, float)}
+
+
+def _trend_window(
+    history: list[dict] | None, check_id: str, *fields: str
+) -> tuple[list[dict], Check | None]:
+    """The last `_TREND_WINDOW` records with `fields` readable, or the `skip` saying why not.
+
+    `history is None` and an empty journal are different facts and must not share a message: if the
+    wiring passes no `history`, "0 of 5 runs journalled" is a claim about a file nobody read, and it
+    would stand for ever while the journal filled up. That skip carries no `fix`: it is a wiring
+    fault, and there is nothing the reader of the report can do about it.
+    """
+    if history is None:
+        return [], Check(check_id, "skip",
+                         "no journal history was supplied to this run — the trend was not measured")
+    runs = list(history)
+    if len(runs) < _TREND_WINDOW:
+        return [], Check(check_id, "skip",
+                         f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
+                         f"{_TREND_WINDOW}")
+    recent = runs[-_TREND_WINDOW:]
+    # A missing field is legitimate (nothing emitted, nothing captured); a wrong-typed one costs
+    # this check, not the report. No `fix`: the next run records a well-formed line by itself.
+    for field, run in ((f, r) for f in fields for r in recent):
+        value = run.get(field)
+        if value is not None and not isinstance(value, _TREND_FIELDS[field]):
+            return [], Check(check_id, "skip",
+                             f"a journal record's `{field}` cannot be read: {value!r} — the trend "
+                             "was not measured")
+    return recent, None
+
+
 def _check_anchor_delivery(history: list[dict] | None) -> Check:
     """Did the anchor actually reach the model recently?
 
@@ -608,20 +649,15 @@ def _check_anchor_delivery(history: list[dict] | None) -> Check:
     every instant the anchor file existed and had content. Only the record of what each run emitted
     shows that it was never handed over.
     """
-    runs = list(history or [])
-    if len(runs) < _TREND_WINDOW:
-        return Check("anchor_delivery", "skip",
-                     f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
-                     f"{_TREND_WINDOW}")
-    recent = runs[-_TREND_WINDOW:]
-    if any("anchor" in (run.get("blocks") or []) for run in recent):
+    recent, no_trend = _trend_window(history, "anchor_delivery", "blocks")
+    if no_trend is not None:
+        return no_trend
+    if any(_ANCHOR_BLOCK in (run.get("blocks") or []) for run in recent):
         return Check("anchor_delivery", "ok",
                      f"the anchor reached the model within the last {_TREND_WINDOW} sessions")
-    return Check(
-        "anchor_delivery", "fail",
-        f"the anchor has not reached the model in the last {_TREND_WINDOW} sessions",
-        "run `lts anchor render` — if it prints nothing the anchor file is empty",
-    )
+    return Check("anchor_delivery", "fail",
+                 f"the anchor has not reached the model in the last {_TREND_WINDOW} sessions",
+                 "run `lts anchor render` — if it prints nothing the anchor file is empty")
 
 
 def _check_capture_progress(history: list[dict] | None) -> Check:
@@ -630,22 +666,32 @@ def _check_capture_progress(history: list[dict] | None) -> Check:
     Both conditions are needed. A session that sleeps every time keeps `stm_entries` at 0
     legitimately while its mark still moves, so a flat buffer alone proves nothing.
     """
-    runs = list(history or [])
-    if len(runs) < _TREND_WINDOW:
-        return Check("capture_progress", "skip",
-                     f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
-                     f"{_TREND_WINDOW}")
-    recent = runs[-_TREND_WINDOW:]
+    recent, no_trend = _trend_window(history, "capture_progress", "capture_mark", "stm_entries")
+    if no_trend is not None:
+        return no_trend
     marks = {run.get("capture_mark") for run in recent}
-    counts = [int(run.get("stm_entries") or 0) for run in recent]
-    if len(marks) > 1 or any(b > a for a, b in zip(counts, counts[1:])):
-        return Check("capture_progress", "ok", "STM capture is progressing")
-    return Check(
-        "capture_progress", "fail",
-        f"the capture mark has not moved and the buffer has not grown in {_TREND_WINDOW} "
-        "sessions — the Stop hook is not capturing",
-        "check /tmp/lts-hook-errors.log, and the hooks check above",
-    )
+    counts = [run.get("stm_entries") or 0 for run in recent]
+    moved = len(marks) > 1
+    grew = any(b > a for a, b in zip(counts, counts[1:]))
+    if moved or grew:
+        # Name the signal and the window. "STM capture is progressing" named neither, and a message
+        # carrying no quantity leaves only the level for the regression net to check.
+        signals = [name for name, seen in (("the capture mark moved", moved),
+                                           ("the STM buffer grew", grew)) if seen]
+        return Check("capture_progress", "ok",
+                     f"{' and '.join(signals)} in the last {_TREND_WINDOW} sessions")
+    if marks == {None}:
+        # A fresh project's first runs record no mark at all: same direction, but blaming the Stop
+        # hook misattributes it — nothing was captured because nothing has happened yet.
+        return Check("capture_progress", "fail",
+                     f"no capture mark was recorded in any of the last {_TREND_WINDOW} sessions "
+                     "and the buffer has not grown — nothing has been captured here yet",
+                     "expected before the first exchange; if these sessions had exchanges, check "
+                     "/tmp/lts-hook-errors.log and the hooks check above")
+    return Check("capture_progress", "fail",
+                 f"the capture mark has been frozen at {next(iter(marks))!r} and the buffer has "
+                 f"not grown in {_TREND_WINDOW} sessions — the Stop hook is not capturing",
+                 "check /tmp/lts-hook-errors.log, and the hooks check above")
 
 
 def run(
@@ -705,7 +751,9 @@ def record(
 
     `blocks` is the load-bearing field: it states what the hook actually emitted, which is not
     recoverable from the filesystem afterwards and is the only way `_check_anchor_delivery` can
-    work at all.
+    work at all. Its vocabulary is fixed, because that check matches names: the `SessionStart`
+    hook passes `health_demand`, `sleep_demand`, `anchor` (`_ANCHOR_BLOCK`) and `digest`, one per
+    block it emitted. A name outside that list is recorded and never read.
     """
     if metrics is None:
         metrics = status.collect(cfg) if cfg.configured else {}

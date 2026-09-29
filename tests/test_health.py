@@ -935,7 +935,8 @@ def test_a_short_history_skips_the_trend_rather_than_passing_it(tmp_path: Path):
     check = _by_id(health.run(cfg, history=_runs(4, blocks=("sleep_demand",)), now=_T0),
                    "anchor_delivery")
     assert check.level == "skip"
-    assert "5" in check.message
+    # Not a bare "5": "0 of 5" would satisfy that, leaving the count the check actually has unpinned.
+    assert f"4 of {health._TREND_WINDOW} runs journalled" in check.message
 
 
 def test_a_frozen_mark_and_a_flat_buffer_fail_capture_progress(tmp_path: Path):
@@ -952,8 +953,12 @@ def test_a_moving_mark_passes_even_with_an_always_empty_buffer(tmp_path: Path):
     history = [
         {"blocks": ["anchor"], "capture_mark": f"M{i}", "stm_entries": 0} for i in range(5)
     ]
-    assert _by_id(health.run(cfg, history=history, now=_T0),
-                  "capture_progress").level == "ok"
+    check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
+    assert check.level == "ok"
+    # The ok message names the signal it measured and the window it measured over; "progressing"
+    # named neither, and nothing in the unearned-phrase net could bite on it.
+    assert "capture mark moved" in check.message, check
+    assert f"last {health._TREND_WINDOW} sessions" in check.message, check
 
 
 def test_a_growing_buffer_passes_even_with_a_frozen_mark_field(tmp_path: Path):
@@ -961,8 +966,10 @@ def test_a_growing_buffer_passes_even_with_a_frozen_mark_field(tmp_path: Path):
     history = [
         {"blocks": ["anchor"], "capture_mark": "SAME", "stm_entries": i} for i in range(5)
     ]
-    assert _by_id(health.run(cfg, history=history, now=_T0),
-                  "capture_progress").level == "ok"
+    check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
+    assert check.level == "ok"
+    assert "buffer grew" in check.message, check
+    assert f"last {health._TREND_WINDOW} sessions" in check.message, check
 
 
 def test_no_history_skips_both_trend_checks(tmp_path: Path):
@@ -970,6 +977,78 @@ def test_no_history_skips_both_trend_checks(tmp_path: Path):
     checks = health.run(cfg, now=_T0)
     assert _by_id(checks, "anchor_delivery").level == "skip"
     assert _by_id(checks, "capture_progress").level == "skip"
+
+
+def test_a_malformed_journal_record_costs_itself_and_not_the_whole_report(tmp_path: Path):
+    """A record read off disk may hold any JSON type, and the trend checks used to raise on each
+    shape below — taking all ten checks down with them, and (once `SessionStart` reads the journal
+    from disk) the hook itself. `lts.journal` filters non-JSON and non-dict lines but not field
+    types, and its contract is that a bad line costs itself, never the history.
+    """
+    cfg = _healthy(tmp_path)
+    shapes = [
+        # The third record of each window is the malformed one. The `blocks` window carries no
+        # anchor anywhere, so the type error is actually reached rather than short-circuited past.
+        ("stm_entries", "lots", "capture_progress", "anchor"),            # ValueError
+        ("capture_mark", {"timestamp": "x"}, "capture_progress", "anchor"),  # unhashable in a set
+        ("blocks", 5, "anchor_delivery", "sleep_demand"),                 # not iterable
+    ]
+    for field, value, check_id, block in shapes:
+        history = _runs(5, blocks=(block,))
+        history[2][field] = value
+        checks = health.run(cfg, history=history, now=_T0)
+        assert [c.id for c in checks] == list(health._IDS), (field, value)
+        check = _by_id(checks, check_id)
+        assert check.level == "skip", (field, check)
+        assert field in check.message, (field, check)
+        assert check.fix is None, (field, check)
+
+
+def test_no_history_is_not_the_same_as_an_empty_journal(tmp_path: Path):
+    """"0 of 5 runs journalled" for a `history` nobody passed is a statement about a file nobody
+    read — a check that quietly did not run, reported as a measurement. Once `SessionStart` reads
+    the journal, forgetting to pass it would leave that sentence standing forever."""
+    checks = health.run(_healthy(tmp_path), now=_T0)
+    for check_id in ("anchor_delivery", "capture_progress"):
+        check = _by_id(checks, check_id)
+        assert check.level == "skip", check
+        assert "journalled" not in check.message, check
+        assert "no journal history" in check.message, check
+        assert check.fix is None, check          # a wiring fault; there is nothing to do here
+
+
+def test_a_supplied_but_short_history_still_counts_its_runs(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    short = health.run(cfg, history=_runs(2), now=_T0)
+    empty = health.run(cfg, history=[], now=_T0)
+    for check_id in ("anchor_delivery", "capture_progress"):
+        assert f"2 of {health._TREND_WINDOW} runs journalled" in _by_id(short, check_id).message
+        assert f"0 of {health._TREND_WINDOW} runs journalled" in _by_id(empty, check_id).message
+
+
+def test_a_fresh_project_is_not_told_the_stop_hook_is_broken(tmp_path: Path):
+    """Five SessionStart runs before the first exchange record `capture_mark: None` every time and
+    a flat buffer. The direction is right and the attribution is not: nothing has been captured
+    because nothing has happened, so the two states are named apart."""
+    cfg = _healthy(tmp_path)
+    fresh = _by_id(health.run(cfg, history=_runs(5, mark=None), now=_T0), "capture_progress")
+    assert fresh.level == "fail", fresh
+    assert "no capture mark" in fresh.message, fresh
+    assert "the Stop hook is not capturing" not in fresh.message, fresh
+    frozen = _by_id(health.run(cfg, history=_runs(5, mark="FROZEN"), now=_T0), "capture_progress")
+    assert frozen.level == "fail", frozen
+    assert "FROZEN" in frozen.message and "not capturing" in frozen.message, frozen
+
+
+def test_the_anchor_block_name_is_one_constant_shared_with_the_record(tmp_path: Path):
+    """`record`'s caller decides which block names it passes, and a plausible typo there would fail
+    this check permanently. So the name is a constant, and the vocabulary is spelled out in the
+    docstring that caller reads."""
+    cfg = _healthy(tmp_path)
+    history = _runs(5, blocks=(health._ANCHOR_BLOCK,))
+    assert _by_id(health.run(cfg, history=history, now=_T0), "anchor_delivery").level == "ok"
+    for name in ("health_demand", "sleep_demand", health._ANCHOR_BLOCK, "digest"):
+        assert name in (health.record.__doc__ or ""), name
 
 
 def test_run_now_returns_every_declared_check_in_id_order(tmp_path: Path):
@@ -986,7 +1065,7 @@ def test_the_record_states_what_the_run_emitted(tmp_path: Path):
     assert rec["blocks"] == ["sleep_demand", "anchor"]
     assert rec["checks"]["config"] == "ok"
     assert set(rec["checks"]) == set(health._IDS)
-    assert rec["at"].endswith("Z")
+    assert rec["at"] == watermark.mark_at(_T0)["timestamp"]   # one format, not merely a Z
     assert rec["notes"] == 1                      # the one knowledge-base note from _healthy
     assert rec["stm_entries"] == 0 and rec["pending"] == 0
 
