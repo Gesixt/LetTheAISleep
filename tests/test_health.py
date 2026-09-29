@@ -1,0 +1,170 @@
+import json
+from pathlib import Path
+
+from lts import health, sync
+from lts.config import load_config
+from tests.helpers import make_project
+
+
+def _cfg(root: Path, extra: str = ""):
+    make_project(root, extra)
+    return load_config(root)
+
+
+def _vault(root: Path, notes: dict[str, list[str]] | None = None) -> Path:
+    """Build a vault: {folder: [note titles]}. "" means a note at the vault root."""
+    vault = root / ".ai_vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    for folder, titles in (notes or {}).items():
+        d = vault / folder if folder else vault
+        d.mkdir(parents=True, exist_ok=True)
+        for t in titles:
+            (d / f"{t}.md").write_text(f"# {t}\n", encoding="utf-8")
+    return vault
+
+
+def _wire_hooks(root: Path, *, scripts_at: Path, events: list[str] | None = None) -> None:
+    """Write a .claude/settings.json wiring `events` at real, existing script files."""
+    events = events if events is not None else list(sync.HOOK_EVENTS)
+    scripts_at.mkdir(parents=True, exist_ok=True)
+    hooks = {}
+    for event in events:
+        script = scripts_at / sync.HOOK_EVENTS[event]
+        script.write_text("", encoding="utf-8")
+        hooks[event] = [{"hooks": [{"type": "command", "command": f'python3 "{script}"'}]}]
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+
+def _healthy(root: Path):
+    """A project where every inventory check passes."""
+    cfg = _cfg(root)
+    _vault(root, {"knowledge-base": ["Architecture"]})
+    _wire_hooks(root, scripts_at=root / "tools" / "hooks")
+    return cfg
+
+
+def _by_id(checks, check_id: str) -> health.Check:
+    return next(c for c in checks if c.id == check_id)
+
+
+def test_worst_orders_failure_above_everything(tmp_path: Path):
+    ok = health.Check("a", "ok", "")
+    skip = health.Check("b", "skip", "")
+    warn = health.Check("c", "warn", "")
+    fail = health.Check("d", "fail", "")
+    assert health.worst([ok]) == "ok"
+    assert health.worst([ok, skip]) == "skip"
+    assert health.worst([ok, skip, warn]) == "warn"
+    assert health.worst([ok, skip, warn, fail]) == "fail"
+    assert health.worst([]) == "ok"
+
+
+def test_a_demand_names_every_failure_and_its_fix(tmp_path: Path):
+    checks = [
+        health.Check("hooks", "fail", "the Stop hook script is missing", "run lts update"),
+        health.Check("vault", "warn", "vault is empty", "run /sleep"),
+    ]
+    out = health.demand(checks)
+    assert "1 check FAILED" in out
+    assert "hooks: the Stop hook script is missing" in out
+    assert "Fix: run lts update" in out
+
+
+def test_a_warning_alone_never_demands_anything(tmp_path: Path):
+    """Warnings that interrupt work get trained away, and the failures go with them."""
+    assert health.demand([health.Check("vault", "warn", "vault is empty", "x")]) == ""
+    assert health.demand([health.Check("vault", "ok", "fine")]) == ""
+
+
+def test_render_shows_the_worst_first_and_never_hides_a_skip(tmp_path: Path):
+    checks = [
+        health.Check("config", "ok", "configured"),
+        health.Check("capture", "skip", "no transcript path given"),
+        health.Check("hooks", "fail", "not wired", "run lts update"),
+    ]
+    out = health.render(checks)
+    assert out.index("hooks") < out.index("capture") < out.index("config")
+    assert "no transcript path given" in out
+    assert "Fix: run lts update" in out
+
+
+def test_an_unconfigured_root_fails_config_and_skips_the_rest(tmp_path: Path):
+    cfg = load_config(tmp_path / "nowhere")
+    checks = health.run(cfg)
+    assert _by_id(checks, "config").level == "fail"
+    assert {c.level for c in checks if c.id != "config"} == {"skip"}
+    assert [c.id for c in checks] == list(health._IDS)
+
+
+def test_a_healthy_project_passes_every_inventory_check(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    checks = health.run(cfg)
+    for check_id in ("config", "sidecars", "hooks", "vault"):
+        assert _by_id(checks, check_id).level == "ok", _by_id(checks, check_id)
+
+
+def test_a_stray_sidecar_fails_because_that_memory_is_orphaned(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    (tmp_path / "sub" / ".ai_memory").mkdir(parents=True)
+    check = _by_id(health.run(cfg), "sidecars")
+    assert check.level == "fail"
+    assert "sub" in check.message
+
+
+def test_a_nested_lts_project_is_not_a_stray(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    make_project(tmp_path / "sub")
+    (tmp_path / "sub" / ".ai_memory").mkdir(parents=True)
+    assert _by_id(health.run(cfg), "sidecars").level == "ok"
+
+
+def test_a_missing_hook_event_fails(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})
+    _wire_hooks(tmp_path, scripts_at=tmp_path / "tools", events=["SessionStart", "Stop"])
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail"
+    assert "PreCompact" in check.message and "UserPromptSubmit" in check.message
+
+
+def test_a_wired_script_that_no_longer_exists_fails(tmp_path: Path):
+    """The ~/tools move: settings.json still looks right, and capture is dead everywhere."""
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})
+    scripts = tmp_path / "tools" / "hooks"
+    _wire_hooks(tmp_path, scripts_at=scripts)
+    (scripts / sync.HOOK_EVENTS["Stop"]).unlink()
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail"
+    assert "Stop" in check.message
+
+
+def test_a_missing_settings_file_fails_hooks(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail"
+    assert "settings.json" in check.message
+
+
+def test_unreadable_settings_fails_rather_than_passing_quietly(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"knowledge-base": ["A"]})
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{not json", encoding="utf-8")
+    assert _by_id(health.run(cfg), "hooks").level == "fail"
+
+
+def test_a_missing_vault_fails_but_an_empty_one_only_warns(tmp_path: Path):
+    """A fresh project is legitimately empty; a vanished vault is not."""
+    gone = _cfg(tmp_path / "a")
+    _wire_hooks(tmp_path / "a", scripts_at=tmp_path / "a" / "tools")
+    assert _by_id(health.run(gone), "vault").level == "fail"
+
+    empty = _cfg(tmp_path / "b")
+    _vault(tmp_path / "b")
+    _wire_hooks(tmp_path / "b", scripts_at=tmp_path / "b" / "tools")
+    assert _by_id(health.run(empty), "vault").level == "warn"
