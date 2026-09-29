@@ -95,8 +95,8 @@ def run(
     passes `metrics`, the first of those goes away; nothing calls `run` yet.
 
     `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
-    given history as an input, not a separate mechanism. It arrives as a plain list of dicts so
-    that `health` never imports `journal`.
+    given history as an input, not a separate mechanism. It stays a plain list of dicts; the reason
+    is with the checks that read it, in `healthchecks.all_checks`.
 
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.

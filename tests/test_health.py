@@ -701,12 +701,20 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
     3. `marks` printed "marks consistent" when one of the two marks was unreadable, because the
        None operand short-circuited the `sleep > capture` comparison.
 
+    The trend checks are in the net too, and they need a state that supplies `history`: without one
+    they land on the "no journal history" skip, which is a different claim and would exercise
+    nothing. Theirs is the same defect in its quantitative form — describing a window they only
+    partly read as though they had read all of it.
+
     So for every degenerate memory state below the affected check must land on skip, warn or
     fail, and its message must be free of a quantitative claim it did not earn.
     """
     # "events wired," not "wired": the hooks *failure* message reads "not wired: <events>",
-    # so the bare word would make a correct fail trip this net.
-    unearned = ("within", "consistent", "scripts present", "events wired,")
+    # so the bare word would make a correct fail trip this net. "in the last" is the trend form of
+    # the same claim — a message that says "in the last 5 sessions" has claimed the whole window,
+    # which a degenerate state cannot have earned; a partial measurement says "in the 4 of the last
+    # 5 sessions whose records could be read" and does not match.
+    unearned = ("within", "consistent", "scripts present", "events wired,", "in the last")
 
     def no_mark_file(root: Path):
         return _healthy(root), {}
@@ -756,6 +764,18 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         return cfg, {"transcript_path": _transcript(
             root / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])}
 
+    def a_trend_record_the_window_cannot_read(root: Path):
+        # Four readable records out of five: measurable, but only over four.
+        history = _runs(5)
+        history[2]["stm_entries"] = "lots"
+        return _healthy(root), {"history": history}
+
+    def a_trend_window_with_too_few_readable_records(root: Path):
+        history = _runs(5)
+        for record in history[:4]:
+            record["blocks"] = 5
+        return _healthy(root), {"history": history}
+
     def a_uuid_mark_the_transcript_does_not_hold(root: Path):
         cfg = _healthy(root)
         _raw_mark(cfg, "capture", {"uuid": "rotated-away", "timestamp": "not-a-date", "count": 1})
@@ -773,6 +793,10 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         ("an unparseable stamp whose uuid resolves", a_resolving_uuid_mark, "capture"),
         ("an unparseable stamp whose uuid is gone", a_uuid_mark_the_transcript_does_not_hold,
          "capture"),
+        ("a journal record the trend cannot read", a_trend_record_the_window_cannot_read,
+         "capture_progress"),
+        ("a trend window with too few readable records",
+         a_trend_window_with_too_few_readable_records, "anchor_delivery"),
     ]
     for i, (label, build, check_id) in enumerate(states):
         cfg, kwargs = build(tmp_path / f"state{i}")
@@ -911,6 +935,20 @@ def _runs(n: int, *, blocks=("anchor",), mark="M1", entries=0) -> list[dict]:
          "capture_mark": mark, "stm_entries": entries}
         for _ in range(n)
     ]
+
+
+def test_a_field_no_trend_knows_how_to_read_is_unusable_rather_than_fatal(tmp_path: Path):
+    """`_trend_window` takes field names from its caller, and a name outside `_TREND_FIELDS` used to
+    raise `KeyError` out of the guard written to stop exactly that — one new trend check away."""
+    carrying = _runs(5)
+    for record in carrying:
+        record["nonesuch"] = "x"          # the value that reached `_TREND_FIELDS[field]` and raised
+    for history in (_runs(5), carrying):  # the field absent, and the field present
+        usable, skipped = healthchecks._trend_window(history, "capture_progress", "nonesuch")
+        assert usable == []
+        assert skipped is not None and skipped.level == "skip", skipped
+        assert "nonesuch" in skipped.message, skipped
+        assert skipped.fix is None, skipped
 
 
 def test_five_sessions_without_the_anchor_fail(tmp_path: Path):

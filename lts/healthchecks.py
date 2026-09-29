@@ -1,12 +1,12 @@
 """The checks themselves: one function per check, and the helpers each of them owns.
 
-The checks come in three kinds, kept distinct on purpose. **Inventory** asks whether each part is
+The checks come in two kinds, kept distinct on purpose. **Inventory** asks whether each part is
 present and reachable; it is cheap, and it catches the outage class that has not happened yet but is
 one `mv` away, since every project points at `~/tools/LetTheAISleep` by absolute path. **Invariants**
-ask whether the system's own statements hold. **Trend** is not a separate mechanism: it is an
-ordinary check that was handed the last few journal records as an input.
+ask whether the system's own statements hold. A third kind, **trend**, is not a separate mechanism:
+it is an ordinary check that was handed the last few journal records as an input.
 
-One rule governs all three, and it is the reason the comments below are as long as they are: **a
+One rule governs them all, and it is the reason the comments below are as long as they are: **a
 check that quietly did not run must never be reported as passing**, and no message may assert more
 than was measured. Review found three separate instances of that defect here, each in code written
 to prevent it — `hooks` printed "all 4 events wired, scripts present" when a hook command's parser
@@ -49,6 +49,7 @@ _TREND_WINDOW = 5
 # `record`'s docstring spells the whole vocabulary for that caller.
 _ANCHOR_BLOCK = "anchor"
 
+
 @dataclass(frozen=True)
 class Check:
     id: str
@@ -74,6 +75,10 @@ def all_checks(
     `now` is normalised here because every check that compares anything mixes a caller's `now` with
     a mark parsed out of a file, and one naive operand raises rather than answering. The order is
     fixed here too: it is the order the rendered report and the journal record share.
+
+    `history` arrives as a plain list of dicts, never a `lts.journal` handle: the trend checks live
+    here now, and this module must not import `journal` — the journal is best-effort by design and
+    a health check that could break on it would be a new way for memory to die silently.
 
     A configured project is assumed. Without one, the config verdict is the only thing that can be
     established — there is nothing for the other nine to measure — so that is all this returns, and
@@ -599,8 +604,11 @@ def _check_anchor_fresh(cfg: Config) -> Check:
 # arrive; each of these used to raise instead, aborting all ten checks.
 _TREND_FIELDS = {"blocks": (list, tuple), "capture_mark": (str, int, float),
                  "stm_entries": (int, float)}
-# The fewest readable records a trend can be measured on: two, because a change between runs is
-# what a trend reads and one record shows none. Below that the check says so rather than judging.
+# The fewest readable records a trend is measured on. Two is the stricter of the two requirements:
+# `_check_capture_progress` compares one record against the next, so one record shows no change at
+# all, while `_check_anchor_delivery` could answer from a single record. Holding both to two is
+# deliberate — a demand raised on one surviving record out of five is the false-alarm class this
+# module avoids, and the conservative direction is a skip that names how little it could read.
 _TREND_MIN = 2
 
 
@@ -609,9 +617,17 @@ def _readable(run: dict, field: str) -> bool:
 
     A missing field is legitimate — nothing emitted, nothing captured — and reads as empty. A field
     of the wrong type is a record this trend cannot read, and it costs itself alone.
+
+    A field name that is not in `_TREND_FIELDS` is unreadable too, rather than a `KeyError` out of
+    `run`: `_trend_window` takes its field names from the caller, so a trend check added later and
+    naming a field nobody entered in the table would otherwise abort all ten checks — the very
+    failure this guard exists to prevent.
     """
+    allowed = _TREND_FIELDS.get(field)
+    if allowed is None:
+        return False
     value = run.get(field)
-    return value is None or isinstance(value, _TREND_FIELDS[field])
+    return value is None or isinstance(value, allowed)
 
 
 def _trend_scope(usable: int) -> str:
