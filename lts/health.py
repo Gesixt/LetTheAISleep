@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lts import anchor, doctor, naming, paths, status, sync, watermark
+from lts import anchor, doctor, naming, paths, status, sync, transcript, watermark
 from lts.config import Config, is_lts_config
 
 # Worst first. `skip` outranks `ok` because a check that did not run is not a check that passed.
@@ -280,6 +280,20 @@ def _classify_mark(path: Path) -> tuple[str, datetime | None, dict, object]:
     return _MARK_READ, when, mark, stamp
 
 
+def _resolves_by_uuid(transcript_path: Path, uuid: str) -> bool:
+    """Is `uuid` still among the transcript's exchanges — i.e. does the mark resolve exactly?
+
+    `entries_after` tries the uuid branch first and returns `exchanges[i+1:]` on a match, without
+    ever consulting the timestamp, so a mark whose stamp is unusable is still exact while its uuid
+    is there. It *falls through* to the lexicographic timestamp branch when the uuid is not
+    found (a rotated transcript) — which is where an unparseable stamp is dangerous again.
+    That difference decides between a demand and a skip, so it is measured, not assumed.
+    """
+    return any(
+        ex.get("uuid") == uuid for ex in transcript.read_exchanges(Path(transcript_path))
+    )
+
+
 def _check_marks(cfg: Config, now: datetime) -> Check:
     """The two marks must tell a consistent story about what has been read and consolidated.
 
@@ -291,19 +305,22 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
     """
     capture_file = paths.capture_mark_file(cfg)
     sleep_file = paths.sleep_mark_file(cfg)
-    capture_state, capture, _, capture_stamp = _classify_mark(capture_file)
-    sleep_state, sleep, _, sleep_stamp = _classify_mark(sleep_file)
+    capture_state, capture, capture_mark, capture_stamp = _classify_mark(capture_file)
+    sleep_state, sleep, sleep_mark, sleep_stamp = _classify_mark(sleep_file)
     if capture_state == _MARK_MISSING and sleep_state == _MARK_MISSING:
         return Check("marks", "skip", "no marks yet — nothing has been captured or consolidated")
 
+    both = (
+        ("capture", capture_state, capture_stamp, capture_mark, capture_file),
+        ("sleep", sleep_state, sleep_stamp, sleep_mark, sleep_file),
+    )
     unusable = (
         "— the two marks cannot be compared, and a corrupt sleep mark is exactly the state in "
         "which consolidation may be claiming material the capture never read"
     )
-    for name, state, stamp, mark_file in (
-        ("capture", capture_state, capture_stamp, capture_file),
-        ("sleep", sleep_state, sleep_stamp, sleep_file),
-    ):
+    # Corruption first, across both marks: a `skip` returned for one mark must never stand in for a
+    # `fail` found on the other.
+    for name, state, stamp, mark, mark_file in both:
         if state == _MARK_UNREADABLE:
             return Check(
                 "marks", "fail",
@@ -311,11 +328,25 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
                 f"{unusable}",
                 f"delete the {name} mark file, then run /sleep to re-consolidate this material",
             )
-        if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP):
+        if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP) and not mark.get("uuid"):
             return Check(
                 "marks", "fail",
-                f"the {name} mark has no usable timestamp: {stamp!r} {unusable}",
+                f"the {name} mark has no usable timestamp and no uuid to fall back on: {stamp!r} "
+                f"{unusable}",
                 f"delete the {name} mark file, then run /sleep to re-consolidate this material",
+            )
+    # A mark carrying a uuid still resolves: `entries_after` tries the uuid branch first and never
+    # looks at the timestamp on a match, so this is a legitimate `mark_of` shape, not corruption.
+    # This check has no transcript and cannot tell whether the uuid is still there, so it says only
+    # what it knows: the two marks cannot be compared *on time*. A demand here would be a false
+    # alarm, and a false demand is what trains demands away.
+    for name, state, stamp, mark, _ in both:
+        if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP):
+            return Check(
+                "marks", "skip",
+                f"the {name} mark is positional: it identifies its exchange by uuid "
+                f"({mark.get('uuid')!r}) and its timestamp is {stamp!r}, so the two marks cannot "
+                "be compared on time — nothing here implies corruption",
             )
 
     for name, when in (("capture", capture), ("sleep", sleep)):
@@ -390,22 +421,40 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
             "to measure the transcript against",
             "delete the mark file so the next Stop hook writes a fresh one",
         )
-    if state == _MARK_NO_STAMP:
-        # `entries_after` can still resolve this mark exactly, by uuid, so the backlog is real —
-        # but there is no instant to measure it against, and no time claim may be made about it.
+    if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP):
+        # Unlike `_check_marks`, this check holds the transcript, so it can establish which branch
+        # of `entries_after` actually ran instead of assuming the worst.
+        uuid = mark.get("uuid")
+        if uuid and _resolves_by_uuid(path, uuid):
+            # The uuid branch matched and returned `exchanges[i+1:]` without ever reading the
+            # timestamp: the count is exact. The instant is not, so no time claim is made — and no
+            # `fix` either, because this mark is functional and deleting it would re-capture
+            # everything behind it.
+            backlog = watermark.entries_after(path, mark)
+            return Check(
+                "capture", "skip",
+                f"{len(backlog)} exchange(s) behind the capture mark, resolved by uuid ({uuid!r}) "
+                f"— the mark's timestamp is {stamp!r}, so there is no instant to measure against",
+            )
+        if state == _MARK_BAD_STAMP:
+            # Either no uuid, or a uuid the transcript no longer holds: `entries_after` falls
+            # through to its lexicographic filter, no real stamp sorts above an unparseable one and
+            # the backlog comes back empty — the system would claim to be perfectly current.
+            found = "" if not uuid else f"its uuid {uuid!r} is not in the transcript, and "
+            return Check(
+                "capture", "fail",
+                f"{found}the capture mark timestamp does not parse: {stamp!r} — the backlog "
+                "cannot be trusted, and an unreadable mark makes the transcript look captured",
+                "delete the capture mark file so the next Stop hook writes a fresh one",
+            )
+        # No stamp at all, so there is no lexicographic trap: `entries_after` reaches its count
+        # branch and the backlog is positional guesswork. Real, but not measurable against time.
+        where = f" (its uuid {uuid!r} is not in the transcript)" if uuid else ""
         return Check(
             "capture", "skip",
-            f"the capture mark has no timestamp to measure against: {stamp!r} ({mark_file})",
+            f"the capture mark has no timestamp to measure against: {stamp!r}{where}, so the "
+            f"backlog was resolved by count ({mark_file})",
             "delete the mark file so the next Stop hook writes a fresh one",
-        )
-    if state == _MARK_BAD_STAMP:
-        # `entries_after` filters lexicographically, so no real stamp sorts above an unparseable
-        # one and the backlog comes back empty — the system would claim to be perfectly current.
-        return Check(
-            "capture", "fail",
-            f"the capture mark timestamp does not parse: {stamp!r} — the backlog cannot be "
-            "trusted, and an unreadable mark makes the transcript look fully captured",
-            "delete the capture mark file so the next Stop hook writes a fresh one",
         )
 
     backlog = watermark.entries_after(path, mark)

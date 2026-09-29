@@ -517,19 +517,21 @@ def _uuid_transcript(path: Path, entries: list[tuple[str, str | None]]) -> Path:
     return path
 
 
-def test_a_sleep_mark_without_a_timestamp_fails_instead_of_claiming_consistency(tmp_path: Path):
+def test_a_sleep_mark_without_a_timestamp_never_claims_consistency(tmp_path: Path):
     """`mark_of` writes `timestamp: None` when the exchange it marks carried no stamp.
 
     That None short-circuited `sleep > capture` and the check fell through to "marks consistent"
-    — asserting consistency between two marks, one of which had never been read.
+    — asserting consistency between two marks, one of which had never been read. The mark itself
+    is still resolvable by uuid, so the honest answer is a skip, not a demand.
     """
     cfg = _healthy(tmp_path)
     _mark(cfg, "capture", _T0)
     _raw_mark(cfg, "sleep", {"uuid": "abc", "timestamp": None, "count": 7})
     check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
-    assert check.level == "fail", check
-    assert "sleep mark" in check.message
+    assert check.level == "skip", check
+    assert "sleep mark" in check.message and "abc" in check.message
     assert "consistent" not in check.message
+    assert check.fix is None
 
 
 def test_a_truncated_sleep_mark_file_fails_instead_of_claiming_consistency(tmp_path: Path):
@@ -551,7 +553,7 @@ def test_a_truncated_sleep_mark_file_fails_instead_of_claiming_consistency(tmp_p
 def test_an_unparseable_capture_mark_fails_the_marks_check_as_well(tmp_path: Path):
     cfg = _healthy(tmp_path)
     _mark(cfg, "sleep", _T0)
-    _raw_mark(cfg, "capture", {"uuid": "abc", "timestamp": "not-a-date", "count": 7})
+    _raw_mark(cfg, "capture", {"timestamp": "not-a-date", "count": 7})
     check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
     assert check.level == "fail", check
     assert "capture mark" in check.message and "not-a-date" in check.message
@@ -593,7 +595,7 @@ def test_a_capture_mark_with_no_timestamp_is_not_reported_as_never_written(tmp_p
     tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T12:20:00.000Z"])
     check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
     assert check.level == "skip", check
-    assert "no timestamp" in check.message
+    assert "resolved by uuid" in check.message
     assert "no capture mark yet" not in check.message
     assert "within" not in check.message
 
@@ -741,6 +743,18 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
                                 last_session="new", active_topics=[], active_notes=[])
         return cfg, {}
 
+    def a_resolving_uuid_mark(root: Path):
+        cfg = _healthy(root)
+        _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": "not-a-date", "count": 1})
+        return cfg, {"transcript_path": _transcript(
+            root / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])}
+
+    def a_uuid_mark_the_transcript_does_not_hold(root: Path):
+        cfg = _healthy(root)
+        _raw_mark(cfg, "capture", {"uuid": "rotated-away", "timestamp": "not-a-date", "count": 1})
+        return cfg, {"transcript_path": _transcript(
+            root / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])}
+
     states = [
         ("no mark file at all", no_mark_file, "marks"),
         ("a sleep mark file truncated mid-write", truncated_sleep_mark, "marks"),
@@ -748,6 +762,9 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         ("a capture mark file truncated mid-write", truncated_capture_mark, "capture"),
         ("a transcript whose entries carry no timestamps", an_unstamped_transcript, "capture"),
         ("session notes that cannot be statted", unstattable_session_notes, "anchor_fresh"),
+        ("an unparseable stamp whose uuid resolves", a_resolving_uuid_mark, "capture"),
+        ("an unparseable stamp whose uuid is gone", a_uuid_mark_the_transcript_does_not_hold,
+         "capture"),
     ]
     for i, (label, build, check_id) in enumerate(states):
         cfg, kwargs = build(tmp_path / f"state{i}")
@@ -755,3 +772,86 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         assert check.level in {"skip", "warn", "fail"}, (label, check)
         for phrase in unearned:
             assert phrase not in check.message, (label, phrase, check)
+
+
+# --- a mark that still resolves is not corruption ----------------------------------------------
+#
+# `entries_after` tries the uuid branch first and returns `exchanges[i+1:]` on a match, never
+# consulting the timestamp — so a `mark_of` shape whose exchange carried no stamp resolves
+# exactly, and a demand raised against it is a false alarm. It *falls through* to the
+# lexicographic timestamp branch when the uuid is not among the exchanges, which is where an
+# unparseable stamp becomes dangerous again.
+
+
+def test_a_positional_capture_mark_skips_the_marks_check_rather_than_demanding(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "sleep", _T0)
+    _raw_mark(cfg, "capture", {"uuid": "abc", "timestamp": None, "count": 7})
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "skip", check
+    assert "capture mark" in check.message and "abc" in check.message
+    assert "consistent" not in check.message
+    assert check.fix is None
+
+
+def test_a_corrupt_mark_outranks_a_positional_one_in_the_marks_check(tmp_path: Path):
+    """A skip must never be returned in place of a failure found on the other mark."""
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "abc", "timestamp": None, "count": 7})
+    _raw_mark(cfg, "sleep", '{"timestamp": "2026-09-2')
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "fail", check
+    assert "sleep mark" in check.message
+
+
+def test_a_mark_with_neither_a_timestamp_nor_a_uuid_still_fails(tmp_path: Path):
+    """Nothing left to resolve by: not comparable, and not recoverable either."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _raw_mark(cfg, "sleep", {"count": 7})
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "fail", check
+    assert "sleep mark" in check.message
+
+
+def test_an_unparseable_capture_stamp_whose_uuid_resolves_skips_with_the_count(tmp_path: Path):
+    """The uuid branch ran and resolved the backlog exactly, so the count is real — but the
+    timestamp it would have been measured against is not, so no time claim may be made."""
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": "not-a-date", "count": 1})
+    tr = _transcript(tmp_path / "t.jsonl", [
+        "2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z", "2026-09-29T12:00:00.000Z",
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=2)), "capture")
+    assert check.level == "skip", check
+    assert "2 exchange" in check.message          # u1 and u2, resolved positionally
+    assert "resolved by uuid" in check.message
+    assert "min" not in check.message             # no time claim of any kind
+    assert "within" not in check.message
+
+
+def test_an_unparseable_capture_stamp_whose_uuid_is_gone_still_fails(tmp_path: Path):
+    """The subtle one: the uuid branch falls through when the uuid is not found, so the
+    lexicographic filter runs on an unparseable stamp and the transcript looks fully captured."""
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "rotated-away", "timestamp": "not-a-date", "count": 1})
+    tr = _transcript(tmp_path / "t.jsonl", [
+        "2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z", "2026-09-29T12:00:00.000Z",
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=2)), "capture")
+    assert check.level == "fail", check
+    assert "rotated-away" in check.message and "not-a-date" in check.message
+
+
+def test_a_capture_mark_with_no_stamp_whose_uuid_is_gone_falls_back_to_the_count(tmp_path: Path):
+    """No stamp at all means no lexicographic trap: `entries_after` reaches its count branch, so
+    the backlog is positional guesswork rather than a silent nothing — a skip, not a demand."""
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "rotated-away", "timestamp": None, "count": 1})
+    tr = _transcript(tmp_path / "t.jsonl", [
+        "2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z",
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=2)), "capture")
+    assert check.level == "skip", check
+    assert "rotated-away" in check.message
+    assert "within" not in check.message
