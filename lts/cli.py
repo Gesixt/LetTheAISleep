@@ -187,10 +187,15 @@ def _run(args) -> int:
         # 22,707% of that window, computed from the recorded count — while the live session held
         # 301,343 tokens of its configured 1,000,000. (The "9900%" this branch quoted alongside
         # the same token count follows from no window; `_check_pressure` says what reconciles.)
-        tokens = transcript.context_tokens(Path(args.transcript))
-        print(transcript.pressure_level(
+        # A transcript with no `usage` record yet is a real state — a session before its first
+        # assistant message — and there the size estimate is all there is, so the fallback stays.
+        # What it must not do is read like a measurement: the level leads the line, and the line
+        # says when the figure behind it was estimated. Same wording as `lts status`.
+        tokens, source = transcript.measure_context(Path(args.transcript))
+        level = transcript.pressure_level(
             tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
-        ))
+        )
+        print(level if source == transcript.USAGE else f"{level}  ({status.ESTIMATED})")
     elif args.cmd == "status":
         tp = Path(args.transcript) if args.transcript else None
         metrics = status.collect(cfg, transcript_path=tp)

@@ -293,7 +293,7 @@ def _classify_mark(path: Path) -> tuple[str, datetime | None, dict, object]:
     return _MARK_READ, when, mark, stamp
 
 
-def _resolves_by_uuid(transcript_path: Path, uuid: str) -> bool:
+def _resolves_by_uuid(exchanges: list[dict], uuid: str) -> bool:
     """Is `uuid` still among the transcript's exchanges — i.e. does the mark resolve exactly?
 
     `entries_after` tries the uuid branch first and returns `exchanges[i+1:]` on a match, without
@@ -302,9 +302,7 @@ def _resolves_by_uuid(transcript_path: Path, uuid: str) -> bool:
     found (a rotated transcript) — which is where an unparseable stamp is dangerous again.
     That difference decides between a demand and a skip, so it is measured, not assumed.
     """
-    return any(
-        ex.get("uuid") == uuid for ex in transcript.read_exchanges(Path(transcript_path))
-    )
+    return any(ex.get("uuid") == uuid for ex in exchanges)
 
 
 def _check_marks(cfg: Config, now: datetime) -> Check:
@@ -417,6 +415,22 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
     if not path.exists():
         return Check("capture", "skip", f"transcript not found: {path}")
 
+    # Read once, and before the mark is classified: every verdict below compares the transcript
+    # against the mark, and a file that yielded nothing to compare cannot produce any of them.
+    exchanges = transcript.read_exchanges(path)
+    if not exchanges:
+        # The old `ok` read an empty backlog as "you are caught up" and explained it with the
+        # flush lag — a specific benign claim about a file that held no exchange at all. An empty
+        # file and a 48-byte note both bought it. `skip`, because nothing here is proven broken:
+        # what is missing is the measurement.
+        return Check(
+            "capture", "skip",
+            f"the transcript yielded no exchanges ({path}), so there is nothing to measure the "
+            "capture mark against",
+            "point `--transcript` at a live session transcript — the one Claude Code is writing "
+            "for this session",
+        )
+
     mark_file = paths.capture_mark_file(cfg)
     state, marked, mark, stamp = _classify_mark(mark_file)
     if state == _MARK_MISSING:
@@ -442,12 +456,12 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
         # Unlike `_check_marks`, this check holds the transcript, so it can establish which branch
         # of `entries_after` actually ran instead of assuming the worst.
         uuid = mark.get("uuid")
-        if uuid and _resolves_by_uuid(path, uuid):
+        if uuid and _resolves_by_uuid(exchanges, uuid):
             # The uuid branch matched and returned `exchanges[i+1:]` without ever reading the
             # timestamp: the count is exact. The instant is not, so no time claim is made — and no
             # `fix` either, because this mark is functional and deleting it would re-capture
             # everything behind it.
-            backlog = watermark.entries_after(path, mark)
+            backlog = watermark.exchanges_after(exchanges, mark)
             return Check(
                 "capture", "skip",
                 f"{len(backlog)} exchange(s) behind the capture mark, resolved by uuid ({uuid!r}) "
@@ -475,7 +489,7 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
             "delete the mark file so the next Stop hook writes a fresh one",
         )
 
-    backlog = watermark.entries_after(path, mark)
+    backlog = watermark.exchanges_after(exchanges, mark)
     if len(backlog) <= 1:
         return Check("capture", "ok",
                      f"{len(backlog)} exchange(s) behind the capture mark — the normal flush lag")

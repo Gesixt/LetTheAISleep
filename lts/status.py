@@ -70,6 +70,10 @@ def _name_hint(metrics: dict) -> str | None:
     return f"  Basic Memory: reindex -p {name}  ·  project info {slug}"
 
 
+# One wording for both surfaces that print a figure to a human: `lts status` and `lts pressure`.
+ESTIMATED = "estimated from file size — no usage record was found"
+
+
 def _context_figure(pr: dict) -> str:
     """The context reading, with a percentage only where one can be true.
 
@@ -89,9 +93,7 @@ def _context_figure(pr: dict) -> str:
     )
     # An estimate says so here rather than reading like a measurement: it is `len(file) // 4` over
     # a transcript that spans the whole project, which is how this figure went wrong to begin with.
-    note = "" if pr.get("source", transcript.USAGE) == transcript.USAGE else (
-        "  (estimated from file size — no usage record was found)"
-    )
+    note = "" if pr.get("source", transcript.USAGE) == transcript.USAGE else f"  ({ESTIMATED})"
     return f"{tokens}/{window} tok ({round(pr['ratio'] * 100)}%) — {pr['level']}{warn}{note}"
 
 

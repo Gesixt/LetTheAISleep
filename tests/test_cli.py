@@ -60,12 +60,18 @@ def test_pressure_falls_back_to_the_size_estimate_without_usage_counters(tmp_pat
     t = tmp_path / "t.jsonl"
     t.write_text("x" * (4 * 170_000), encoding="utf-8")  # ~170k tokens
     main(["pressure", "--root", str(tmp_path), "--transcript", str(t)])
-    assert capsys.readouterr().out.strip() == "force"        # 170k / 200k
+    out = capsys.readouterr().out.strip()
+    # The level still leads the line, and it is still measured against the configured window;
+    # what is new is that the line says the figure behind it was estimated, not read.
+    assert out.startswith("force")                           # 170k / 200k
+    assert "estimated from file size" in out
 
     wide = tmp_path / "wide"
     make_project(wide, "[sleep]\ncontext_window = 1000000\n")
     main(["pressure", "--root", str(wide), "--transcript", str(t)])
-    assert capsys.readouterr().out.strip() == "none"         # the same file, 170k / 1M
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("none")                            # the same file, 170k / 1M
+    assert "estimated from file size" in out
 
 
 def test_pending_has(tmp_path: Path, capsys):
@@ -527,3 +533,54 @@ def test_doctor_never_greens_pressure_from_a_file_with_no_usage_records(tmp_path
     by_id = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
     assert by_id["pressure"]["level"] == "ok"          # the normal path is unchanged
     assert "276,013" in by_id["pressure"]["message"]
+
+
+def test_pressure_prints_a_bare_level_when_the_figure_was_measured(tmp_path: Path, capsys):
+    """The estimate marker must not creep onto a real reading."""
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000000\n")
+    t = tmp_path / "t.jsonl"
+    t.write_text(_usage_line(276_013), encoding="utf-8")
+    main(["pressure", "--root", str(tmp_path), "--transcript", str(t)])
+    assert capsys.readouterr().out.strip() == "none"
+
+
+def test_doctor_never_greens_capture_from_a_file_with_no_exchanges(tmp_path: Path, capsys):
+    """An empty file and a 48-byte note both returned "✓ capture: 0 exchange(s) behind the
+    capture mark — the normal flush lag": a specific benign explanation for a state where no
+    exchange was read at all. The caught-up session is the case the skip must not swallow.
+    """
+    from datetime import datetime, timezone
+    from lts import paths, watermark
+    from tests.test_health import _healthy, _transcript
+    cfg = _healthy(tmp_path)
+    paths.ensure_sidecar(cfg)
+
+    def levels(path: Path) -> dict:
+        main(["doctor", "--root", str(tmp_path), "--transcript", str(path), "--json"])
+        return {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+
+    stamps = ["2026-09-29T12:00:00.000Z", "2026-09-29T12:01:00.000Z"]
+    real = _transcript(tmp_path / "real.jsonl", stamps)
+    # Caught up: the mark stands at the newest exchange, so the backlog is empty.
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": stamps[-1]})
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    check = levels(empty)["capture"]
+    assert check["level"] == "skip"
+    assert "no exchanges" in check["message"]
+    assert check["fix"]
+
+    junk = tmp_path / "notes.txt"
+    junk.write_text("these are my notes, not a transcript.", encoding="utf-8")
+    assert levels(junk)["capture"]["level"] == "skip"
+
+    check = levels(real)["capture"]
+    assert check["level"] == "ok"
+    assert check["message"].startswith("0 exchange(s) behind the capture mark")
+
+    # One behind is the measured flush lag, and still `ok`.
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": stamps[0]})
+    check = levels(real)["capture"]
+    assert check["level"] == "ok"
+    assert check["message"].startswith("1 exchange(s) behind the capture mark")
