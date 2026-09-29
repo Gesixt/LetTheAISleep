@@ -704,7 +704,7 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
     So for every degenerate memory state below the affected check must land on skip, warn or
     fail, and its message must be free of a quantitative claim it did not earn.
     """
-    unearned = ("within", "consistent")
+    unearned = ("within", "consistent", "scripts present", "wired")
 
     def no_mark_file(root: Path):
         return _healthy(root), {}
@@ -743,6 +743,11 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
                                 last_session="new", active_topics=[], active_notes=[])
         return cfg, {}
 
+    def a_hook_command_nothing_can_be_read_from(root: Path):
+        # Instance 1 of the class: `_script_path` returns None for a command it cannot parse, and
+        # the None used to be dropped — leaving "all 4 events wired, scripts present".
+        return _wired_project(root, {"Stop": 'bash -c "lts hook stop"'}), {}
+
     def a_resolving_uuid_mark(root: Path):
         cfg = _healthy(root)
         _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": "not-a-date", "count": 1})
@@ -756,6 +761,7 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
             root / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])}
 
     states = [
+        ("a hook command with no script in it", a_hook_command_nothing_can_be_read_from, "hooks"),
         ("no mark file at all", no_mark_file, "marks"),
         ("a sleep mark file truncated mid-write", truncated_sleep_mark, "marks"),
         ("a sleep mark whose timestamp is None", sleep_mark_without_a_timestamp, "marks"),
@@ -854,4 +860,44 @@ def test_a_capture_mark_with_no_stamp_whose_uuid_is_gone_falls_back_to_the_count
     check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=2)), "capture")
     assert check.level == "skip", check
     assert "rotated-away" in check.message
+    assert "would be resolved by count" in check.message  # nothing has been resolved yet
     assert "within" not in check.message
+
+
+def test_a_future_mark_is_reported_even_when_the_other_mark_is_positional(tmp_path: Path):
+    """A clock fault is a fault of the mark that parsed, so the other mark's shape cannot excuse it.
+
+    The positional `skip` returned before the future-mark comparison ran, so a sleep mark five
+    hours ahead of `now` went unreported whenever the capture mark happened to be positional —
+    a `skip` standing in for a `fail` on the other mark, which is what the two-pass order exists
+    to prevent.
+    """
+    for i, shape in enumerate(({"uuid": "abc", "timestamp": None},
+                               {"uuid": "abc", "timestamp": "not-a-date"})):
+        cfg = _healthy(tmp_path / f"shape{i}")
+        _raw_mark(cfg, "capture", shape)
+        _mark(cfg, "sleep", _T0 + timedelta(hours=5))
+        check = _by_id(health.run(cfg, now=_T0), "marks")
+        assert check.level == "fail", (shape, check)
+        assert "future" in check.message, (shape, check)
+        assert "clock" in (check.fix or ""), (shape, check)
+
+
+def test_a_non_numeric_token_count_does_not_take_the_whole_report_down(tmp_path: Path):
+    """`_check_anchor_fresh` goes out of its way not to raise out of `run`; so must this one.
+
+    A traceback out of `run` takes every other check's answer with it — the report that says
+    whether memory is lying would simply not appear.
+    """
+    cfg = _healthy(tmp_path)
+    metrics = {"pressure": {"tokens": "lots", "window": 1_000_000}}
+    check = _by_id(health.run(cfg, metrics=metrics, now=_T0), "pressure")
+    assert check.level in {"fail", "skip"}, check
+    assert "lots" in check.message
+
+
+def test_a_pressure_measurement_that_is_not_a_measurement_does_not_raise(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    check = _by_id(health.run(cfg, metrics={"pressure": "yes"}, now=_T0), "pressure")
+    assert check.level in {"fail", "skip"}, check
+    assert "yes" in check.message

@@ -318,8 +318,9 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
         "— the two marks cannot be compared, and a corrupt sleep mark is exactly the state in "
         "which consolidation may be claiming material the capture never read"
     )
-    # Corruption first, across both marks: a `skip` returned for one mark must never stand in for a
-    # `fail` found on the other.
+    # Every failing class is tested across both marks before any `skip` is returned for either, so
+    # a `skip` about one mark can never stand in for a `fail` about the other: corruption first,
+    # then the clock, and only then the shapes this check cannot compare.
     for name, state, stamp, mark, mark_file in both:
         if state == _MARK_UNREADABLE:
             return Check(
@@ -335,6 +336,14 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
                 f"{unusable}",
                 f"delete the {name} mark file, then run /sleep to re-consolidate this material",
             )
+    # The clock next, and before any `skip`: a mark ahead of `now` is a fault of the mark that
+    # parsed, so the *other* mark being positional cannot excuse reporting it. A positional skip
+    # used to be returned first, and a sleep mark hours in the future then went unreported.
+    for name, when in (("capture", capture), ("sleep", sleep)):
+        if when is not None and when > now + _SKEW:
+            return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
+                         "check the system clock; the next Stop hook will then correct it")
+
     # A mark carrying a uuid still resolves: `entries_after` tries the uuid branch first and never
     # looks at the timestamp on a match, so this is a legitimate `mark_of` shape, not corruption.
     # This check has no transcript and cannot tell whether the uuid is still there, so it says only
@@ -348,11 +357,6 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
                 f"({mark.get('uuid')!r}) and its timestamp is {stamp!r}, so the two marks cannot "
                 "be compared on time — nothing here implies corruption",
             )
-
-    for name, when in (("capture", capture), ("sleep", sleep)):
-        if when is not None and when > now + _SKEW:
-            return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
-                         "check the system clock; the next Stop hook will then correct it")
 
     if sleep_state == _MARK_MISSING:
         # Captured and not yet consolidated: the ordinary state of a working project, and there is
@@ -447,13 +451,14 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
                 "cannot be trusted, and an unreadable mark makes the transcript look captured",
                 "delete the capture mark file so the next Stop hook writes a fresh one",
             )
-        # No stamp at all, so there is no lexicographic trap: `entries_after` reaches its count
-        # branch and the backlog is positional guesswork. Real, but not measurable against time.
+        # No stamp at all, so there is no lexicographic trap: `entries_after` would reach its count
+        # branch and the backlog would be positional guesswork. It is not read here, so the message
+        # stays in the conditional — nothing has been resolved at this point.
         where = f" (its uuid {uuid!r} is not in the transcript)" if uuid else ""
         return Check(
             "capture", "skip",
-            f"the capture mark has no timestamp to measure against: {stamp!r}{where}, so the "
-            f"backlog was resolved by count ({mark_file})",
+            f"the capture mark has no timestamp to measure against: {stamp!r}{where}, so a backlog "
+            f"would be resolved by count alone ({mark_file})",
             "delete the mark file so the next Stop hook writes a fresh one",
         )
 
@@ -509,8 +514,24 @@ def _check_pressure(metrics: dict | None) -> Check:
     if not measured:
         return Check("pressure", "skip",
                      "no transcript given — run `lts doctor --transcript <path>` to check this")
-    tokens = int(measured.get("tokens") or 0)
-    window = int(measured.get("window") or 0)
+    # A malformed measurement must not raise: an exception here propagates out of `run` and takes
+    # every other check's answer with it, so the report that says whether memory is lying would not
+    # appear at all. `_check_anchor_fresh` guards its `stat` for the same reason. And a measurement
+    # that is not numbers is itself the 9900% class — an output that cannot be true.
+    if not isinstance(measured, dict):
+        return Check("pressure", "fail",
+                     f"the pressure measurement is not a measurement: {measured!r}",
+                     "this is `status.collect` output — the measurement itself is broken")
+    try:
+        tokens = int(measured.get("tokens") or 0)
+        window = int(measured.get("window") or 0)
+    except (TypeError, ValueError):
+        return Check(
+            "pressure", "fail",
+            f"the pressure measurement does not hold numbers: tokens={measured.get('tokens')!r}, "
+            f"window={measured.get('window')!r}",
+            "this is `status.collect` output — the measurement itself is broken",
+        )
     if window <= 0:
         return Check("pressure", "fail", f"the context window is {window}",
                      "set `[context] window` in config.toml")
@@ -586,9 +607,11 @@ def run(
 ) -> list[Check]:
     """Every check, in `_IDS` order.
 
-    `metrics` is a `status.collect` result. It is taken as an argument rather than recomputed so
-    the transcript is parsed at most once per run, and so `status.collect` stays the single place
-    that counts memory load.
+    `metrics` is a `status.collect` result, taken as an argument so that health never recomputes
+    memory load and `status.collect` stays the single place that counts it. It is not a parse
+    budget: with a transcript and no `metrics`, `status.collect` parses the transcript and
+    `_check_capture` parses it again (once more still in the degenerate uuid branch). The CLI
+    passing `metrics` is what removes the first of those.
 
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.
