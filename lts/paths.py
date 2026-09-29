@@ -61,6 +61,11 @@ def pending_dir(cfg: Config) -> Path:
     return sidecar_root(cfg) / "pending_consolidation"
 
 
+def health_journal_file(cfg: Config) -> Path:
+    """Per-run health records (see `lts.journal`) — the input to the trend checks."""
+    return sidecar_root(cfg) / "health.jsonl"
+
+
 def ensure_sidecar(cfg: Config) -> None:
     """Create the sidecar — only ever at a configured project root, never at a bare cwd."""
     require_project(cfg)
