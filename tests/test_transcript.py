@@ -138,3 +138,33 @@ def test_pressure_level_has_no_verdict_on_an_impossible_measurement():
     w = 1000
     assert transcript.pressure_level(1001, w, 0.6, 0.8) == "unknown"
     assert transcript.pressure_level(1000, w, 0.6, 0.8) == "force"     # the boundary still holds
+
+
+def test_measure_context_says_where_the_number_came_from(tmp_path: Path):
+    """The root of the impossible-percentage family: an estimate that looked like a reading.
+
+    `context_tokens` falls back to `len(file) // 4` whenever no usage record is found and returns
+    it as an ordinary int, so a caller could not tell a 45,413,420-token file-size estimate from
+    a measured window.
+    """
+    real = tmp_path / "real.jsonl"
+    real.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "usage": {
+            "input_tokens": 900, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}},
+    }), encoding="utf-8")
+    assert transcript.measure_context(real) == (900, transcript.USAGE)
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert transcript.measure_context(empty) == (0, transcript.ESTIMATE)
+
+    junk = tmp_path / "notes.txt"
+    junk.write_text("x" * 48, encoding="utf-8")
+    assert transcript.measure_context(junk) == (12, transcript.ESTIMATE)
+
+    assert transcript.measure_context(tmp_path / "gone.jsonl") == (0, transcript.NO_FILE)
+    # The old entry point keeps working, and asks for no second parse.
+    assert transcript.context_tokens(real) == 900
+    assert transcript.context_tokens(junk) == 12

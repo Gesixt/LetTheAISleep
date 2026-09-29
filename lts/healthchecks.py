@@ -559,6 +559,18 @@ def _check_pressure(metrics: dict | None) -> Check:
     if window <= 0:
         return Check("pressure", "fail", f"the context window is {window}",
                      "set `[context] window` in config.toml")
+    source = measured.get("source", transcript.USAGE)
+    if source != transcript.USAGE:
+        # The figure is `len(file) // 4`, not a reading of the window, and comparing it to a
+        # window it was never measured against is precisely what produced the 22,707%. An empty
+        # file and a 48-byte note both used to land on `ok` here, because the estimate arrived as
+        # an ordinary number. `skip` rather than `fail`: nothing is proven broken, the check
+        # simply did not get a measurement, and this module never reports that as passing.
+        why = ("no assistant `usage` record was found, so this figure is a size estimate"
+               if source == transcript.ESTIMATE else "no transcript file was read")
+        return Check("pressure", "skip", f"not measured: {why}",
+                     "point `--transcript` at a live session transcript — Claude Code writes a "
+                     "`usage` record into every assistant message")
     if tokens > window:
         return Check(
             "pressure", "fail",

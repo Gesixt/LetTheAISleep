@@ -84,15 +84,30 @@ def estimate_tokens(transcript_path: Path) -> int:
     return len(transcript_path.read_text(encoding="utf-8", errors="ignore")) // 4
 
 
-def context_tokens(transcript_path: Path) -> int:
-    """Real current context size from the last assistant message's `usage` counters.
+# How a token figure was arrived at. The distinction is the point: `estimate_tokens` is
+# `len(file) // 4` over a file that is append-only across `--resume`, so on a long-running project
+# it describes the project's whole history and not the live window. Divided by a window it was
+# never measured against, that is the 22,707% reading this branch keeps quoting — and a caller
+# that cannot tell the two apart will present one as the other, which is how an empty file used to
+# buy `✓ pressure: 0/1,000,000 tokens (0%)`.
+USAGE = "usage"          # summed from a real assistant `usage` record
+ESTIMATE = "estimate"    # derived from the file's size, because no usage record was found
+NO_FILE = "no_file"      # nothing was read at all
 
-    Sums input + cache-read + cache-creation tokens (what actually occupies the window).
-    Falls back to the rough char estimate only if no usage data is present.
+
+def measure_context(transcript_path: Path) -> tuple[int, str]:
+    """`(tokens, provenance)` — the number, and what kind of number it is.
+
+    One parse: `context_tokens` is this function's first element, so a caller that wants the
+    provenance pays nothing extra for it. `USAGE` is a measurement of the live window; `ESTIMATE`
+    is a size-derived guess about a file that may span months; `NO_FILE` is neither.
     """
     if not transcript_path.exists():
-        return 0
+        return 0, NO_FILE
     last = 0
+    # Tracked apart from `last`, because a real record summing to zero is a measurement of an
+    # empty window, not the absence of one, and `last or estimate` cannot tell those apart.
+    measured = False
     for line in transcript_path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = line.strip()
         if not line:
@@ -105,12 +120,25 @@ def context_tokens(transcript_path: Path) -> int:
             continue
         usage = (d.get("message") or {}).get("usage")
         if isinstance(usage, dict):
+            measured = True
             last = (
                 int(usage.get("input_tokens", 0) or 0)
                 + int(usage.get("cache_read_input_tokens", 0) or 0)
                 + int(usage.get("cache_creation_input_tokens", 0) or 0)
             )
-    return last if last else estimate_tokens(transcript_path)
+    if measured:
+        return last, USAGE
+    return estimate_tokens(transcript_path), ESTIMATE
+
+
+def context_tokens(transcript_path: Path) -> int:
+    """Current context size in tokens, however it was arrived at.
+
+    Kept for callers that legitimately want a number and nothing else — the hooks, which state it
+    and act on it in one place. A caller that must not confuse an estimate with a measurement asks
+    `measure_context` for both halves.
+    """
+    return measure_context(transcript_path)[0]
 
 
 def pressure_level(tokens: int, window: int, warn: float, force: float) -> str:

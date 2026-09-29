@@ -106,3 +106,41 @@ def test_render_omits_the_name_hint_when_the_slug_is_the_name(tmp_path: Path):
     (tmp_path / "config.toml").write_text('[vault]\nproject = "lowercase-name"\n', encoding="utf-8")
     text = status.render(status.collect(load_config(tmp_path)))
     assert "Basic Memory:" not in text
+
+
+def test_render_prints_no_percentage_for_a_reading_that_cannot_be_true(tmp_path: Path):
+    """`lts status` printed "45413420/1000000 tok (4541%) — unknown": an honest level beside a
+    figure that cannot be one, in the same human-facing line."""
+    metrics = {
+        "project": "p", "stm": {"lines": 0, "bytes": 0, "approx_tokens": 0},
+        "pending": {"snapshots": 0, "bytes": 0},
+        "anchor": {"exists": False, "updated": None, "active_notes": 0, "active_topics": 0},
+        "pressure": {"tokens": 45_413_420, "window": 1_000_000, "ratio": 45.413,
+                     "level": "unknown", "source": "usage"},
+    }
+    line = [l for l in status.render(metrics).splitlines() if "Context" in l][0]
+    assert "%" not in line
+    assert "45413420" in line and "1000000" in line
+    assert "/sleep" not in line
+
+
+def test_render_marks_a_figure_that_was_estimated_rather_than_measured(tmp_path: Path):
+    metrics = {
+        "project": "p", "stm": {"lines": 0, "bytes": 0, "approx_tokens": 0},
+        "pending": {"snapshots": 0, "bytes": 0},
+        "anchor": {"exists": False, "updated": None, "active_notes": 0, "active_topics": 0},
+        "pressure": {"tokens": 12, "window": 1_000_000, "ratio": 0.0,
+                     "level": "none", "source": "estimate"},
+    }
+    line = [l for l in status.render(metrics).splitlines() if "Context" in l][0]
+    assert "estimate" in line
+
+
+def test_collect_records_how_the_figure_was_obtained(tmp_path: Path):
+    from lts.config import load_config
+    from tests.helpers import make_project
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    junk = tmp_path / "notes.txt"
+    junk.write_text("x" * 48, encoding="utf-8")
+    m = status.collect(load_config(tmp_path), transcript_path=junk)
+    assert m["pressure"]["source"] == "estimate"

@@ -486,3 +486,44 @@ def test_doctor_reads_the_journal_so_the_trend_checks_can_answer(tmp_path: Path,
     levels = {c["id"]: c["level"] for c in json.loads(capsys.readouterr().out)["checks"]}
     assert levels["anchor_delivery"] == "ok"
     assert levels["capture_progress"] == "ok"
+
+
+def _usage_line(tokens: int) -> str:
+    return json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "usage": {
+            "input_tokens": tokens, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}},
+    })
+
+
+def test_doctor_never_greens_pressure_from_a_file_with_no_usage_records(tmp_path: Path, capsys):
+    """An empty file and a 48-byte non-transcript both used to buy `✓ pressure`.
+
+    `context_tokens` falls back to `len(file) // 4`, and that estimate reached the check as an
+    ordinary number: the empty file scored 0/1,000,000 (0%) and the junk file 12/1,000,000 (0%),
+    both green, from a file that holds no measurement at all.
+    """
+    from tests.test_health import _healthy
+    _healthy(tmp_path)
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    main(["doctor", "--root", str(tmp_path), "--transcript", str(empty), "--json"])
+    by_id = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert by_id["pressure"]["level"] == "skip"
+    assert "usage" in by_id["pressure"]["message"]
+    assert by_id["pressure"]["fix"]
+
+    junk = tmp_path / "notes.txt"
+    junk.write_text("x" * 48, encoding="utf-8")
+    main(["doctor", "--root", str(tmp_path), "--transcript", str(junk), "--json"])
+    by_id = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert by_id["pressure"]["level"] == "skip"
+
+    real = tmp_path / "real.jsonl"
+    real.write_text(_usage_line(276_013), encoding="utf-8")
+    main(["doctor", "--root", str(tmp_path), "--transcript", str(real), "--json"])
+    by_id = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert by_id["pressure"]["level"] == "ok"          # the normal path is unchanged
+    assert "276,013" in by_id["pressure"]["message"]
