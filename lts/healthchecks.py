@@ -300,7 +300,10 @@ def _check_hooks(cfg: Config) -> Check:
         for command in commands:
             script = _script_path(command)
             if script is None:
-                unreadable.append(f"{event} -> {command}")
+                # Quoted, the way `cli._unusable_transcript` quotes a path it could not use: an
+                # empty or whitespace `command` rendered as "no script to check in: Stop -> ",
+                # a sentence that stops at an arrow and shows the reader nothing.
+                unreadable.append(f"{event} -> {command!r}")
             elif script.name != expected:
                 wrong.append(f"{event} -> {script.name}, expected {expected}")
             # `is_file`, not `exists`: a directory at the script's path bought "all 4 events wired,

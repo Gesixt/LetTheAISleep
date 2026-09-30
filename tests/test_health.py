@@ -291,6 +291,17 @@ def test_a_check_that_raises_costs_its_own_answer_and_not_the_other_nine(monkeyp
     assert "vault" in health.demand(checks)
 
 
+def test_the_unverified_hook_message_quotes_the_command_it_could_not_read(tmp_path: Path):
+    """An empty `command` rendered "no script to check in: Stop -> " — a sentence ending at an
+    arrow, showing the reader nothing of what was wrong. `_unusable_transcript` quotes for the
+    same reason: a whitespace value otherwise prints as an empty tail."""
+    for command, shown in ((" ", "' '"), ("", "''")):
+        cfg = _wired_project(tmp_path / f"c{len(command)}", {"Stop": command})
+        check = _by_id(health.run(cfg, now=_T0), "hooks")
+        assert check.level == "skip", (command, check)
+        assert f"Stop -> {shown}" in check.message, (command, check)
+
+
 def test_a_missing_vault_fails_but_an_empty_one_only_warns(tmp_path: Path):
     """A fresh project is legitimately empty; a vanished vault is not."""
     gone = _cfg(tmp_path / "a")
