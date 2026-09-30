@@ -53,6 +53,9 @@ _ANCHOR_BLOCK = "anchor"
 # an absence claim: a vendored repository with its own `.ai_memory` is invisible to that walk, and
 # "no stray sidecars" said nothing about the limit.
 _PRUNED = "the pruned directories (" + ", ".join(sorted(doctor.SKIP_DIRS)) + ")"
+# The date `naming.session_note_name` puts at the end of every session note's title. `_note_time`
+# reads it instead of the note's mtime, which a `git pull` rewrites.
+_SESSION_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2}_\d{4})$")
 
 
 @dataclass(frozen=True)
@@ -740,8 +743,40 @@ def _check_pressure(metrics: dict | None) -> Check:
     return Check("pressure", "ok", f"{tokens:,}/{window:,} tokens ({round(tokens / window * 100)}%)")
 
 
+def _note_time(note: Path) -> datetime | None:
+    """The local time a session note's own title states, or None when the title does not state one.
+
+    `naming.session_note_name` guarantees the shape: `Session_[<author>_]YYYY-MM-DD_HHMM`, written
+    by the same /sleep that wrote the note. Anything else in `session-memory/` — a hand-made note, a
+    stray file — has no stamp here and falls back to the mtime.
+    """
+    match = _SESSION_STAMP.search(note.stem)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d_%H%M")
+    except ValueError:   # a well-shaped stamp that is not a date, e.g. month 13
+        return None
+
+
 def _check_anchor_fresh(cfg: Config) -> Check:
-    """The anchor is the entry point a new session reads; it must not lag the notes it points at."""
+    """The anchor is the entry point a new session reads; it must not lag the notes it points at.
+
+    A note is dated by its title, not by its mtime. `lts.digest` says of this same vault that "`git
+    pull`/`checkout` rewrites mtimes, so it would report false positives in a team — it is a
+    fallback, never a preference", and the README ranks session notes by title "since the title is
+    the date and, unlike an mtime, it survives a `git clone`". Dating them here by mtime contradicted
+    both: after any vault pull, or a fresh clone on a second machine, every mtime becomes now and
+    this check warned that the entry points were a session behind when they were not — on the
+    documented team-mode path, i.e. exactly where it is least recoverable.
+
+    The two stamps being compared are also of one kind now, which is the happier half of the same
+    change: the anchor's `updated` is a minute-granular local stamp written by the /sleep that named
+    the note, so title against `updated` compares two stamps produced by one step, where title
+    against mtime compared a stamp to a filesystem fact. `_ANCHOR_SKEW` still covers the ordering
+    inside that step — the note is written before the anchor — and still covers the mtime fallback,
+    which is what a note whose title carries no stamp is dated by.
+    """
     entry = anchor.read_anchor(paths.anchor_file(cfg))
     # `naming.SESSION_DIR`, not a literal: a renamed folder would find zero notes here and degrade
     # into the silent false pass this module exists to prevent.
@@ -756,12 +791,17 @@ def _check_anchor_fresh(cfg: Config) -> Check:
         return Check("anchor_fresh", "skip", "no anchor and no session notes yet")
     if not sessions:
         return Check("anchor_fresh", "ok", "anchor present; no session notes to compare against")
-    # One `stat` per note, kept: statting again for the mtime can raise on a note that vanished
-    # between the two calls, and an exception here takes the whole report down with it.
-    stamped = []
+    # The title first, because it is the stamp /sleep wrote; the mtime only for a title that carries
+    # none, and guarded, because statting a note that vanished mid-scan raises and an exception here
+    # takes the whole report down with it.
+    stamped: list[tuple[datetime, Path]] = []
     for note in sessions:
+        titled = _note_time(note)
+        if titled is not None:
+            stamped.append((titled, note))
+            continue
         try:
-            stamped.append((note.stat().st_mtime, note))
+            stamped.append((datetime.fromtimestamp(note.stat().st_mtime), note))
         except OSError:
             continue  # a note that is no longer there cannot be the newest one
     if not stamped:
@@ -770,12 +810,12 @@ def _check_anchor_fresh(cfg: Config) -> Check:
         # printing "Fix:" under a check that did not run reads as though something was diagnosed.
         return Check(
             "anchor_fresh", "skip",
-            f"none of the {len(sessions)} session note(s) could be read to compare the anchor "
-            "against — something else may be rewriting the vault",
+            f"none of the {len(sessions)} session note(s) could be dated: no title carries a "
+            "/sleep stamp and none could be statted — something else may be rewriting the vault",
         )
-    mtime, newest = max(stamped, key=lambda pair: pair[0])
-    # Both sides are naive local times: `updated` is minute-granular local, the mtime is local.
-    note_at = datetime.fromtimestamp(mtime)
+    # Both sides are naive local times: `updated` is minute-granular local, and so is a title stamp;
+    # an mtime read through `fromtimestamp` is local too.
+    note_at, newest = max(stamped, key=lambda pair: pair[0])
     try:
         anchor_at = datetime.strptime(str(entry.get("updated", "")), "%Y-%m-%d %H:%M")
     except ValueError:

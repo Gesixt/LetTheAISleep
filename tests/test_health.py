@@ -841,19 +841,61 @@ def test_an_anchor_with_no_session_notes_passes_saying_there_was_nothing_to_comp
     assert "no session notes" in check.message
 
 
-def test_session_notes_that_cannot_be_statted_skip_instead_of_comparing(tmp_path: Path):
-    """A note listed but not stattable (it vanished between the two calls) leaves nothing to
-    compare the anchor against — and a skip no action can make measurable carries no fix."""
+def test_session_notes_that_cannot_be_dated_at_all_skip_instead_of_comparing(tmp_path: Path):
+    """Neither route to a date: no /sleep stamp in the title, and not stattable either (the file
+    vanished between the listing and the stat). Nothing is left to compare the anchor against — and
+    a skip no action can make measurable carries no fix."""
     cfg = _healthy(tmp_path)
     vault = _vault(tmp_path, {"session-memory": []})
-    (vault / "session-memory" / "Session_2026-09-29_1200.md").symlink_to(tmp_path / "gone.md")
+    (vault / "session-memory" / "Notes.md").symlink_to(tmp_path / "gone.md")
     paths.ensure_sidecar(cfg)
     anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
                             last_session="new", active_topics=[], active_notes=[])
     check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
     assert check.level == "skip", check
-    assert "could be read to compare" in check.message
+    assert "could be dated" in check.message
     assert check.fix is None
+
+
+def test_a_pulled_vault_does_not_look_a_session_behind(tmp_path: Path):
+    """`git pull` and `git clone` rewrite every mtime to now — the documented team-mode path.
+
+    Dating notes by mtime made this check warn that the entry points were a session behind on every
+    second machine and after every vault pull. `lts.digest` says of this same vault that an mtime
+    "would report false positives in a team — it is a fallback, never a preference", and the README
+    ranks session notes by title because "the title is the date and, unlike an mtime, it survives a
+    `git clone`". So the title decides, and the mtime only where there is no title stamp.
+    """
+    cfg = _healthy(tmp_path)
+    vault = _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1200"]})
+    note = vault / "session-memory" / "Session_2026-09-29_1200.md"
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:05",
+                            last_session="new", active_topics=[], active_notes=[])
+    pulled = datetime(2026, 9, 30, 9, 0, 0).timestamp()   # what the checkout leaves behind
+    os.utime(note, (pulled, pulled))
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "ok", check
+    assert "2026-09-29 12:05" in check.message, check
+
+
+def test_a_note_whose_title_carries_no_stamp_is_still_dated_by_its_mtime(tmp_path: Path):
+    """The fallback, and `_ANCHOR_SKEW` applies to it as much as to a title.
+
+    Not everything under session-memory/ is a /sleep note, and one that carries no stamp must not
+    silently drop out of the comparison — that would be the newest note going unmeasured.
+    """
+    cfg = _healthy(tmp_path)
+    vault = _vault(tmp_path, {"session-memory": ["Notes about the session"]})
+    note = vault / "session-memory" / "Notes about the session.md"
+    written = datetime(2026, 9, 29, 12, 5, 0).timestamp()
+    os.utime(note, (written, written))
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                            last_session="old", active_topics=[], active_notes=[])
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "warn", check
+    assert "Notes about the session.md" in check.message, check
 
 
 def test_an_anchor_with_an_unreadable_updated_warns(tmp_path: Path):
@@ -922,10 +964,11 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         return cfg, {"transcript_path": _uuid_transcript(
             root / "t.jsonl", [("u0", "2026-09-29T03:00:00.000Z"), ("u1", None), ("u2", None)])}
 
-    def unstattable_session_notes(root: Path):
+    def undateable_session_notes(root: Path):
+        # No /sleep stamp in the title and not stattable either: no route to a date.
         cfg = _healthy(root)
         vault = _vault(root, {"session-memory": []})
-        (vault / "session-memory" / "Session_2026-09-29_1200.md").symlink_to(root / "gone.md")
+        (vault / "session-memory" / "Notes.md").symlink_to(root / "gone.md")
         paths.ensure_sidecar(cfg)
         anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
                                 last_session="new", active_topics=[], active_notes=[])
@@ -967,7 +1010,7 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         ("a sleep mark whose timestamp is None", sleep_mark_without_a_timestamp, "marks"),
         ("a capture mark file truncated mid-write", truncated_capture_mark, "capture"),
         ("a transcript whose entries carry no timestamps", an_unstamped_transcript, "capture"),
-        ("session notes that cannot be statted", unstattable_session_notes, "anchor_fresh"),
+        ("session notes that cannot be dated", undateable_session_notes, "anchor_fresh"),
         ("an unparseable stamp whose uuid resolves", a_resolving_uuid_mark, "capture"),
         ("an unparseable stamp whose uuid is gone", a_uuid_mark_the_transcript_does_not_hold,
          "capture"),
