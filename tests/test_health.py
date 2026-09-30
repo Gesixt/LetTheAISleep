@@ -250,6 +250,31 @@ def test_an_event_whose_wiring_cannot_be_read_is_not_reported_as_not_wired(tmp_p
     assert "Stop: a str, not a list of hook groups" in check.message, check
 
 
+def test_a_check_that_raises_costs_its_own_answer_and_not_the_other_nine(monkeypatch,
+                                                                        tmp_path: Path):
+    """Every guard in `healthchecks` was written after a raise had already taken all ten checks
+    down; `_answered` is the same lesson applied to the raise nobody has met yet. A report that
+    does not appear is the worst outcome for the subsystem that says whether memory is lying, and
+    the exception's own text is carried because "internal error" names nothing to act on.
+    """
+    cfg = _healthy(tmp_path)
+
+    def boom(_cfg):
+        raise RuntimeError("the vault walk exploded")
+
+    monkeypatch.setattr(healthchecks, "_check_vault", boom)
+    checks = health.run(cfg, now=_T0)
+    assert [c.id for c in checks] == list(health._IDS)
+    broken = _by_id(checks, "vault")
+    assert broken.level == "fail", broken
+    assert "RuntimeError" in broken.message, broken
+    assert "the vault walk exploded" in broken.message, broken   # not merely "internal error"
+    assert _by_id(checks, "hooks").level == "ok", checks
+    assert _by_id(checks, "config").level == "ok", checks
+    # A broken check is a demand: the report has a hole in it and nothing says the vault is fine.
+    assert "vault" in health.demand(checks)
+
+
 def test_a_missing_vault_fails_but_an_empty_one_only_warns(tmp_path: Path):
     """A fresh project is legitimately empty; a vanished vault is not."""
     gone = _cfg(tmp_path / "a")

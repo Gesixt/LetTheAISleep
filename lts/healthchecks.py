@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -83,23 +84,57 @@ def all_checks(
     A configured project is assumed. Without one, the config verdict is the only thing that can be
     established — there is nothing for the other nine to measure — so that is all this returns, and
     `lts.health` says what the rest of the report reads like in that case.
+
+    Every check is called through `_answered`, so one that raises costs its own answer and not the
+    other nine.
     """
     now = _utc(now) or datetime.now(timezone.utc)
-    config_check = _check_config(cfg)
+    config_check = _answered("config", lambda: _check_config(cfg))
     if not cfg.configured:
         return [config_check]
     return [
         config_check,
-        _check_sidecars(cfg),
-        _check_hooks(cfg),
-        _check_vault(cfg),
-        _check_marks(cfg, now),
-        _check_capture(cfg, transcript_path, now),
-        _check_pressure(metrics),
-        _check_anchor_fresh(cfg),
-        _check_anchor_delivery(cfg, history),
-        _check_capture_progress(history),
+        _answered("sidecars", lambda: _check_sidecars(cfg)),
+        _answered("hooks", lambda: _check_hooks(cfg)),
+        _answered("vault", lambda: _check_vault(cfg)),
+        _answered("marks", lambda: _check_marks(cfg, now)),
+        _answered("capture", lambda: _check_capture(cfg, transcript_path, now)),
+        _answered("pressure", lambda: _check_pressure(metrics)),
+        _answered("anchor_fresh", lambda: _check_anchor_fresh(cfg)),
+        _answered("anchor_delivery", lambda: _check_anchor_delivery(cfg, history)),
+        _answered("capture_progress", lambda: _check_capture_progress(history)),
     ]
+
+
+def _answered(check_id: str, check: Callable[[], Check]) -> Check:
+    """`check()`'s verdict, or the `fail` that says why this check has none.
+
+    Individual checks already guard the malformed inputs they know about, each after a raise was
+    found in one of them: `_check_pressure` on a measurement that is not numbers, `_check_hooks` on
+    a settings.json of the wrong shape, `_check_anchor_fresh` on a note that vanished mid-scan,
+    `_readable` on a journal field of the wrong type. Each of those guards was written after the
+    raise had already taken the whole report down, which is the argument for this one: a raise
+    nobody has met yet costs the other nine checks the same way, and a report that does not appear
+    is the worst possible outcome for the subsystem whose job is to say whether memory is lying. In
+    `SessionStart` the loss is silent and permanent — the surrounding `try` keeps the anchor and the
+    digest, so the only visible effect is that the health block stops appearing and no journal
+    record is written, which then starves the trend checks of the history they need and disables
+    them too.
+
+    `fail`, not `skip`: this is not "could not measure", it is a component of the health subsystem
+    that is broken, and it needs attention as much as anything it would have reported. The
+    exception's own text is carried, because "internal error" names nothing anybody can act on.
+    """
+    try:
+        return check()
+    except Exception as exc:     # noqa: BLE001 - deliberate: the alternative is losing nine checks
+        return Check(
+            check_id, "fail",
+            f"this check itself raised {type(exc).__name__}: {exc} — its answer is missing from "
+            "this report, and nothing here says the thing it checks is healthy",
+            "this is a bug in the health check, not necessarily in what it measures; the other "
+            "checks in this report are unaffected",
+        )
 
 
 # --- inventory -------------------------------------------------------------------------------
@@ -181,7 +216,8 @@ def _check_hooks(cfg: Config) -> Check:
     # then propagated, so a single misplaced brace cost all ten checks their answer and, in
     # `SessionStart`, removed the health block and the journal record silently and for ever. The
     # `json.JSONDecodeError` above is the same class of fault and has always been a `fail`; so is
-    # this.
+    # this. `_answered` now catches what these guards miss, and neither replaces the other: a guard
+    # can name the shape it found, which a caught exception cannot.
     if not isinstance(data, dict):
         return Check("hooks", "fail",
                      f"{settings} holds a JSON {type(data).__name__}, not an object",
