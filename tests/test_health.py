@@ -70,9 +70,9 @@ def _wired_project(tmp_path: Path, commands: dict[str, str]):
     return cfg
 
 
-def _healthy(root: Path):
+def _healthy(root: Path, extra: str = ""):
     """A project where every inventory check passes."""
-    cfg = _cfg(root)
+    cfg = _cfg(root, extra)
     _vault(root, {"knowledge-base": ["Architecture"]})
     _wire_hooks(root, scripts_at=root / "tools" / "hooks")
     return cfg
@@ -909,10 +909,21 @@ def test_an_anchor_with_an_unreadable_updated_warns(tmp_path: Path):
     assert "whenever" in check.message
 
 
-def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: Path):
-    """The regression net for one defect class, found three separate times in `lts.health`.
+def test_the_degenerate_states_in_this_table_never_report_ok(tmp_path: Path):
+    """A table of memory states, and the check each one must refuse to pass.
 
-    Each instance reported a check as passing while the comparison behind the claim had not run:
+    The name says a table, because that is what this is. It used to be called
+    "test_no_check_reports_ok_for_a_measurement_it_could_not_have_made", which claims a guard over
+    every check and every state; it is eleven — now nineteen — hand-written states, and a reviewer
+    proved the difference by reintroducing two known defects and watching it stay green. Both were
+    caught only by their own targeted tests. Two of those holes are closed here: dating a hook
+    script by `exists()` rather than `is_file()` (a directory named stop.py bought "all 4 events
+    wired, scripts present"), and walking for sidecars without `onerror` (a stray under a mode-000
+    directory bought "no stray sidecars"). The test below that asserts every `ok` names the
+    quantities it claims to have measured is the half of the job a table cannot do.
+
+    Each instance of the class this was built for reported a check as passing while the comparison
+    behind the claim had not run:
 
     1. `hooks` printed "all 4 events wired, scripts present" when `_script_path` returned None
        for a command it could not parse and that None was dropped;
@@ -1003,6 +1014,60 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
         return cfg, {"transcript_path": _transcript(
             root / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])}
 
+    def an_empty_transcript_file(root: Path):
+        # The historically dangerous one: `len(file) // 4` over an empty file is an ordinary 0, and
+        # "0/1,000,000 tokens (0%)" was printed for a project whose window nobody had looked at.
+        cfg = _healthy(root)
+        (root / "t.jsonl").write_text("", encoding="utf-8")
+        return cfg, {"transcript_path": root / "t.jsonl"}
+
+    def a_transcript_with_no_usage_record(root: Path):
+        cfg = _healthy(root)
+        (root / "t.jsonl").write_text(
+            json.dumps({"type": "assistant", "uuid": "u0",
+                        "timestamp": "2026-09-29T11:00:00.000Z",
+                        "message": {"role": "assistant",
+                                    "content": [{"type": "text", "text": "hello"}]}}) + "\n",
+            encoding="utf-8")
+        return cfg, {"transcript_path": root / "t.jsonl"}
+
+    def a_context_window_of_zero(root: Path):
+        cfg = _healthy(root, "[sleep]\ncontext_window = 0\n")
+        return cfg, {"transcript_path": _transcript(root / "t.jsonl",
+                                                    ["2026-09-29T11:00:00.000Z"])}
+
+    def a_directory_the_sidecar_walk_cannot_enter(root: Path):
+        cfg = _healthy(root)
+        locked = root / "locked"
+        (locked / "inner" / ".ai_memory").mkdir(parents=True)
+        os.chmod(locked, 0o000)
+        return cfg, {}
+
+    def no_vault_directory(root: Path):
+        cfg = _cfg(root)
+        _wire_hooks(root, scripts_at=root / "tools" / "hooks")
+        return cfg, {}
+
+    def an_empty_vault(root: Path):
+        cfg = _cfg(root)
+        _vault(root)
+        _wire_hooks(root, scripts_at=root / "tools" / "hooks")
+        return cfg, {}
+
+    def a_directory_where_the_hook_script_belongs(root: Path):
+        cfg = _healthy(root)
+        script = root / "tools" / "hooks" / sync.HOOK_EVENTS["Stop"]
+        script.unlink()
+        script.mkdir()
+        return cfg, {}
+
+    def settings_json_of_the_wrong_shape(root: Path):
+        cfg = _healthy(root)
+        (root / ".claude" / "settings.json").write_text(
+            json.dumps({"hooks": {"Stop": {"hooks": [{"command": "python3 stop.py"}]}}}),
+            encoding="utf-8")
+        return cfg, {}
+
     states = [
         ("a hook command with no script in it", a_hook_command_nothing_can_be_read_from, "hooks"),
         ("no mark file at all", no_mark_file, "marks"),
@@ -1018,13 +1083,90 @@ def test_no_check_reports_ok_for_a_measurement_it_could_not_have_made(tmp_path: 
          "capture_progress"),
         ("a trend window with too few readable records",
          a_trend_window_with_too_few_readable_records, "anchor_delivery"),
+        # `pressure`, `sidecars` and `vault` were not in this table at all until fix wave 1.
+        ("an empty transcript file", an_empty_transcript_file, "pressure"),
+        ("a transcript with no usage record", a_transcript_with_no_usage_record, "pressure"),
+        ("a context window of zero", a_context_window_of_zero, "pressure"),
+        ("a directory the sidecar walk cannot enter", a_directory_the_sidecar_walk_cannot_enter,
+         "sidecars"),
+        ("no vault directory", no_vault_directory, "vault"),
+        ("an empty vault", an_empty_vault, "vault"),
+        ("a directory where the hook script belongs", a_directory_where_the_hook_script_belongs,
+         "hooks"),
+        ("valid-JSON settings of the wrong shape", settings_json_of_the_wrong_shape, "hooks"),
     ]
-    for i, (label, build, check_id) in enumerate(states):
-        cfg, kwargs = build(tmp_path / f"state{i}")
-        check = _by_id(health.run(cfg, now=_T0, **kwargs), check_id)
-        assert check.level in {"skip", "warn", "fail"}, (label, check)
-        for phrase in unearned:
-            assert phrase not in check.message, (label, phrase, check)
+    try:
+        for i, (label, build, check_id) in enumerate(states):
+            cfg, kwargs = build(tmp_path / f"state{i}")
+            checks = health.run(cfg, now=_T0, **kwargs)
+            check = _by_id(checks, check_id)
+            assert check.level in {"skip", "warn", "fail"}, (label, check)
+            for phrase in unearned:
+                assert phrase not in check.message, (label, phrase, check)
+            # No state here may be answered by `_answered`: a check that raised reports `fail`, so
+            # it would satisfy the assertion above while measuring nothing at all.
+            assert "this check itself raised" not in check.message, (label, check)
+    finally:
+        # A state that made a directory unreadable must not outlive the test: pytest's own tmp_path
+        # cleanup cannot enter it either.
+        for path in tmp_path.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o755)
+
+
+def _fully_measurable(root: Path):
+    """A project where all ten checks can actually measure, plus the inputs the trends need."""
+    cfg = _healthy(root)
+    _vault(root, {"knowledge-base": ["Architecture"], "session-memory": ["Session_2026-09-29_1200"]})
+    _anchor(cfg)
+    _mark(cfg, "sleep", _T0 - timedelta(hours=1))
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(root / "t.jsonl", [
+        "2026-09-29T11:00:00.000Z", "2026-09-29T12:00:30.000Z", "2026-09-29T12:01:00.000Z",
+    ])
+    history = [{"blocks": ["anchor"], "capture_mark": f"M{i}", "stm_entries": 0} for i in range(5)]
+    return cfg, {"transcript_path": tr, "history": history}
+
+
+def test_every_ok_names_the_quantities_it_claims_to_have_measured(tmp_path: Path):
+    """The half of the regression net a table of degenerate states cannot supply.
+
+    A blocklist of historical phrases only recognises a wording it has already met: reverting
+    `script.is_file()` to `script.exists()` or dropping `onerror` from the sidecar walk left the
+    table green, because both defects produce a perfectly ordinary `ok`. So the requirement is
+    turned round here — an `ok` must carry the quantities of the comparison it claims, which a check
+    that never made the comparison has nothing to fill in. Every figure below is read off a project
+    where the check can measure, so what is pinned is real output and not a remembered sentence.
+    """
+    cfg, kwargs = _fully_measurable(tmp_path)
+    checks = health.run(cfg, now=_T0 + timedelta(minutes=2), **kwargs)
+    must_name = {
+        # The project and where its config was found: this check asserts nothing else.
+        "config": ["test-project", str(tmp_path)],
+        # Not a quantity but a scope, and the same rule: the walk cannot see inside these.
+        "sidecars": ["vendor", "node_modules"],
+        # The number of events the message claims to have covered.
+        "hooks": [str(len(sync.HOOK_EVENTS)) + " events wired"],
+        # How many notes were counted, and where.
+        "vault": ["2 notes", str(paths.vault_root(cfg))],
+        # Both instants, because "consistent" is a claim about comparing them.
+        "marks": ["2026-09-29T11:00:00+00:00", "2026-09-29T12:00:00+00:00"],
+        # The backlog it counted and the tolerance it compared the lag against.
+        "capture": ["2 exchanges", "10 min"],
+        # The two numbers whose ratio is the percentage.
+        "pressure": ["100", "1,000,000"],
+        # The stamp the anchor carries, which is what was compared against the note's title.
+        "anchor_fresh": ["2026-09-29 12:00"],
+        # The window each trend read, and for the capture trend the signal it actually saw.
+        "anchor_delivery": [f"last {healthchecks._TREND_WINDOW} sessions"],
+        "capture_progress": ["capture mark moved",
+                             f"last {healthchecks._TREND_WINDOW} sessions"],
+    }
+    assert set(must_name) == set(health._IDS)        # every check, not a subset of them
+    for check in checks:
+        assert check.level == "ok", check             # the premise: each one could measure
+        for quantity in must_name[check.id]:
+            assert quantity in check.message, (check, quantity)
 
 
 # --- a mark that still resolves is not corruption ----------------------------------------------
