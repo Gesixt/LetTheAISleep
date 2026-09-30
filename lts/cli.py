@@ -195,7 +195,7 @@ def _run(args) -> int:
         level = transcript.pressure_level(
             tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
         )
-        print(level if source == transcript.USAGE else f"{level}  ({status.ESTIMATED})")
+        print(f"{level}{status.provenance_note(source)}")
     elif args.cmd == "status":
         tp = Path(args.transcript) if args.transcript else None
         metrics = status.collect(cfg, transcript_path=tp)

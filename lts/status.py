@@ -72,6 +72,22 @@ def _name_hint(metrics: dict) -> str | None:
 
 # One wording for both surfaces that print a figure to a human: `lts status` and `lts pressure`.
 ESTIMATED = "estimated from file size — no usage record was found"
+UNREAD = "not measured — the transcript could not be read"
+
+
+def provenance_note(source: str) -> str:
+    """The parenthetical for a figure's provenance, or "" when it was really measured.
+
+    Keyed on the provenance itself, not on `!= USAGE`. Every caller used the latter, which made
+    `ESTIMATED` the label for `NO_FILE` too — a sentence claiming a file-size estimate for a file
+    nothing could read. It was unreachable, but only by accident and in two different modules:
+    `lts pressure` refuses an unreadable path at exit 2, and `_context_line` returns nothing when
+    the token count is 0, which `NO_FILE` always is. A guard in one module is not what should keep
+    a sentence in another module true.
+    """
+    if source == transcript.USAGE:
+        return ""
+    return f"  ({ESTIMATED if source == transcript.ESTIMATE else UNREAD})"
 
 
 def _context_figure(pr: dict) -> str:
@@ -93,7 +109,7 @@ def _context_figure(pr: dict) -> str:
     )
     # An estimate says so here rather than reading like a measurement: it is `len(file) // 4` over
     # a transcript that spans the whole project, which is how this figure went wrong to begin with.
-    note = "" if pr.get("source", transcript.USAGE) == transcript.USAGE else f"  ({ESTIMATED})"
+    note = provenance_note(pr.get("source", transcript.USAGE))
     return f"{tokens}/{window} tok ({round(pr['ratio'] * 100)}%) — {pr['level']}{warn}{note}"
 
 

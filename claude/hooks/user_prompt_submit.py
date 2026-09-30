@@ -51,7 +51,8 @@ def _context_line(tokens: int, window: int, source: str = transcript.USAGE) -> s
     """
     if not tokens or window <= 0:
         return ""
-    estimated = "" if source == transcript.USAGE else f" ({status.ESTIMATED})"
+    note = status.provenance_note(source).strip()
+    estimated = f" {note}" if note else ""
     if tokens > window:
         return (
             f"Context window: {tokens:,} tokens against a {window:,}-token window{estimated} — "

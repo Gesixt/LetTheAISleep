@@ -136,6 +136,26 @@ def test_render_marks_a_figure_that_was_estimated_rather_than_measured(tmp_path:
     assert "estimate" in line
 
 
+def test_a_figure_from_a_file_nothing_read_is_not_called_an_estimate(tmp_path: Path):
+    """`NO_FILE` must not borrow the estimate's sentence.
+
+    Every label site keyed on `!= USAGE`, so `no_file` printed "estimated from file size — no usage
+    record was found" about a file nothing could open. Nothing reached it — `lts pressure` refuses an
+    unreadable path at exit 2, and `_context_line` prints nothing at 0 tokens, which `NO_FILE` always
+    is — but the sentence was kept true by guards in two other modules, which is not a guarantee.
+    """
+    metrics = {
+        "project": "p", "stm": {"lines": 0, "bytes": 0, "approx_tokens": 0},
+        "pending": {"snapshots": 0, "bytes": 0},
+        "anchor": {"exists": False, "updated": None, "active_notes": 0, "active_topics": 0},
+        "pressure": {"tokens": 0, "window": 1_000_000, "ratio": 0.0,
+                     "level": "none", "source": "no_file"},
+    }
+    line = [l for l in status.render(metrics).splitlines() if "Context" in l][0]
+    assert "could not be read" in line, line
+    assert "estimated from file size" not in line, line
+
+
 def test_collect_records_how_the_figure_was_obtained(tmp_path: Path):
     from lts.config import load_config
     from tests.helpers import make_project
