@@ -12,6 +12,7 @@ That is what lets the trend checks be tested against a literal list of records w
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from lts import watermark
@@ -46,23 +47,70 @@ def _records(path: Path) -> list[dict]:
     return out
 
 
+def _unterminated(path: Path) -> bool:
+    """True when the file does not end in a newline — i.e. its last write did not finish.
+
+    A hook killed mid-write leaves the record it was writing without its final `\n`, which is
+    precisely the byte that did not make it. That state is indistinguishable from "a record is
+    still being written", and this module has one writer, so it is the former.
+    """
+    try:
+        if not path.stat().st_size:
+            return False
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False
+
+
+def _trim(path: Path) -> None:
+    """Keep the most recent `_KEEP` records, replacing the file in one step.
+
+    Write-then-rename, not `path.write_text`: the plain rewrite truncated the journal to zero
+    before the first byte of the replacement was written, so a crash inside it lost the history
+    that `_KEEP` exists to preserve — the same fault as a truncated append, one level up.
+    `os.replace` is atomic on a POSIX filesystem, so a reader sees either the old file or the new.
+
+    Best-effort, like `append`: a trim that fails leaves the untrimmed file, which is correct and
+    merely too long, and takes its temporary file with it.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        kept = _records(path)[-_KEEP:]
+        body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept)
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def append(path: Path, record: dict) -> None:
     """Add one record, trimming the file when it grows past `_MAX_BYTES`.
 
     Best-effort on purpose, like `hooklog`: every exception is swallowed. A journal that could
     break a hook would be a new way for memory to die silently, which is the opposite of the point.
+
+    A line this process did not finish is closed before the new record is written, never continued.
+    Appending into an unterminated line fused the fragment and the new record into one invalid JSON
+    line, and `_records` then discarded **both** — so a truncated write cost the *next* record as
+    well as itself, which is the opposite of what `_records` promises.
     """
     try:
         path = Path(path)
         entry = dict(record)
         entry.setdefault("at", watermark.mark_at()["timestamp"])
         path.parent.mkdir(parents=True, exist_ok=True)
+        broken = _unterminated(path)
         with path.open("a", encoding="utf-8") as fh:
+            if broken:
+                fh.write("\n")
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         if path.stat().st_size > _MAX_BYTES:
-            kept = _records(path)[-_KEEP:]
-            body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept)
-            path.write_text(body, encoding="utf-8")
+            _trim(path)
     except Exception:
         pass
 
