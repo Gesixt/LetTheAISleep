@@ -78,6 +78,19 @@ def _healthy(root: Path):
     return cfg
 
 
+def _anchor(cfg, updated: str = "2026-09-29 12:00") -> None:
+    """An anchor with content, so `anchor_delivery` has something whose delivery it can judge.
+
+    `_healthy` writes none: a project that has not run /sleep yet is the ordinary state on the day
+    it is installed. `SessionStart` records the `anchor` block only when `render_anchor` returned
+    something, so without this the journal of a fresh project and the journal of a hook withholding
+    a real anchor are the same five records.
+    """
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated=updated, last_session="s",
+                            active_topics=["topic"], active_notes=["Architecture"])
+
+
 def _by_id(checks, check_id: str) -> health.Check:
     return next(c for c in checks if c.id == check_id)
 
@@ -958,10 +971,35 @@ def test_a_field_no_trend_knows_how_to_read_is_unusable_rather_than_fatal(tmp_pa
 def test_five_sessions_without_the_anchor_fail(tmp_path: Path):
     """The two-month bug, in one check. Undetectable from a filesystem snapshot."""
     cfg = _healthy(tmp_path)
+    _anchor(cfg)
     history = _runs(5, blocks=("sleep_demand",))
     check = _by_id(health.run(cfg, history=history, now=_T0), "anchor_delivery")
     assert check.level == "fail"
     assert "has not reached the model" in check.message
+
+
+def test_a_project_that_has_not_slept_yet_is_not_told_the_anchor_is_being_withheld(tmp_path: Path):
+    """No anchor and five runs without one are the ordinary first days of a project.
+
+    The journal cannot tell that state from a hook withholding a real anchor: neither records the
+    block. So the check asks the filesystem whether there was anything to deliver, and reports the
+    two apart — a demand here would be a false demand on every project between install and its
+    first /sleep, and it landed beside `anchor_fresh` skipping the same object for the same reason.
+    """
+    cfg = _healthy(tmp_path)
+    history = _runs(5, blocks=("digest",))
+    checks = health.run(cfg, history=history, now=_T0)
+    check = _by_id(checks, "anchor_delivery")
+    assert check.level == "skip", check
+    assert "no anchor to deliver" in check.message, check
+    assert "/sleep" in check.message, check
+    assert check.fix is None, check
+    assert "anchor_delivery" not in health.demand(checks), checks
+    # …and the demand returns the moment there is an anchor the runs could have carried.
+    _anchor(cfg)
+    withheld = _by_id(health.run(cfg, history=history, now=_T0), "anchor_delivery")
+    assert withheld.level == "fail", withheld
+    assert "has not reached the model" in withheld.message, withheld
 
 
 def test_one_anchor_in_the_window_is_enough(tmp_path: Path):
@@ -1031,6 +1069,7 @@ def test_a_malformed_journal_record_costs_itself_and_not_the_trend(tmp_path: Pat
     window was read.
     """
     cfg = _healthy(tmp_path)
+    _anchor(cfg)   # so the `blocks` window is judged on delivery, not skipped for having nothing
     shapes = [
         # The third record of each window is the malformed one. The `blocks` window carries no
         # anchor anywhere, so the type error is actually reached rather than short-circuited past.

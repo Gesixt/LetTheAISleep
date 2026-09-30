@@ -97,7 +97,7 @@ def all_checks(
         _check_capture(cfg, transcript_path, now),
         _check_pressure(metrics),
         _check_anchor_fresh(cfg),
-        _check_anchor_delivery(history),
+        _check_anchor_delivery(cfg, history),
         _check_capture_progress(history),
     ]
 
@@ -726,12 +726,22 @@ def _trend_window(
     return usable, None
 
 
-def _check_anchor_delivery(history: list[dict] | None) -> Check:
+def _check_anchor_delivery(cfg: Config, history: list[dict] | None) -> Check:
     """Did the anchor actually reach the model recently?
 
     This is the two-month bug expressed as a check. It cannot be answered from the filesystem: at
     every instant the anchor file existed and had content. Only the record of what each run emitted
     shows that it was never handed over.
+
+    The filesystem still supplies one fact the journal cannot: whether there was an anchor to hand
+    over at all. `SessionStart` records the `anchor` block only when `render_anchor` returned
+    something, so a project that has not run /sleep yet journals five runs without it and the
+    records alone are identical to five runs that withheld a real anchor. Demanding attention for
+    the first is a false demand, and a false demand is what trains demands away — days can pass
+    before a project's first /sleep. Absence of an anchor is unambiguous, so it is the fact this
+    check asks for; "every journalled run predates the anchor's `updated`" was considered and
+    rejected, because it cannot tell a just-written first anchor from a hook that has been broken
+    for weeks and a sleep that has just refreshed the anchor.
     """
     usable, no_trend = _trend_window(history, "anchor_delivery", "blocks")
     if no_trend is not None:
@@ -739,6 +749,14 @@ def _check_anchor_delivery(history: list[dict] | None) -> Check:
     scope = _trend_scope(len(usable))
     if any(_ANCHOR_BLOCK in (run.get("blocks") or []) for run in usable):
         return Check("anchor_delivery", "ok", f"the anchor reached the model within {scope}")
+    if not anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))):
+        # No `fix`: nothing is broken and nothing is owed here. `render` prints "Fix:" under every
+        # level but `ok`, and a fix line under this state would read as a diagnosis.
+        return Check(
+            "anchor_delivery", "skip",
+            f"there is no anchor to deliver, so {scope} could not have delivered one — /sleep "
+            "writes the first anchor",
+        )
     return Check("anchor_delivery", "fail", f"the anchor has not reached the model in {scope}",
                  "run `lts anchor render` — if it prints nothing the anchor file is empty")
 
