@@ -116,10 +116,11 @@ def measure_context(transcript_path: Path) -> tuple[int, str]:
     """
     if not transcript_path.exists():
         return 0, NO_FILE
-    try:
-        text = transcript_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return 0, NO_FILE
+    # Read once, here, and used by both branches below. Unguarded, exactly as before: an `OSError`
+    # on a file that exists is not "no file", and `NO_FILE` is the one state `lts pressure` prints
+    # `status.ESTIMATED` for — "estimated from file size" would be a false sentence about a file
+    # nothing could read. That mislabel is its own defect; widening its reach is not this change.
+    text = transcript_path.read_text(encoding="utf-8", errors="ignore")
     last = 0
     # Tracked apart from `last`, because a real record summing to zero is a measurement of an
     # empty window, not the absence of one, and `last or estimate` cannot tell those apart.

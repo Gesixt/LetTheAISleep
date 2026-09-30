@@ -136,19 +136,19 @@ def run(
     re-opened the file it had just read — ~1.5 s wasted on the 208 MB transcript, in precisely the
     state where the figure is an estimate anyway. It now estimates from the text in hand, so the
     count is two either way. Supplying `metrics` moves the first parse to the caller rather than
-    removing it, so there is nothing here to optimise away. The callers are `lts doctor`, which passes a transcript
-    when it is given one, and the `SessionStart` hook, which passes none — not because a parse is
-    too slow, which was asserted here for a while and is false, but because it is not worth its
-    share of the budget. Measured 2026-09-29 on a 208,142,001-byte transcript (the same file was
-    recorded at 187.5 MB four days earlier, so the size is a snapshot of a growing file, not a
-    property): `context_tokens` 1.46 s and 1.57 s, `read_exchanges` 1.48 s and 1.52 s. One parse
-    fits the 3–5 s session-load budget of ТЗ §6 with room to spare; the two that `--transcript`
-    performs come to ~3.0 s, on top of what `SessionStart` already spends, on every `/compact` —
-    and both failure classes are covered more cheaply elsewhere: the capture class by
+    removing it, so there is nothing here to optimise away. The callers are `lts doctor`, which
+    passes a transcript when it is given one, and the `SessionStart` hook, which passes none — not
+    because a parse is too slow, which was asserted here for a while and is false, but because it is
+    not worth its share of the budget. Measured 2026-09-29 on a 208,142,001-byte transcript (the
+    same file was recorded at 187.5 MB four days earlier, so the size is a snapshot of a growing
+    file, not a property): `context_tokens` 1.46 s and 1.57 s, `read_exchanges` 1.48 s and 1.52 s.
+    One parse fits the 3–5 s session-load budget of ТЗ §6 with room to spare; the two that
+    `--transcript` performs come to ~3.0 s, on top of what `SessionStart` already spends, on every
+    `/compact` — and both failure classes are covered more cheaply elsewhere: the capture class by
     `healthchecks._check_capture_progress`, which reads five journal records and no transcript at
     all, and the impossible-percentage class by the invariant in
-    `claude/hooks/user_prompt_submit._context_line`. That is the whole argument; it used to point
-    at a design document that lives outside this repository, which a reader holding only the repo
+    `claude/hooks/user_prompt_submit._context_line`. That is the whole argument; it used to point at
+    a design document that lives outside this repository, which a reader holding only the repo
     cannot open.
 
     `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
