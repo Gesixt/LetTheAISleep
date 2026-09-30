@@ -82,9 +82,22 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     # /sleep calls `pending.clear_all` between the listing and the stat. A failure in the health
     # path must cost the health output and nothing else.
     try:
-        # One `status.collect` per run: `health.run` and `health.record` each compute their own
-        # when none is given, which is a full STM read, a pending stat and a vault rglob twice on
-        # every /compact. `metrics` is the argument that exists to prevent exactly that.
+        # One `status.collect` per run: `health.run` and `health.record` each compute their own when
+        # none is given, so `metrics` saves the second one. What that second one costs is a full STM
+        # read, a listing plus a `stat` of every pending snapshot, and a read of the anchor — 0.365
+        # ms, measured 2026-09-30 on this project (23-note vault, 122 STM entries, no pending
+        # snapshots). It is not a vault walk: `lts.status.collect` never walks the vault, it only
+        # joins the vault path into a string. This comment used to say "a vault rglob twice", which
+        # was a claim about work `status.collect` does not do.
+        #
+        # The vault *is* rglobbed twice per run, and `metrics` does nothing about it: once in
+        # `healthchecks._check_vault` to count notes, once in `health.record` to record the same
+        # count, plus the `session-memory` subtree in `_check_anchor_fresh`. Measured the same day:
+        # 0.290 ms for the whole vault at 23 notes and 0.107 ms for the subtree, and 0.392 ms for a
+        # synthetic 250-note vault on a local ext4 filesystem — this vault sits on a fuse mount
+        # whose per-entry cost measured ~4x that, so ~1.6 ms extrapolated at 250 notes. Not worth
+        # fixing: the duplicate walk is ~0.05% of the 3-5 s session-load budget of ТЗ §6, and
+        # removing it would mean threading a check's internal note count into the journal record.
         metrics = status.collect(cfg)
         journal_file = paths.health_journal_file(cfg)
         checks = health.run(cfg, metrics=metrics,
