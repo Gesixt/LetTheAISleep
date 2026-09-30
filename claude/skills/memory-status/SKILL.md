@@ -19,7 +19,8 @@ lts update --check
 
 `lts doctor` runs ten health checks and **exits non-zero when any of them fails**. Levels are `✓ ok`,
 `! warn`, `✗ fail` and `· skip`; a `skip` is a check that could not run and says why — never read it
-as a pass. Report every `fail` prominently with its `Fix:` line, and do not describe memory as
+as a pass. A `? ` line is a level `lts` itself cannot interpret: it counts as a failure and is
+reported like one, because a verdict nobody can read is not a clean bill. Report every `fail` prominently with its `Fix:` line, and do not describe memory as
 healthy while one is outstanding. `capture` and `pressure` show as `skip` unless you pass
 `--transcript <path>`: they parse the whole transcript, which `SessionStart` deliberately does not
 spend on every `/compact`. Pass it when you are investigating; the trend checks cover the same
