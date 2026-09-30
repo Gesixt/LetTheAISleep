@@ -596,6 +596,25 @@ def test_an_anchor_truncated_to_the_minute_is_not_a_session_behind(tmp_path: Pat
     assert _by_id(health.run(cfg, now=_T0), "anchor_fresh").level == "ok"
 
 
+def test_a_session_note_five_minutes_newer_than_the_anchor_warns(tmp_path: Path):
+    """The other side of `_ANCHOR_SKEW`, which nothing pinned: the test above and
+    `test_an_anchor_older_than_the_newest_session_note_warns` bracket it with a 45-second gap and a
+    six-year one, so every value between them passed the suite — raising it from 2 minutes to 6
+    hours left all 327 tests green. Five minutes is a gap /sleep's own minute-granular `updated`
+    cannot explain: the anchor was not rewritten with the note."""
+    cfg = _healthy(tmp_path)
+    vault = _vault(tmp_path, {"session-memory": ["Session_2026-09-29_1205"]})
+    note = vault / "session-memory" / "Session_2026-09-29_1205.md"
+    written = datetime(2026, 9, 29, 12, 5, 0).timestamp()   # local, matching the title
+    os.utime(note, (written, written))
+    paths.ensure_sidecar(cfg)
+    anchor_mod.write_anchor(paths.anchor_file(cfg), updated="2026-09-29 12:00",
+                            last_session="old", active_topics=[], active_notes=[])
+    check = _by_id(health.run(cfg, now=_T0), "anchor_fresh")
+    assert check.level == "warn", check
+    assert "a session behind" in check.message, check
+
+
 def _raw_mark(cfg, which: str, payload: dict | str) -> Path:
     """Write a mark file verbatim: a dict as JSON, a string as the literal bytes on disk.
 
