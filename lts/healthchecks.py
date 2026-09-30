@@ -49,6 +49,10 @@ _TREND_WINDOW = 5
 # calling `record` decides the names it passes, and a typo there would fail the check for ever.
 # `record`'s docstring spells the whole vocabulary for that caller.
 _ANCHOR_BLOCK = "anchor"
+# The directories `doctor.find_sidecars` does not enter, spelled out for the one message that makes
+# an absence claim: a vendored repository with its own `.ai_memory` is invisible to that walk, and
+# "no stray sidecars" said nothing about the limit.
+_PRUNED = "the pruned directories (" + ", ".join(sorted(doctor.SKIP_DIRS)) + ")"
 
 
 @dataclass(frozen=True)
@@ -158,22 +162,43 @@ def _check_sidecars(cfg: Config) -> Check:
     `doctor.collect` used to print "! nested lts project root: ..." and this check inherited the
     discrimination without the report, which quietly dropped an operator-facing fact: a second
     buffer under the tree is worth knowing about even when it is nobody's fault.
+
+    "No stray sidecars" is an absence claim, and an absence claim may reach no further than the
+    walk that produced it. Two things bound that walk: directories it could not enter, which it now
+    returns instead of swallowing, and the fixed list it prunes, which the `ok` message names. The
+    first cannot be reported as an absence at all — a real stray under a directory with mode 000
+    used to leave this check `ok` and `lts doctor` exiting 0.
     """
+    found, unreadable = doctor.find_sidecars(cfg.project_root)
     nested, strays = [], []
-    for sidecar in doctor.find_sidecars(cfg.project_root):
+    for sidecar in found:
         (nested if is_lts_config(sidecar.parent / "config.toml") else strays).append(sidecar)
     also = ""
     if nested:
         also = (" — nested lts project root(s), each read by its own /sleep: "
                 + ", ".join(str(p) for p in nested))
-    if not strays:
-        return Check("sidecars", "ok", "no stray sidecars" + also)
-    return Check(
-        "sidecars", "fail",
-        "orphaned memory that /sleep will never read: "
-        + ", ".join(str(p) for p in strays) + also,
-        "merge anything you need into the root buffer, then delete them",
-    )
+    blocked = ""
+    if unreadable:
+        many = len(unreadable) > 1
+        blocked = (f" — {len(unreadable)} {'directories' if many else 'directory'} could not be "
+                   f"entered, so nothing under {'them' if many else 'it'} was examined: "
+                   + ", ".join(str(p) for p in unreadable))
+    if strays:
+        return Check(
+            "sidecars", "fail",
+            "orphaned memory that /sleep will never read: "
+            + ", ".join(str(p) for p in strays) + also + blocked,
+            "merge anything you need into the root buffer, then delete them",
+        )
+    if unreadable:
+        # Not `ok`: the claim this check would make is an absence, and part of the tree was not
+        # searched. Not `fail`: an unreadable directory is not itself orphaned memory.
+        return Check(
+            "sidecars", "skip",
+            "no stray sidecars in the part of the tree this walk could read" + also + blocked,
+            "make those directories readable and re-run, or check them by hand",
+        )
+    return Check("sidecars", "ok", f"no stray sidecars outside {_PRUNED}" + also)
 
 
 def _tokens(command: str) -> list[str]:

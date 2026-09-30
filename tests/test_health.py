@@ -1339,3 +1339,52 @@ def test_a_named_nested_project_does_not_hide_a_real_stray(tmp_path: Path):
     assert check.level == "fail"
     assert str(tmp_path / "orphan" / ".ai_memory") in check.message
     assert str(tmp_path / "sub" / ".ai_memory") in check.message
+
+
+def test_a_directory_the_walk_cannot_enter_is_not_reported_as_an_absence(tmp_path: Path):
+    """"No stray sidecars" may reach no further than the walk behind it.
+
+    `os.walk` swallowed every PermissionError, so a real stray under a mode-000 directory left this
+    check `ok` and `lts doctor` exiting 0 — the absence claim this subsystem exists to catch.
+    """
+    cfg = _healthy(tmp_path)
+    locked = tmp_path / "locked"
+    (locked / "inner" / ".ai_memory").mkdir(parents=True)
+    os.chmod(locked, 0o000)
+    try:
+        check = _by_id(health.run(cfg), "sidecars")
+    finally:
+        os.chmod(locked, 0o755)
+    assert check.level == "skip", check
+    assert str(locked) in check.message, check
+    assert "could not be entered" in check.message, check
+    assert check.message.startswith("no stray sidecars in the part of the tree"), check
+
+
+def test_an_unreadable_directory_does_not_soften_a_stray_that_was_found(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (tmp_path / "orphan" / ".ai_memory").mkdir(parents=True)
+    os.chmod(locked, 0o000)
+    try:
+        check = _by_id(health.run(cfg), "sidecars")
+    finally:
+        os.chmod(locked, 0o755)
+    assert check.level == "fail", check
+    assert str(tmp_path / "orphan" / ".ai_memory") in check.message, check
+    assert str(locked) in check.message, check
+
+
+def test_the_clean_sidecar_message_names_the_directories_it_did_not_search(tmp_path: Path):
+    """A vendored repository with its own `.ai_memory` is invisible to this walk by design.
+
+    The pruning is deliberate, the unconditional "no stray sidecars" was not: it claimed the whole
+    tree. The list is fixed, so the message can state exactly the scope it was given.
+    """
+    cfg = _healthy(tmp_path)
+    (tmp_path / "vendor" / "somerepo" / ".ai_memory").mkdir(parents=True)
+    check = _by_id(health.run(cfg), "sidecars")
+    assert check.level == "ok", check
+    for pruned in ("vendor", "node_modules", ".git", ".venv"):
+        assert pruned in check.message, (pruned, check)
