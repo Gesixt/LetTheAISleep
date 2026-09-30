@@ -17,7 +17,13 @@ lts update --check
 ```
 `lts status` prints: STM buffer size (entries / bytes / ~tokens), sleep debt (pending un-consolidated snapshots), context pressure (if a transcript is available), and anchor freshness. Pass `--json` if you want to post-process the numbers.
 
-`lts doctor` prints which project root resolved and whether any **stray sidecars** exist — `.ai_memory/` directories in subdirectories, holding memory that `/sleep` will never read. It exits non-zero when something is wrong. If it reports a stray sidecar or an unconfigured root, say so prominently: the user's `config.toml` was probably moved or deleted, and memory is being split in two.
+`lts doctor` runs ten health checks and **exits non-zero when any of them fails**. Levels are `✓ ok`,
+`! warn`, `✗ fail` and `· skip`; a `skip` is a check that could not run and says why — never read it
+as a pass. Report every `fail` prominently with its `Fix:` line, and do not describe memory as
+healthy while one is outstanding. `capture` and `pressure` show as `skip` unless you pass
+`--transcript <path>`: they parse the whole transcript, which `SessionStart` deliberately does not
+spend on every `/compact`. Pass it when you are investigating; the trend checks cover the same
+failure classes without it.
 
 `lts digest` prints what changed in the vault since your last sleep and who changed it, plus the
 vault's git state (commits behind/ahead of the last fetched remote ref, uncommitted files). It is
@@ -54,7 +60,7 @@ From that dashboard report:
 ## 3. Present a combined dashboard and flag actions
 Summarize both tiers together. Raise a clear flag when:
 - **The vault is behind the remote, or has uncommitted notes** → recommend a `git pull` / commit in the vault repository. Never run git yourself.
-- **`lts doctor` exits non-zero** → memory is misplaced. Report the stray path and stop before writing anything new.
+- **`lts doctor` exits non-zero** → one or more of the ten checks failed. Report each failing check id with its `Fix:` line, and do not call memory healthy while any of them stands. If the failure is `config` or `sidecars`, stop before writing anything new: those two mean writes would land in the wrong place.
 - **`lts update --check` reports anything stale** → this project is running older copies than the clone ships. Recommend `git -C <clone> pull` (if the clone is behind) followed by `lts update`. Never run git yourself.
 - **Sleep debt > 0** or **context pressure is `force`** → recommend running `/sleep` now.
 - **Embedding Status is not "Up to date"** → recommend `basic-memory reindex --embeddings -p <project>` so `/recall` semantic search is complete.
