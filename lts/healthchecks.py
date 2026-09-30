@@ -575,6 +575,30 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
         )
 
     backlog = watermark.exchanges_after(exchanges, mark)
+    # A mark newer than every exchange in the file was not written from this file. The lexicographic
+    # filter in `entries_after` then drops everything, the backlog is 0, and the `ok` below reports
+    # "the normal flush lag" — a specific benign claim about a transcript the mark has nothing to do
+    # with. `d0a9771` closed the neighbouring state, a file that yielded no exchanges at all; this is
+    # the state where the exchanges are there and belong to some other session. `--transcript` is
+    # typed by a human at a terminal, where a typo is the ordinary case, so this is the likely way
+    # in. A uuid that still resolves proves the opposite — the mark does name an exchange in this
+    # file — and a transcript rewritten under such a mark is the negative-lag `fail` further down,
+    # which this must not stand in front of.
+    stamps = [when for when in (_stamp_time(ex.get("timestamp")) for ex in exchanges) if when]
+    newest_in_file = max(stamps, default=None)
+    uuid = mark.get("uuid")
+    if (newest_in_file is not None and marked > newest_in_file + _SKEW
+            and not (uuid and _resolves_by_uuid(exchanges, uuid))):
+        ahead = int((marked - newest_in_file).total_seconds() // 60)
+        return Check(
+            "capture", "skip",
+            f"the capture mark ({marked.isoformat()}) is newer than every exchange in this "
+            f"transcript — the newest of its {len(exchanges)} is {newest_in_file.isoformat()}, "
+            f"{ahead} min earlier — so the mark does not belong to this file and there is nothing "
+            "here to measure it against",
+            "point `--transcript` at this session's transcript — the one Claude Code is writing "
+            "for the session you are in",
+        )
     if len(backlog) <= 1:
         return Check("capture", "ok",
                      f"{len(backlog)} exchange(s) behind the capture mark — the normal flush lag")

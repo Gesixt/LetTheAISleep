@@ -716,6 +716,50 @@ def test_a_backlog_older_than_its_own_mark_is_not_called_within_tolerance(tmp_pa
     assert "175 min" in check.message  # 12:00 back to 09:05, as a distance
 
 
+def test_a_transcript_that_predates_the_mark_entirely_is_not_a_caught_up_one(tmp_path: Path):
+    """`--transcript` pointed at some other session's file: every exchange is older than the mark.
+
+    The lexicographic filter drops all of them, so the backlog is 0 and "the normal flush lag" was
+    printed about a file the mark has nothing to do with — a specific benign claim from a
+    comparison that never happened. `d0a9771` closed the neighbouring state, a file with no
+    exchanges at all; `cli.py` notes that this path comes from a human at a terminal, where a typo
+    is the ordinary case.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(tmp_path / "old.jsonl",
+                     [f"2026-08-01T{hour:02d}:00:00.000Z" for hour in (9, 10, 11, 12)])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(minutes=1)), "capture")
+    assert check.level == "skip", check
+    assert "does not belong to this file" in check.message, check
+    assert "flush lag" not in check.message, check
+    assert "within" not in check.message, check
+    # Both instants and the distance between them: the quantities of the comparison it did make.
+    assert "2026-09-29T12:00:00+00:00" in check.message, check
+    assert "2026-08-01T12:00:00+00:00" in check.message, check
+    assert "84960 min" in check.message, check
+
+
+def test_a_mark_whose_uuid_resolves_still_belongs_to_the_file_it_predates(tmp_path: Path):
+    """A stamp ahead of every exchange is not proof of a foreign file when the uuid is still there.
+
+    That is a transcript rewritten *under* the mark, which the negative-lag `fail` below reports
+    with its distance — so the foreign-file skip must not stand in front of it.
+    """
+    cfg = _healthy(tmp_path)
+    _raw_mark(cfg, "capture", {"uuid": "u0", "timestamp": "2026-09-29T12:00:00.000Z", "count": 1})
+    tr = _uuid_transcript(tmp_path / "t.jsonl", [
+        ("u0", "2026-09-29T09:00:00.000Z"),
+        ("u1", "2026-09-29T09:03:00.000Z"),
+        ("u2", "2026-09-29T09:05:00.000Z"),
+    ])
+    check = _by_id(health.run(cfg, transcript_path=tr, now=_T0 + timedelta(hours=1)), "capture")
+    assert check.level == "fail", check
+    assert "rewritten under it" in check.message, check
+    assert "175 min" in check.message, check
+    assert "does not belong to this file" not in check.message, check
+
+
 def test_an_unstamped_backlog_is_measured_to_now_and_says_which(tmp_path: Path):
     """`transcript.read_exchanges` stores `timestamp: None` for a line without one, and the uuid
     branch of `entries_after` returns those entries unfiltered — so the newest exchange can carry
