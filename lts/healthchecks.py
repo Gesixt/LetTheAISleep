@@ -261,36 +261,44 @@ def _check_hooks(cfg: Config) -> Check:
 
     wired: dict[str, list[str]] = {}
     malformed: list[str] = []
+    # The events among `malformed`, tracked rather than parsed back out of those sentences: an
+    # event name is an arbitrary JSON key, and a fact this check reports should not depend on one
+    # not containing the separator.
+    unreadable_events: set[str] = set()
     for event, groups in events.items():
         if not isinstance(groups, list):
             malformed.append(f"{event}: a {type(groups).__name__}, not a list of hook groups")
+            unreadable_events.add(event)
             continue
         for group in groups:
             if not isinstance(group, dict):
                 malformed.append(f"{event}: a hook group that is a {type(group).__name__}, "
                                  f"not an object: {group!r}")
+                unreadable_events.add(event)
                 continue
             hooks = group.get("hooks") or []
             if not isinstance(hooks, list):
                 malformed.append(f"{event}: `hooks` is a {type(hooks).__name__}, not a list: "
                                  f"{hooks!r}")
+                unreadable_events.add(event)
                 continue
             for hook in hooks:
                 if not isinstance(hook, dict):
                     malformed.append(f"{event}: a hook that is a {type(hook).__name__}, not an "
                                      f"object: {hook!r}")
+                    unreadable_events.add(event)
                     continue
                 command = hook.get("command", "")
                 if not isinstance(command, str):
                     # `_tokens` calls `shlex.split`, which raises on anything but a string.
                     malformed.append(f"{event}: `command` is a {type(command).__name__}, not a "
                                      f"string: {command!r}")
+                    unreadable_events.add(event)
                     continue
                 wired.setdefault(event, []).append(command)
 
     # An event whose wiring could not be read is not an event that is "not wired": that sentence
     # would be a claim this check cannot make about it, and the shape is reported instead.
-    unreadable_events = {entry.split(":", 1)[0] for entry in malformed}
     missing = [event for event in sync.HOOK_EVENTS
                if event not in wired and event not in unreadable_events]
     gone: list[str] = []
