@@ -379,7 +379,7 @@ def _check_vault(cfg: Config) -> Check:
     if not notes:
         return Check("vault", "warn", f"vault is empty: {vault}",
                      "expected for a new project; /sleep writes the first notes")
-    return Check("vault", "ok", f"{len(notes)} notes at {vault}")
+    return Check("vault", "ok", f"{len(notes)} note{'' if len(notes) == 1 else 's'} at {vault}")
 
 
 # --- invariants -----------------------------------------------------------------------------

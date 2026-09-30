@@ -61,8 +61,9 @@ everything worth keeping into linked long-term notes **without losing a single n
 > pressure` measured 45,413,420 tokens against a hardcoded 200,000-token window (**22,707%**), and
 > the model stated a context percentage no component had produced. A liveness poll would have caught
 > none of them — every component was alive and the *claims* were false. So `lts doctor` now runs ten
-> checks in three kinds: **inventory** (is each part present — including that every wired hook
-> script still exists on disk, since projects point at `~/tools` by absolute path), **invariants**
+> checks in three kinds: **inventory** (is each part present — including that each of the four hooks
+> `lts` owns is wired and its script still exists on disk, since projects point at `~/tools` by
+> absolute path; a hook you wired yourself is outside what that check looks at), **invariants**
 > (is the sleep mark behind the capture mark, is the measured context inside the window), and
 > **trend**, which reads the sidecar's `health.jsonl` — the per-run log that records what
 > `SessionStart` actually emitted. That last one is the only way to catch "the anchor has not
@@ -246,7 +247,7 @@ own are left alone; only the ones the clone ships are overwritten.
 | `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts doctor [--json] [--transcript PATH]` | Ten health checks: inventory, invariants and trend. Exits non-zero on a failure. `--transcript` enables the two checks that must parse the transcript; hooks omit it. |
+| `lts doctor [--json] [--transcript PATH]` | Ten health checks: inventory, invariants and trend. Exits non-zero on a failure. `--transcript` enables the two checks that must parse the transcript; hooks omit it. `--json` prints `{"worst": <level>, "checks": [{"id", "level", "message", "fix"}, ...]}`, one object per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
 | `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |
