@@ -88,9 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor.add_argument("--json", action="store_true")
     p_doctor.add_argument(
         "--transcript",
-        help="transcript path, enabling the capture and pressure checks (the planned hook "
-             "caller will omit it: one parse of a large transcript measured ~1.5 s, and the two "
-             "these checks need would consume most of the session-load budget on every run)",
+        help="transcript path, enabling the capture and pressure checks (the SessionStart hook "
+             "omits it: one parse of a large transcript measured ~1.5 s, and the two these "
+             "checks need would consume most of the session-load budget on every run)",
     )
     _add_root(p_doctor)
 
