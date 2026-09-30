@@ -705,6 +705,30 @@ def test_session_start_journals_one_record_naming_what_it_emitted(tmp_path: Path
     assert records[0]["checks"]["hooks"] == "ok"
 
 
+def test_session_start_does_not_record_an_anchor_it_did_not_emit(tmp_path: Path):
+    """The negative half of the record, and the only thing holding `if body` in place.
+
+    The `anchor` tuple is *always* in `blocks`; only the emptiness of its body separates "the anchor
+    reached the model" from "it did not", and that distinction is the whole input to
+    `_check_anchor_delivery`. Deleting `if body` from the filter left all 348 tests green, which
+    means `anchor_delivery` would have reported `ok` for ever on a project whose anchor never
+    arrives — the two-month bug again, with a green suite. The positive test cannot catch it: it
+    writes a populated anchor, so the name belongs in the record either way.
+    """
+    from lts import health, journal, paths
+    from lts.config import load_config
+    from tests.test_health import _healthy
+    cfg = _healthy(tmp_path)          # deliberately no anchor: `render_anchor` returns ""
+    paths.ensure_sidecar(cfg)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    context = ss.build_context({"cwd": str(tmp_path)})
+    cfg = load_config(tmp_path)
+    records = journal.tail(paths.health_journal_file(cfg), 5)
+    assert len(records) == 1
+    assert health.ANCHOR_BLOCK not in records[0]["blocks"], records[0]["blocks"]
+    assert "## Session Anchor" not in context, context
+
+
 def test_session_start_records_the_demand_it_emitted(tmp_path: Path):
     from lts import journal, paths
     from lts.config import load_config
