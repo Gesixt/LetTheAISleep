@@ -6,8 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import (anchor, digest, health, healthchecks, journal, paths, pending,
-                 status, stm)
+from lts import anchor, digest, health, journal, paths, pending, status, stm
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -56,9 +55,9 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     except Exception:
         digest_block = ""
     blocks += [
-        # `_ANCHOR_BLOCK` rather than a retyped "anchor": `_check_anchor_delivery` matches this
-        # name against the journal, and a typo here would fail that check forever.
-        (healthchecks._ANCHOR_BLOCK,
+        # `health.ANCHOR_BLOCK` rather than a retyped "anchor": `_check_anchor_delivery` matches
+        # this name against the journal, and a typo here would fail that check forever.
+        (health.ANCHOR_BLOCK,
          anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg)))),
         ("digest", digest_block),
     ]
@@ -72,7 +71,7 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     # the impossible-percentage class by the invariant in `user_prompt_submit._context_line`.
     # `lts.health.run` carries the same argument with the same figures.
     #
-    # `_TREND_WINDOW` is the window the trend checks require: handing them fewer records makes
+    # `health.TREND_WINDOW` is the window the trend checks require: handing them fewer records makes
     # them skip, and more is history they discard.
     #
     # Wrapped for the same reason the digest is, and more urgently: `main()` turns any exception
@@ -101,7 +100,7 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
         metrics = status.collect(cfg)
         journal_file = paths.health_journal_file(cfg)
         checks = health.run(cfg, metrics=metrics,
-                            history=journal.tail(journal_file, healthchecks._TREND_WINDOW))
+                            history=journal.tail(journal_file, health.TREND_WINDOW))
         failure = health.demand(checks)
         if failure:
             # First, because it is the one block that says the others may be untrustworthy.

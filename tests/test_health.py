@@ -1158,9 +1158,9 @@ def test_every_ok_names_the_quantities_it_claims_to_have_measured(tmp_path: Path
         # The stamp the anchor carries, which is what was compared against the note's title.
         "anchor_fresh": ["2026-09-29 12:00"],
         # The window each trend read, and for the capture trend the signal it actually saw.
-        "anchor_delivery": [f"last {healthchecks._TREND_WINDOW} sessions"],
+        "anchor_delivery": [f"last {health.TREND_WINDOW} sessions"],
         "capture_progress": ["capture mark moved",
-                             f"last {healthchecks._TREND_WINDOW} sessions"],
+                             f"last {health.TREND_WINDOW} sessions"],
     }
     assert set(must_name) == set(health._IDS)        # every check, not a subset of them
     for check in checks:
@@ -1362,7 +1362,7 @@ def test_a_short_history_skips_the_trend_rather_than_passing_it(tmp_path: Path):
                    "anchor_delivery")
     assert check.level == "skip"
     # Not a bare "5": "0 of 5" would satisfy that, leaving the count the check actually has unpinned.
-    assert f"4 of {healthchecks._TREND_WINDOW} runs journalled" in check.message
+    assert f"4 of {health.TREND_WINDOW} runs journalled" in check.message
 
 
 def test_a_frozen_mark_and_a_flat_buffer_fail_capture_progress(tmp_path: Path):
@@ -1384,7 +1384,7 @@ def test_a_moving_mark_passes_even_with_an_always_empty_buffer(tmp_path: Path):
     # The ok message names the signal it measured and the window it measured over; "progressing"
     # named neither, and nothing in the unearned-phrase net could bite on it.
     assert "capture mark moved" in check.message, check
-    assert f"last {healthchecks._TREND_WINDOW} sessions" in check.message, check
+    assert f"last {health.TREND_WINDOW} sessions" in check.message, check
 
 
 def test_a_growing_buffer_passes_even_with_a_frozen_mark_field(tmp_path: Path):
@@ -1395,7 +1395,7 @@ def test_a_growing_buffer_passes_even_with_a_frozen_mark_field(tmp_path: Path):
     check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
     assert check.level == "ok"
     assert "buffer grew" in check.message, check
-    assert f"last {healthchecks._TREND_WINDOW} sessions" in check.message, check
+    assert f"last {health.TREND_WINDOW} sessions" in check.message, check
 
 
 def test_no_history_skips_both_trend_checks(tmp_path: Path):
@@ -1431,10 +1431,10 @@ def test_a_malformed_journal_record_costs_itself_and_not_the_trend(tmp_path: Pat
         check = _by_id(checks, check_id)
         # The four usable records still carry the failure, and the claim is about four, not five.
         assert check.level == "fail", (field, check)
-        assert f"4 of the last {healthchecks._TREND_WINDOW}" in check.message, (field, check)
+        assert f"4 of the last {health.TREND_WINDOW}" in check.message, (field, check)
         assert "records could be read" in check.message, (field, check)
         # …and it does not describe itself as a measurement over the whole window.
-        assert f"in the last {healthchecks._TREND_WINDOW} sessions" not in check.message, (field, check)
+        assert f"in the last {health.TREND_WINDOW} sessions" not in check.message, (field, check)
 
 
 def test_the_records_left_after_a_bad_one_are_measured_not_assumed_to_fail(tmp_path: Path):
@@ -1447,7 +1447,7 @@ def test_the_records_left_after_a_bad_one_are_measured_not_assumed_to_fail(tmp_p
     check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
     assert check.level == "ok", check
     assert "capture mark moved" in check.message, check
-    assert f"4 of the last {healthchecks._TREND_WINDOW}" in check.message, check
+    assert f"4 of the last {health.TREND_WINDOW}" in check.message, check
 
 
 def test_too_few_usable_records_skip_the_trend_naming_both_counts(tmp_path: Path):
@@ -1458,7 +1458,7 @@ def test_too_few_usable_records_skip_the_trend_naming_both_counts(tmp_path: Path
         record["capture_mark"] = {"timestamp": "x"}
     check = _by_id(health.run(cfg, history=history, now=_T0), "capture_progress")
     assert check.level == "skip", check
-    assert f"1 of the last {healthchecks._TREND_WINDOW}" in check.message, check   # usable
+    assert f"1 of the last {health.TREND_WINDOW}" in check.message, check   # usable
     assert f"at least {healthchecks._TREND_MIN}" in check.message, check           # required
     assert "capture_mark" in check.message, check                            # what was unusable
     assert check.fix is None, check
@@ -1468,7 +1468,7 @@ def test_too_few_usable_records_skip_the_trend_naming_both_counts(tmp_path: Path
         record["capture_mark"] = {"timestamp": "x"}
     measured = _by_id(health.run(cfg, history=two, now=_T0), "capture_progress")
     assert measured.level == "fail", measured
-    assert f"2 of the last {healthchecks._TREND_WINDOW}" in measured.message, measured
+    assert f"2 of the last {health.TREND_WINDOW}" in measured.message, measured
 
 
 def test_no_history_is_not_the_same_as_an_empty_journal(tmp_path: Path):
@@ -1489,8 +1489,8 @@ def test_a_supplied_but_short_history_still_counts_its_runs(tmp_path: Path):
     short = health.run(cfg, history=_runs(2), now=_T0)
     empty = health.run(cfg, history=[], now=_T0)
     for check_id in ("anchor_delivery", "capture_progress"):
-        assert f"2 of {healthchecks._TREND_WINDOW} runs journalled" in _by_id(short, check_id).message
-        assert f"0 of {healthchecks._TREND_WINDOW} runs journalled" in _by_id(empty, check_id).message
+        assert f"2 of {health.TREND_WINDOW} runs journalled" in _by_id(short, check_id).message
+        assert f"0 of {health.TREND_WINDOW} runs journalled" in _by_id(empty, check_id).message
 
 
 def test_a_fresh_project_is_not_told_the_stop_hook_is_broken(tmp_path: Path):
@@ -1516,9 +1516,9 @@ def test_the_anchor_block_name_is_one_constant_shared_with_the_record(tmp_path: 
     this check permanently. So the name is a constant, and the vocabulary is spelled out in the
     docstring that caller reads."""
     cfg = _healthy(tmp_path)
-    history = _runs(5, blocks=(healthchecks._ANCHOR_BLOCK,))
+    history = _runs(5, blocks=(health.ANCHOR_BLOCK,))
     assert _by_id(health.run(cfg, history=history, now=_T0), "anchor_delivery").level == "ok"
-    for name in ("health_demand", "sleep_demand", healthchecks._ANCHOR_BLOCK, "digest"):
+    for name in ("health_demand", "sleep_demand", health.ANCHOR_BLOCK, "digest"):
         assert name in (health.record.__doc__ or ""), name
 
 

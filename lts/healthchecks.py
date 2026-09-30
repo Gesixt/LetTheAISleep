@@ -43,12 +43,15 @@ _CAPTURE_TOLERANCE = timedelta(minutes=10)
 # than the note it just wrote.
 _ANCHOR_SKEW = timedelta(minutes=2)
 # How many journalled runs a trend looks at. Five compactions is days of work in a continuous
-# session — long enough that a one-off is not a trend, short enough to notice within a day.
-_TREND_WINDOW = 5
+# session — long enough that a one-off is not a trend, short enough to notice within a day. Public,
+# and re-exported by `lts.health`: the callers that must hand `history` to `all_checks` have to read
+# exactly this many records, so this is part of the interface, not an internal.
+TREND_WINDOW = 5
 # The block name `_check_anchor_delivery` looks for in a journal record: a constant because the hook
 # calling `record` decides the names it passes, and a typo there would fail the check for ever.
-# `record`'s docstring spells the whole vocabulary for that caller.
-_ANCHOR_BLOCK = "anchor"
+# `record`'s docstring spells the whole vocabulary for that caller. Public for the same reason as
+# `TREND_WINDOW` — the `SessionStart` hook has to name this block, so the name is an interface.
+ANCHOR_BLOCK = "anchor"
 # The directories `doctor.find_sidecars` does not enter, spelled out for the one message that makes
 # an absence claim: a vendored repository with its own `.ai_memory` is invisible to that walk, and
 # "no stray sidecars" said nothing about the limit.
@@ -76,9 +79,13 @@ def all_checks(
 ) -> list[Check]:
     """Every check this module can make about `cfg`, in the order the report states them.
 
-    The one public entry point. The checks and the helpers they own stay private, so the interface
-    between this module and `lts.health` is `Check` plus this function — a surface that is free to
-    settle now, while nothing outside the tests calls it.
+    The one public entry point for making a check. The checks and the helpers they own stay private,
+    so this module's whole surface is `Check`, this function, and the two constants its callers must
+    name to use it: `TREND_WINDOW`, the number of journal records a trend needs, and `ANCHOR_BLOCK`,
+    the block name `_check_anchor_delivery` matches in those records. All four are re-exported by
+    `lts.health`, which is the module its consumers already import — `lts.cli` and the `SessionStart`
+    hook used to reach in here for the two constants by their private names, which made that surface
+    larger than the sentence above it admitted.
 
     `now` is normalised here because every check that compares anything mixes a caller's `now` with
     a mark parsed out of a file, and one naive operand raises rather than answering. The order is
@@ -873,15 +880,15 @@ def _readable(run: dict, field: str) -> bool:
 
 def _trend_scope(usable: int) -> str:
     """The window a trend actually read, for a message that may claim no more than was measured."""
-    if usable == _TREND_WINDOW:
-        return f"the last {_TREND_WINDOW} sessions"
-    return f"the {usable} of the last {_TREND_WINDOW} sessions whose records could be read"
+    if usable == TREND_WINDOW:
+        return f"the last {TREND_WINDOW} sessions"
+    return f"the {usable} of the last {TREND_WINDOW} sessions whose records could be read"
 
 
 def _trend_window(
     history: list[dict] | None, check_id: str, *fields: str
 ) -> tuple[list[dict], Check | None]:
-    """The records of the last `_TREND_WINDOW` that are readable on `fields`, or the `skip` saying
+    """The records of the last `TREND_WINDOW` that are readable on `fields`, or the `skip` saying
     why there is no trend to read.
 
     `history is None` and an empty journal are different facts and must not share a message: if the
@@ -890,7 +897,7 @@ def _trend_window(
     fault, and there is nothing the reader of the report can do about it.
 
     An unreadable record is dropped, not fatal to the check: skipping the whole trend would blind
-    it for `_TREND_WINDOW` sessions over one corrupt line, which breaks `lts.journal`'s promise
+    it for `TREND_WINDOW` sessions over one corrupt line, which breaks `lts.journal`'s promise
     that a bad line costs itself and never the history. The caller states how many records it
     measured, via `_trend_scope`, so the claim never covers records that were not read.
     """
@@ -898,18 +905,18 @@ def _trend_window(
         return [], Check(check_id, "skip",
                          "no journal history was supplied to this run — the trend was not measured")
     runs = list(history)
-    if len(runs) < _TREND_WINDOW:
+    if len(runs) < TREND_WINDOW:
         return [], Check(check_id, "skip",
-                         f"{len(runs)} of {_TREND_WINDOW} runs journalled — the trend needs "
-                         f"{_TREND_WINDOW}")
-    recent = runs[-_TREND_WINDOW:]
+                         f"{len(runs)} of {TREND_WINDOW} runs journalled — the trend needs "
+                         f"{TREND_WINDOW}")
+    recent = runs[-TREND_WINDOW:]
     usable = [run for run in recent if all(_readable(run, field) for field in fields)]
     if len(usable) < _TREND_MIN:
         # No `fix`: nothing the reader can do makes these records readable, and the next runs write
         # well-formed ones by themselves. The fields are named so the reader knows what was unusable.
         named = ", ".join(f"`{field}`" for field in fields)
         return [], Check(check_id, "skip",
-                         f"only {len(usable)} of the last {_TREND_WINDOW} journal records could be "
+                         f"only {len(usable)} of the last {TREND_WINDOW} journal records could be "
                          f"read on {named} — a trend needs at least {_TREND_MIN}")
     return usable, None
 
@@ -935,7 +942,7 @@ def _check_anchor_delivery(cfg: Config, history: list[dict] | None) -> Check:
     if no_trend is not None:
         return no_trend
     scope = _trend_scope(len(usable))
-    if any(_ANCHOR_BLOCK in (run.get("blocks") or []) for run in usable):
+    if any(ANCHOR_BLOCK in (run.get("blocks") or []) for run in usable):
         return Check("anchor_delivery", "ok", f"the anchor reached the model within {scope}")
     if not anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))):
         # No `fix`: nothing is broken and nothing is owed here. `render` prints "Fix:" under every

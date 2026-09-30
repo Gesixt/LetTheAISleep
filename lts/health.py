@@ -26,7 +26,13 @@ from pathlib import Path
 from lts import healthchecks, paths, status, watermark
 from lts.config import Config
 # `Check` lives with the checks that build it; the import is one-way, so there is no cycle.
-from lts.healthchecks import Check
+# `TREND_WINDOW` and `ANCHOR_BLOCK` are re-exported deliberately, not incidentally: a caller of
+# `run` has to read exactly `TREND_WINDOW` journal records for the trend checks to measure anything,
+# and a caller of `record` has to name the anchor block `ANCHOR_BLOCK` for `_check_anchor_delivery`
+# to find it. Both facts belong to this module's contract, so they are reachable from here instead
+# of through `healthchecks`' private names, which `lts.cli` and the `SessionStart` hook were both
+# reaching into.
+from lts.healthchecks import ANCHOR_BLOCK, Check, TREND_WINDOW
 
 # Worst first. `skip` outranks `ok` because a check that did not run is not a check that passed.
 _ORDER = ("fail", "warn", "skip", "ok")
@@ -151,7 +157,7 @@ def record(
     `blocks` is the load-bearing field: it states which blocks the calling hook emitted, which is
     not recoverable from the filesystem afterwards and is the only way `_check_anchor_delivery`
     can work at all. Its vocabulary is fixed, because that check matches names: the `SessionStart`
-    hook passes `health_demand`, `sleep_demand`, `anchor` (`_ANCHOR_BLOCK`) and `digest`, one per
+    hook passes `health_demand`, `sleep_demand`, `anchor` (`ANCHOR_BLOCK`) and `digest`, one per
     block it emitted, and it is the only caller. A name outside that vocabulary is recorded and
     never read.
     """

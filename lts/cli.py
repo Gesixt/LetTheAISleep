@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import (anchor, digest, health, healthchecks, journal, memorymap, naming, paths,
+from lts import (anchor, digest, health, journal, memorymap, naming, paths,
                  pending, status, stm, sync, transcript, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
@@ -211,7 +211,7 @@ def _run(args) -> int:
         checks = health.run(
             cfg,
             transcript_path=Path(args.transcript) if args.transcript else None,
-            history=journal.tail(paths.health_journal_file(cfg), healthchecks._TREND_WINDOW)
+            history=journal.tail(paths.health_journal_file(cfg), health.TREND_WINDOW)
             if cfg.configured else None,
         )
         if args.json:
