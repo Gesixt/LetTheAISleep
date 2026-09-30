@@ -782,13 +782,20 @@ def _check_capture_progress(history: list[dict] | None) -> Check:
                                            ("the STM buffer grew", grew)) if seen]
         return Check("capture_progress", "ok", f"{' and '.join(signals)} in {scope}")
     if marks == {None}:
-        # A fresh project's first runs record no mark at all: same direction, but blaming the Stop
-        # hook misattributes it — nothing was captured because nothing has happened yet.
-        return Check("capture_progress", "fail",
+        # A fresh project's first runs record no mark at all — and so do the runs of a project
+        # whose Stop hook has been dead since it was installed. From the journal the two are the
+        # same five records: no mark anywhere and a flat buffer. The branch is right to separate
+        # them from a frozen mark, which does prove a hook ran once; its old `fail` was not, and
+        # neither was its fix line opening "expected before the first exchange" — a `fail` is a
+        # demand that says memory may be lying, and this one asserted which of two indistinguishable
+        # states it was looking at. `skip` is this module's word for a state it could not measure,
+        # and the state that *is* measurable from here is the `hooks` check's, not this one's.
+        return Check("capture_progress", "skip",
                      f"no capture mark was recorded in any of {scope} and the buffer has not "
-                     "grown — nothing has been captured here yet",
-                     "expected before the first exchange; if these sessions had exchanges, check "
-                     "/tmp/lts-hook-errors.log and the hooks check above")
+                     "grown — either nothing has been captured here yet, or the Stop hook has "
+                     "never written a mark; these records cannot tell the two apart",
+                     "if these sessions had exchanges, see the hooks check above and "
+                     "/tmp/lts-hook-errors.log")
     return Check("capture_progress", "fail",
                  f"the capture mark has been frozen at {next(iter(marks))!r} and the buffer has "
                  f"not grown in {scope} — the Stop hook is not capturing",

@@ -1149,12 +1149,16 @@ def test_a_supplied_but_short_history_still_counts_its_runs(tmp_path: Path):
 
 def test_a_fresh_project_is_not_told_the_stop_hook_is_broken(tmp_path: Path):
     """Five SessionStart runs before the first exchange record `capture_mark: None` every time and
-    a flat buffer. The direction is right and the attribution is not: nothing has been captured
-    because nothing has happened, so the two states are named apart."""
+    a flat buffer — and so do five runs of a project whose Stop hook died on install. From the
+    journal the two are the same records, so the check names both and demands neither; only the
+    frozen mark, which proves a hook ran once, is a demand."""
     cfg = _healthy(tmp_path)
     fresh = _by_id(health.run(cfg, history=_runs(5, mark=None), now=_T0), "capture_progress")
-    assert fresh.level == "fail", fresh
+    assert fresh.level == "skip", fresh
     assert "no capture mark" in fresh.message, fresh
+    assert "nothing has been captured here yet" in fresh.message, fresh   # the benign reading
+    assert "the Stop hook has never written a mark" in fresh.message, fresh   # and the other one
+    assert "hooks check" in (fresh.fix or ""), fresh
     assert "the Stop hook is not capturing" not in fresh.message, fresh
     frozen = _by_id(health.run(cfg, history=_runs(5, mark="FROZEN"), now=_T0), "capture_progress")
     assert frozen.level == "fail", frozen
