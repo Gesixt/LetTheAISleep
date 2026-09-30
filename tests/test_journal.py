@@ -69,16 +69,66 @@ def test_a_truncated_write_costs_only_itself(tmp_path: Path):
     assert '{"event": "trunca\n' in log.read_text(encoding="utf-8")
 
 
+# One record exactly as `health.record` writes it, copied from this project's own `health.jsonl`
+# on 2026-09-30 (read through `lts.paths.health_journal_file`). The six records in that file were
+# 465-469 bytes, 468 on average; this is the smallest of them. Its size is what `_KEEP` and
+# `_MAX_BYTES` are sized against, so it is pinned here rather than described in a comment.
+_MEASURED_RECORD = {
+    "at": "2026-09-29T14:40:08.110Z",
+    "event": "session_start",
+    "blocks": ["sleep_demand", "anchor", "digest"],
+    "checks": {"config": "ok", "sidecars": "ok", "hooks": "ok", "vault": "ok", "marks": "ok",
+               "capture": "skip", "pressure": "skip", "anchor_fresh": "ok",
+               "anchor_delivery": "ok", "capture_progress": "ok"},
+    "stm_entries": 122,
+    "stm_bytes": 93852,
+    "capture_mark": "2026-09-29T14:37:19.246Z",
+    "sleep_mark": "2026-09-25T13:07:35.592Z",
+    "pending": 0,
+    "notes": 20,
+}
+_MEASURED_BYTES = 469      # the widest of the six, the one the bound must hold for
+
+
+def test_a_record_is_the_size_the_bound_was_computed_from():
+    """If the record grows, the arithmetic behind `_MAX_BYTES` stops holding — say so here."""
+    assert len(json.dumps(_MEASURED_RECORD, ensure_ascii=False)) + 1 == 465
+    assert _MEASURED_BYTES >= 465
+
+
+def test_the_threshold_sits_above_the_steady_state_keep_implies():
+    """`_MAX_BYTES` must bound the file, not merely trigger a trim that then never stops.
+
+    With `_KEEP` records costing more than `_MAX_BYTES`, `st_size > _MAX_BYTES` is true on every
+    append once the log is full, and the trim becomes a whole-file rewrite on every /compact. The
+    two constants have to be read together, so they are asserted together.
+    """
+    steady = journal._KEEP * _MEASURED_BYTES
+    assert steady == 93_800                                     # 91.6 KiB of history
+    assert steady < journal._MAX_BYTES                          # under a 128 KiB ceiling
+    headroom = (journal._MAX_BYTES - steady) // _MEASURED_BYTES
+    assert headroom == 79, headroom     # ~79 appends between trims, not one trim per append
+
+
 def test_the_log_is_bounded_by_construction(tmp_path: Path):
-    """It is appended to on every compaction forever, so it must never grow without limit."""
+    """It is appended to on every compaction forever, so it must never grow without limit.
+
+    Two numbers, in the two directions that matter: `_MAX_BYTES` is the ceiling on the file and
+    `_KEEP` is the floor on the history. `assert len(kept) <= _KEEP` used to stand here and was
+    the wrong shape — it held only because the trim fired on *every* append, which is the defect
+    this pair of constants was corrected to remove. Between trims the file legitimately holds more
+    than `_KEEP` records; what it must never do is exceed `_MAX_BYTES` or fall below `_KEEP`.
+    """
     log = tmp_path / "health.jsonl"
     padding = "x" * 400
-    for i in range(400):
+    for i in range(700):
         journal.append(log, {"event": str(i), "pad": padding})
     kept = journal.tail(log, 10_000)
-    assert len(kept) <= journal._KEEP
-    assert kept[-1]["event"] == "399"          # the newest survives
-    assert log.stat().st_size < journal._MAX_BYTES * 2
+    # No slack: the `* 2` this line used to carry was the room that existed because `_KEEP`
+    # records did not in fact fit beneath `_MAX_BYTES`. They do now.
+    assert log.stat().st_size <= journal._MAX_BYTES
+    assert len(kept) >= journal._KEEP          # the depth the trim promises to leave behind
+    assert kept[-1]["event"] == "699"          # the newest survives
 
 
 def test_a_failed_trim_costs_the_trim_and_not_the_history(tmp_path: Path):

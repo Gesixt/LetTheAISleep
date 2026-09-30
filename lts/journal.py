@@ -17,10 +17,26 @@ from pathlib import Path
 
 from lts import watermark
 
-# A record is 200-400 bytes, so _KEEP records sit just under _MAX_BYTES. 200 runs is 200
-# compactions, which in a months-long session is months of history — enough for a trend, and
-# bounded forever without a rotation policy anyone has to configure.
-_MAX_BYTES = 64 * 1024
+# 200 runs is 200 compactions, which in a months-long session is months of history — enough for a
+# trend, and bounded forever without a rotation policy anyone has to configure.
+#
+# The pair is sized from a measurement, not an estimate. Measured 2026-09-30 on this project's own
+# `health.jsonl` (6 records, read through `lts.paths.health_journal_file`): **465-469 bytes per
+# record, 468 on average**. The bulk is `health.record`'s fixed payload — the ten check `id: level`
+# pairs are 201 B on their own and the three ISO-8601 stamps another 114 B — so the size is a
+# property of the record's shape and barely varies. The first draft of this comment guessed
+# "200-400 bytes, so _KEEP records sit just under _MAX_BYTES", against a 64 KiB threshold. Both
+# halves were wrong: 200 x 469 B is 91.6 KiB, 1.43x that threshold, and only 139 records fit
+# beneath it. `_MAX_BYTES` was therefore not bounding the file at all — it bounded the *trigger*,
+# and once 200 records existed `st_size > _MAX_BYTES` was true on every append, turning the trim
+# from an occasional event into a ~92 KiB read-and-rewrite on every single /compact, for ever.
+#
+# So the threshold is set above the steady state `_KEEP` implies, which is what makes it a ceiling:
+# 200 x 469 B = 91.6 KiB of steady state under a 128 KiB threshold leaves 36.4 KiB of headroom,
+# i.e. ~79 appends between trims. The file never exceeds `_MAX_BYTES`, and the trim is rare again.
+# The alternative was `_KEEP` ~= 130 to fit 64 KiB, which would have silently shortened the history
+# this log exists to hold.
+_MAX_BYTES = 128 * 1024
 _KEEP = 200
 
 
