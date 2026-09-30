@@ -314,15 +314,31 @@ def test_a_check_that_raises_costs_its_own_answer_and_not_the_other_nine(monkeyp
     assert "vault" in health.demand(checks)
 
 
-def test_the_unverified_hook_message_quotes_the_command_it_could_not_read(tmp_path: Path):
-    """An empty `command` rendered "no script to check in: Stop -> " — a sentence ending at an
-    arrow, showing the reader nothing of what was wrong. `_unusable_transcript` quotes for the
-    same reason: a whitespace value otherwise prints as an empty tail."""
+def test_an_empty_hook_command_fails_and_an_unparseable_one_skips(tmp_path: Path):
+    """The two states are different verdicts, and the message has to tell them apart.
+
+    An empty or whitespace `command` is a wiring that *cannot run*: that event is dead, and it is
+    established, not unmeasurable. It used to land in the `unreadable` bucket and therefore in
+    `skip`, so `lts doctor` exited 0 on a hook wired at nothing — measured 2026-09-30: level
+    `skip`, `worst` `skip`, exit 0 — and `/memory-status` learned only that something had skipped.
+    `skip` still belongs to the command from which no script path can be parsed at all: a wrapper
+    or a shell one-liner may be legitimate wiring nobody can verify from here.
+
+    The commands are quoted for the reason `_unusable_transcript` quotes a path: an empty value
+    otherwise rendered as "no script to check in: Stop -> ", a sentence ending at an arrow.
+    """
     for command, shown in ((" ", "' '"), ("", "''")):
-        cfg = _wired_project(tmp_path / f"c{len(command)}", {"Stop": command})
+        cfg = _wired_project(tmp_path / f"empty{len(command)}", {"Stop": command})
         check = _by_id(health.run(cfg, now=_T0), "hooks")
-        assert check.level == "skip", (command, check)
+        assert check.level == "fail", (command, check)
+        assert "empty command" in check.message, (command, check)
         assert f"Stop -> {shown}" in check.message, (command, check)
+
+    wrapper = _wired_project(tmp_path / "wrapper", {"Stop": "bash -c 'run-the-hook'"})
+    check = _by_id(health.run(wrapper, now=_T0), "hooks")
+    assert check.level == "skip", check
+    assert "no script to check in" in check.message, check
+    assert "empty command" not in check.message, check
 
 
 def test_a_missing_vault_fails_but_an_empty_one_only_warns(tmp_path: Path):
@@ -355,6 +371,26 @@ def test_a_quoted_interpreter_does_not_hide_a_missing_script(tmp_path: Path):
     check = _by_id(health.run(cfg), "hooks")
     assert check.level == "fail", check
     assert "Stop" in check.message and "stop.py" in check.message
+
+
+def test_an_unbalanced_quote_still_yields_the_script_it_quotes(tmp_path: Path):
+    """`_tokens` falls back on a `shlex.split` that raised, and that fallback was pinned by nothing.
+
+    Replacing the `except ValueError` body with `return []` left all 351 tests green (measured
+    2026-09-30), so the recovery could have been deleted without a word from the suite. A
+    hand-edited wiring with one stray quote is the ordinary way in, and what the fallback buys is
+    the balanced quoted groups: the script is still found, so the check verifies it instead of
+    reporting a hook it could not read.
+    """
+    assert healthchecks._tokens('python3 "/x/stop.py" --extra "oops') == [
+        "/x/stop.py", "python3", "--extra", '"oops',
+    ]
+    script = tmp_path / "tools" / "stop.py"
+    cfg = _wired_project(tmp_path, {"Stop": f'python3 "{script}" --extra "oops'})
+    check = _by_id(health.run(cfg), "hooks")
+    # Without the fallback there is no `.py` token, so this would be "no script to check in" — a
+    # `skip` about a hook that is in fact wired at the right, present script.
+    assert check.level == "ok", check
 
 
 def test_a_wrapper_command_is_reported_as_unverified_not_as_healthy(tmp_path: Path):

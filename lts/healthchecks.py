@@ -311,16 +311,27 @@ def _check_hooks(cfg: Config) -> Check:
     gone: list[str] = []
     wrong: list[str] = []
     unreadable: list[str] = []
+    empty: list[str] = []
     for event, commands in wired.items():
         expected = sync.HOOK_EVENTS.get(event)
         if expected is None:
             continue
         for command in commands:
+            # An empty or whitespace `command` is separated from a command that merely cannot be
+            # parsed, because the two are different verdicts. Nothing runs when the command is
+            # blank: that event is dead, which is established rather than unmeasurable, so it is a
+            # `fail`. It used to land in `unreadable` and therefore in `skip`, and `lts doctor`
+            # exited 0 on a hook wired at nothing while `/memory-status` was told only that some
+            # check had skipped. `skip` stays for the genuinely unmeasurable case below — a
+            # wrapper or shell one-liner naming no script this check can find.
+            if not str(command).strip():
+                empty.append(f"{event} -> {command!r}")
+                continue
             script = _script_path(command)
             if script is None:
-                # Quoted, the way `cli._unusable_transcript` quotes a path it could not use: an
-                # empty or whitespace `command` rendered as "no script to check in: Stop -> ",
-                # a sentence that stops at an arrow and shows the reader nothing.
+                # Quoted, the way `cli._unusable_transcript` quotes a path it could not use: a
+                # command shown bare rendered as "no script to check in: Stop -> ", a sentence
+                # that stops at an arrow and shows the reader nothing.
                 unreadable.append(f"{event} -> {command!r}")
             elif script.name != expected:
                 wrong.append(f"{event} -> {script.name}, expected {expected}")
@@ -333,6 +344,8 @@ def _check_hooks(cfg: Config) -> Check:
     parts = []
     if missing:
         parts.append("not wired: " + ", ".join(missing))
+    if empty:
+        parts.append("wired at an empty command, so nothing runs: " + "; ".join(sorted(empty)))
     if gone:
         parts.append("no script file at: " + "; ".join(sorted(gone)))
     if wrong:
@@ -341,7 +354,7 @@ def _check_hooks(cfg: Config) -> Check:
         parts.append("unexpected wiring shape: " + "; ".join(sorted(malformed)))
     if unreadable:
         parts.append("no script to check in: " + "; ".join(sorted(unreadable)))
-    if missing or gone or wrong or malformed:
+    if missing or empty or gone or wrong or malformed:
         return Check(
             "hooks", "fail", "; ".join(parts),
             "`git -C ~/tools/LetTheAISleep pull` then `lts update`; re-run install.py if the "

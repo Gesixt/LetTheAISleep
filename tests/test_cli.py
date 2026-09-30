@@ -359,6 +359,26 @@ def test_doctor_exits_zero_when_the_worst_check_is_a_warning(tmp_path: Path, cap
     assert code == 0
 
 
+def test_doctor_exits_nonzero_on_a_hook_wired_at_an_empty_command(tmp_path: Path, capsys):
+    """A hook wired at nothing must not exit 0. The exit contract is unchanged: only `fail` exits 1.
+
+    Measured 2026-09-30 before the fix: the empty `command` landed in the hooks check's
+    unverifiable bucket, so `worst` was `skip` and this command exited 0 — a dead Stop hook
+    reported as nothing worse than an unmeasured state. `warn` still exits 0 deliberately
+    (`test_doctor_exits_zero_when_the_worst_check_is_a_warning`); what changed is the level of a
+    wiring that cannot run, not what the exit code means.
+    """
+    from tests.test_health import _wired_project
+    _wired_project(tmp_path, {"Stop": "  "})
+    code = main(["doctor", "--root", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    hooks = next(c for c in payload["checks"] if c["id"] == "hooks")
+    assert hooks["level"] == "fail", payload
+    assert "empty command" in hooks["message"], hooks
+    assert payload["worst"] == "fail"
+    assert code == 1
+
+
 def test_doctor_transcript_reaches_the_capture_check(tmp_path: Path, capsys):
     """`capture` skips without a transcript, so only a state that gives it one discriminates.
 
