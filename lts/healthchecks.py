@@ -175,13 +175,60 @@ def _check_hooks(cfg: Config) -> Check:
         return Check("hooks", "fail", f"{settings} is unreadable: {exc}",
                      "fix or delete it, then run `lts update`")
 
-    wired: dict[str, list[str]] = {}
-    for event, groups in (data.get("hooks") or {}).items():
-        for group in groups or []:
-            for hook in group.get("hooks") or []:
-                wired.setdefault(event, []).append(hook.get("command", ""))
+    # Shape, before anything is read out of it. Claude Code's wiring is
+    # `{"hooks": {<event>: [{"hooks": [{"command": str}]}]}}`, and this file is hand-edited: any
+    # other valid-JSON shape used to raise `AttributeError` out of this loop, which `all_checks`
+    # then propagated, so a single misplaced brace cost all ten checks their answer and, in
+    # `SessionStart`, removed the health block and the journal record silently and for ever. The
+    # `json.JSONDecodeError` above is the same class of fault and has always been a `fail`; so is
+    # this.
+    if not isinstance(data, dict):
+        return Check("hooks", "fail",
+                     f"{settings} holds a JSON {type(data).__name__}, not an object",
+                     "fix or delete it, then run `lts update`")
+    events = data.get("hooks") or {}
+    if not isinstance(events, dict):
+        return Check(
+            "hooks", "fail",
+            f"the `hooks` section of {settings} is a {type(events).__name__}, not an object "
+            f"mapping event names to hook groups: {events!r}",
+            "fix or delete it, then run `lts update`",
+        )
 
-    missing = [event for event in sync.HOOK_EVENTS if event not in wired]
+    wired: dict[str, list[str]] = {}
+    malformed: list[str] = []
+    for event, groups in events.items():
+        if not isinstance(groups, list):
+            malformed.append(f"{event}: a {type(groups).__name__}, not a list of hook groups")
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                malformed.append(f"{event}: a hook group that is a {type(group).__name__}, "
+                                 f"not an object: {group!r}")
+                continue
+            hooks = group.get("hooks") or []
+            if not isinstance(hooks, list):
+                malformed.append(f"{event}: `hooks` is a {type(hooks).__name__}, not a list: "
+                                 f"{hooks!r}")
+                continue
+            for hook in hooks:
+                if not isinstance(hook, dict):
+                    malformed.append(f"{event}: a hook that is a {type(hook).__name__}, not an "
+                                     f"object: {hook!r}")
+                    continue
+                command = hook.get("command", "")
+                if not isinstance(command, str):
+                    # `_tokens` calls `shlex.split`, which raises on anything but a string.
+                    malformed.append(f"{event}: `command` is a {type(command).__name__}, not a "
+                                     f"string: {command!r}")
+                    continue
+                wired.setdefault(event, []).append(command)
+
+    # An event whose wiring could not be read is not an event that is "not wired": that sentence
+    # would be a claim this check cannot make about it, and the shape is reported instead.
+    unreadable_events = {entry.split(":", 1)[0] for entry in malformed}
+    missing = [event for event in sync.HOOK_EVENTS
+               if event not in wired and event not in unreadable_events]
     gone: list[str] = []
     wrong: list[str] = []
     unreadable: list[str] = []
@@ -205,9 +252,11 @@ def _check_hooks(cfg: Config) -> Check:
         parts.append("script missing: " + "; ".join(sorted(gone)))
     if wrong:
         parts.append("wrong script: " + "; ".join(sorted(wrong)))
+    if malformed:
+        parts.append("unexpected wiring shape: " + "; ".join(sorted(malformed)))
     if unreadable:
         parts.append("no script to check in: " + "; ".join(sorted(unreadable)))
-    if missing or gone or wrong:
+    if missing or gone or wrong or malformed:
         return Check(
             "hooks", "fail", "; ".join(parts),
             "`git -C ~/tools/LetTheAISleep pull` then `lts update`; re-run install.py if the "

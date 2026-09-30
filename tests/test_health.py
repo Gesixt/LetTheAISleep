@@ -204,6 +204,52 @@ def test_unreadable_settings_fails_rather_than_passing_quietly(tmp_path: Path):
     assert _by_id(health.run(cfg), "hooks").level == "fail"
 
 
+def test_valid_json_of_the_wrong_shape_fails_hooks_and_costs_no_other_check(tmp_path: Path):
+    """settings.json is hand-edited, and every shape below used to raise out of `_check_hooks`.
+
+    `all_checks` propagated it, so `lts doctor` printed a traceback instead of a report and the
+    `SessionStart` hook — whose `try` keeps the anchor and the digest — lost the health block and
+    the journal record silently, on every run, which then starved the trend checks. So: all ten
+    checks are still answered, and the one that could not read the file names the shape it found.
+    """
+    shapes = [
+        ({"hooks": {"Stop": {"hooks": [{"command": "python3 x.py"}]}}}, "not a list of hook groups"),
+        ({"hooks": [{"Stop": []}]}, "not an object mapping event names"),
+        ({"hooks": "Stop"}, "not an object mapping event names"),
+        ({"hooks": {"Stop": ["python3 x.py"]}}, "not an object"),
+        ({"hooks": {"Stop": [{"hooks": "python3 x.py"}]}}, "not a list"),
+        ({"hooks": {"Stop": [{"hooks": ["python3 x.py"]}]}}, "not an object"),
+        ({"hooks": {"Stop": [{"hooks": [{"command": 7}]}]}}, "not a string"),
+        ([{"hooks": {}}], "not an object"),
+    ]
+    for i, (shape, said) in enumerate(shapes):
+        cfg = _healthy(tmp_path / f"shape{i}")
+        settings = cfg.project_root / ".claude" / "settings.json"
+        settings.write_text(json.dumps(shape), encoding="utf-8")
+        checks = health.run(cfg, now=_T0)
+        assert [c.id for c in checks] == list(health._IDS), shape
+        check = _by_id(checks, "hooks")
+        assert check.level == "fail", (shape, check)
+        assert said in check.message, (shape, check)
+        # The other nine still answered, and none of them is the raise-report from `_answered`.
+        for other in checks:
+            assert "raised" not in other.message, (shape, other)
+        assert _by_id(checks, "vault").level == "ok", (shape, checks)
+
+
+def test_an_event_whose_wiring_cannot_be_read_is_not_reported_as_not_wired(tmp_path: Path):
+    """"not wired: Stop" is a claim about the file, and the file does wire Stop — unreadably."""
+    cfg = _healthy(tmp_path)
+    settings = cfg.project_root / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["hooks"]["Stop"] = "python3 stop.py"
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    check = _by_id(health.run(cfg, now=_T0), "hooks")
+    assert check.level == "fail", check
+    assert "not wired" not in check.message, check
+    assert "Stop: a str, not a list of hook groups" in check.message, check
+
+
 def test_a_missing_vault_fails_but_an_empty_one_only_warns(tmp_path: Path):
     """A fresh project is legitimately empty; a vanished vault is not."""
     gone = _cfg(tmp_path / "a")
