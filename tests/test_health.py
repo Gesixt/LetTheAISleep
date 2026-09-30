@@ -107,6 +107,29 @@ def test_worst_orders_failure_above_everything(tmp_path: Path):
     assert health.worst([]) == "ok"
 
 
+def test_a_level_nobody_can_interpret_is_the_most_severe_thing_present():
+    """A typo in a level string must not read as a healthy system.
+
+    `worst` walked the four known levels, matched none, and fell through to `"ok"`: measured
+    2026-09-30, `worst([Check("x", "boom", "m")])` was `"ok"`, `demand` was `""` and `render`
+    printed `? x: m` *below* the checks that passed — so `lts doctor` exited 0 on a report it could
+    not read. This is the subsystem's own defect class in the function that decides the exit code.
+    """
+    unreadable = health.Check("x", "boom", "m", "f")
+    ok = health.Check("y", "ok", "fine")
+    fail = health.Check("z", "fail", "broken")
+    # "fail", not "boom": every caller compares the answer against the four known levels, and
+    # `lts.cli` turns `== "fail"` into the exit code.
+    assert health.worst([ok, unreadable]) == "fail"
+    assert health.worst([ok, unreadable, fail]) == "fail"
+    # The demand agrees with the exit code rather than staying silent about it.
+    assert "x: m" in health.demand([ok, unreadable])
+    assert "1 check FAILED" in health.demand([ok, unreadable])
+    # Worst first: it leads the report instead of sitting under the passing checks.
+    lines = health.render([ok, unreadable]).splitlines()
+    assert lines[1].strip().startswith("? x:"), lines
+
+
 def test_a_demand_names_every_failure_and_its_fix(tmp_path: Path):
     checks = [
         health.Check("hooks", "fail", "the Stop hook script is missing", "run lts update"),

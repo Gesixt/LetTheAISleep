@@ -51,8 +51,30 @@ _DEMAND_HEAD = (
 )
 
 
+def _uninterpretable(check: Check) -> bool:
+    """True when this check's level is not one of the four this module can read.
+
+    A level outside `_ORDER` is this subsystem's own defect class turned on itself: `worst`
+    iterated the four known levels, matched none, and fell through to `"ok"`, so a typo in a level
+    string — `Check("x", "boom", ...)` — reported a healthy system and `lts doctor` exited 0. The
+    same value produced `demand() == ""` and sorted *below* the passing checks in `render`.
+
+    So an unreadable level ranks as the most severe thing present, not the least: nothing about
+    such a check has been established, least of all that what it measures is fine.
+    """
+    return check.level not in _ORDER
+
+
 def worst(checks: list[Check]) -> str:
-    """The most serious level present, or "ok" when there is nothing to report."""
+    """The most serious level present, or "ok" when there is nothing to report.
+
+    A level this module cannot interpret answers `"fail"` — the most serious level in its
+    vocabulary — rather than the level's own text, because every caller compares the answer against
+    that vocabulary: `lts.cli` derives the exit code from `== "fail"`, and handing it a word it has
+    never heard of would exit 0 on a report it could not read.
+    """
+    if any(_uninterpretable(c) for c in checks):
+        return "fail"
     for level in _ORDER:
         if any(c.level == level for c in checks):
             return level
@@ -62,7 +84,9 @@ def worst(checks: list[Check]) -> str:
 def render(checks: list[Check]) -> str:
     rank = {level: i for i, level in enumerate(_ORDER)}
     lines = ["Memory health"]
-    for check in sorted(checks, key=lambda c: rank.get(c.level, len(_ORDER))):
+    # `-1` for a level outside `_ORDER`: worst first means an uninterpretable one leads the report,
+    # where it used to be printed last, under the checks that passed.
+    for check in sorted(checks, key=lambda c: rank.get(c.level, -1)):
         lines.append(f"  {_SYMBOL.get(check.level, '?')} {check.id}: {check.message}")
         if check.level != "ok" and check.fix:
             lines.append(f"      Fix: {check.fix}")
@@ -72,10 +96,12 @@ def render(checks: list[Check]) -> str:
 def demand(checks: list[Check]) -> str:
     """The block a hook injects when memory is broken, or "" when nothing failed.
 
-    Only `fail` reaches here. A warning that interrupts work gets trained away, and the failures
-    are trained away with it.
+    Only `fail` reaches here, plus a check whose level cannot be read at all — `worst` already
+    calls that a failure, and a demand that disagreed with the exit code would be a second way for
+    this report to say two things at once. A warning that interrupts work gets trained away, and
+    the failures are trained away with it.
     """
-    failed = [c for c in checks if c.level == "fail"]
+    failed = [c for c in checks if c.level == "fail" or _uninterpretable(c)]
     if not failed:
         return ""
     lines = [_DEMAND_HEAD.format(n=len(failed), s="" if len(failed) == 1 else "s")]
