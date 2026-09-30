@@ -303,14 +303,17 @@ def _check_hooks(cfg: Config) -> Check:
                 unreadable.append(f"{event} -> {command}")
             elif script.name != expected:
                 wrong.append(f"{event} -> {script.name}, expected {expected}")
-            elif not script.exists():
+            # `is_file`, not `exists`: a directory at the script's path bought "all 4 events wired,
+            # scripts present", and `python3 <a directory>` runs nothing. `cli.py` separates the
+            # two for the same reason when it validates `--transcript`.
+            elif not script.is_file():
                 gone.append(f"{event} -> {script}")
 
     parts = []
     if missing:
         parts.append("not wired: " + ", ".join(missing))
     if gone:
-        parts.append("script missing: " + "; ".join(sorted(gone)))
+        parts.append("no script file at: " + "; ".join(sorted(gone)))
     if wrong:
         parts.append("wrong script: " + "; ".join(sorted(wrong)))
     if malformed:

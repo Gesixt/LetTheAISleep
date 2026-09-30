@@ -187,6 +187,22 @@ def test_a_wired_script_that_no_longer_exists_fails(tmp_path: Path):
     assert "Stop" in check.message
 
 
+def test_a_directory_where_the_hook_script_should_be_is_not_a_present_script(tmp_path: Path):
+    """`exists()` was true for a directory named stop.py, and `python3 <a directory>` runs nothing.
+
+    "all 4 events wired, scripts present" was the message, which is the class of claim this module
+    is about. `cli.py` separates `exists` from `is_file` for the same reason on `--transcript`.
+    """
+    cfg = _healthy(tmp_path)
+    script = tmp_path / "tools" / "hooks" / sync.HOOK_EVENTS["Stop"]
+    script.unlink()
+    script.mkdir()
+    check = _by_id(health.run(cfg), "hooks")
+    assert check.level == "fail", check
+    assert "scripts present" not in check.message, check
+    assert str(script) in check.message, check
+
+
 def test_a_missing_settings_file_fails_hooks(tmp_path: Path):
     cfg = _cfg(tmp_path)
     _vault(tmp_path, {"knowledge-base": ["A"]})
