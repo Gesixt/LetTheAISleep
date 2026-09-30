@@ -92,10 +92,19 @@ def run(
 
     `metrics` is a `status.collect` result, taken as an argument so that health never recomputes
     memory load and `status.collect` stays the single place that counts it. It is not a parse
-    budget: with a transcript, the file is parsed twice for two different things — `status.collect`
-    reads its usage counters, `_check_capture` reads its exchanges — and once more in the degenerate
-    uuid branch. Supplying `metrics` moves the first parse to the caller rather than removing it, so
-    there is nothing here to optimise away. The callers are `lts doctor`, which passes a transcript
+    budget: with a transcript, the file is parsed exactly twice, for two different things —
+    `status.collect` reads its usage counters through `transcript.measure_context`, and
+    `_check_capture` reads its exchanges through `read_exchanges`. Traced 2026-09-30 by counting
+    `Path.read_text` against the transcript across a whole `run(transcript_path=...)`, in both of
+    the states that differ: two parses for a transcript with `usage` records and two for one
+    without. There is no third parse in the degenerate uuid branch — that branch works from the
+    exchanges `_check_capture` already holds, which is what `watermark.exchanges_after` taking a
+    list rather than a path is for. There *was* a third, in a state this sentence never named: a
+    transcript with no `usage` record made `measure_context` call `estimate_tokens(path)`, which
+    re-opened the file it had just read — ~1.5 s wasted on the 208 MB transcript, in precisely the
+    state where the figure is an estimate anyway. It now estimates from the text in hand, so the
+    count is two either way. Supplying `metrics` moves the first parse to the caller rather than
+    removing it, so there is nothing here to optimise away. The callers are `lts doctor`, which passes a transcript
     when it is given one, and the `SessionStart` hook, which passes none — not because a parse is
     too slow, which was asserted here for a while and is false, but because it is not worth its
     share of the budget. Measured 2026-09-29 on a 208,142,001-byte transcript (the same file was

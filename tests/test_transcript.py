@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+from unittest import mock
+
 from lts import transcript
 
 
@@ -184,3 +186,40 @@ def test_a_usage_record_summing_to_zero_is_a_measurement(tmp_path: Path):
             "cache_creation_input_tokens": 0}},
     }) + "\n" + "padding that would estimate to nonzero tokens" * 10, encoding="utf-8")
     assert transcript.measure_context(t) == (0, transcript.USAGE)
+
+
+def test_measure_context_reads_the_file_once_in_either_branch(tmp_path: Path):
+    """One parse per call, including the branch that has no usage record to read.
+
+    `measure_context` read the whole transcript looking for `usage`, and when it found none called
+    `estimate_tokens(path)`, which opened the same file again — a second full parse of bytes it had
+    just held. Traced 2026-09-30 through `health.run(transcript_path=...)`: 3 reads of the
+    transcript for a file without `usage` against 2 for one with it, the extra one from inside
+    `measure_context`. On the 208,142,001-byte transcript measured on 2026-09-29 one parse is
+    ~1.5 s, so the duplicate was ~1.5 s of the 3-5 s session-load budget of ТЗ §6 spent twice on
+    the same bytes.
+    """
+    reads: list[Path] = []
+    real = Path.read_text
+
+    def counting(self, *a, **k):
+        reads.append(Path(self))
+        return real(self, *a, **k)
+
+    with_usage = tmp_path / "usage.jsonl"
+    with_usage.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"role": "assistant", "usage": {"input_tokens": 900}},
+    }) + "\n", encoding="utf-8")
+    without = tmp_path / "no-usage.jsonl"
+    without.write_text(json.dumps({
+        "type": "user", "message": {"role": "user", "content": "x" * 400},
+    }) + "\n", encoding="utf-8")
+
+    with mock.patch.object(Path, "read_text", counting):
+        assert transcript.measure_context(with_usage) == (900, transcript.USAGE)
+        assert [p for p in reads if p == with_usage] == [with_usage]
+        reads.clear()
+        tokens, source = transcript.measure_context(without)
+        assert source == transcript.ESTIMATE and tokens == without.stat().st_size // 4
+        assert [p for p in reads if p == without] == [without]

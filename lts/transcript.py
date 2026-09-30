@@ -78,7 +78,17 @@ def read_exchanges(transcript_path: Path) -> list[dict]:
     return out
 
 
-def estimate_tokens(transcript_path: Path) -> int:
+def estimate_tokens(transcript_path: Path, *, text: str | None = None) -> int:
+    """`len(file) // 4`, from `text` when the caller has already read the file.
+
+    `measure_context` is the only caller in `lts` and it has just read the whole transcript to look
+    for `usage` records, so re-reading it here was a second full parse of the same bytes — 1.5 s of
+    the session-load budget thrown away on a 208 MB transcript, in exactly the state where the
+    figure is least trustworthy anyway. The path-only form stays for the callers that have no text
+    in hand.
+    """
+    if text is not None:
+        return len(text) // 4
     if not transcript_path.exists():
         return 0
     return len(transcript_path.read_text(encoding="utf-8", errors="ignore")) // 4
@@ -98,17 +108,23 @@ NO_FILE = "no_file"      # nothing was read at all
 def measure_context(transcript_path: Path) -> tuple[int, str]:
     """`(tokens, provenance)` — the number, and what kind of number it is.
 
-    One parse: `context_tokens` is this function's first element, so a caller that wants the
-    provenance pays nothing extra for it. `USAGE` is a measurement of the live window; `ESTIMATE`
-    is a size-derived guess about a file that may span months; `NO_FILE` is neither.
+    One parse, in both of its two outcomes. `context_tokens` is this function's first element, so a
+    caller that wants the provenance pays nothing extra for it — and the `ESTIMATE` branch works
+    from the text already read here rather than opening the file a second time, which it used to
+    do. `USAGE` is a measurement of the live window; `ESTIMATE` is a size-derived guess about a
+    file that may span months; `NO_FILE` is neither.
     """
     if not transcript_path.exists():
+        return 0, NO_FILE
+    try:
+        text = transcript_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
         return 0, NO_FILE
     last = 0
     # Tracked apart from `last`, because a real record summing to zero is a measurement of an
     # empty window, not the absence of one, and `last or estimate` cannot tell those apart.
     measured = False
-    for line in transcript_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -128,7 +144,7 @@ def measure_context(transcript_path: Path) -> tuple[int, str]:
             )
     if measured:
         return last, USAGE
-    return estimate_tokens(transcript_path), ESTIMATE
+    return estimate_tokens(transcript_path, text=text), ESTIMATE
 
 
 def context_tokens(transcript_path: Path) -> int:
