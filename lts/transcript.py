@@ -105,21 +105,110 @@ ESTIMATE = "estimate"    # derived from the file's size, because no usage record
 NO_FILE = "no_file"      # nothing was read at all
 
 
+# How much of the end of a transcript is read to find the newest `usage` record, and how far the
+# search widens before giving up. Measured 2026-10-01 on the five real transcripts under
+# ~/.claude/projects (7.4 MB to 208 MB): the newest usage-bearing record began between 4,581 and
+# 13,924 bytes before EOF, and the tail parse returned the same total as a full parse of the same
+# bytes in all five, in 0.0002-0.0003 s per call. So one window covers the widest of those five
+# about eighteen times over. It is not the tightest fit — 16 KiB would have held all five — and the
+# margin is deliberate: a record ten times longer than any of them still costs a single read, and a
+# window that is wrong in spite of that widens rather than guessing. `_TAIL_CAP` bounds what a file
+# with no usage record in its tail can waste before the full read takes over: five windows, 256 KiB
+# to 64 MiB, ~85 MiB read in all.
+_TAIL_WINDOW = 256 * 1024
+_TAIL_CAP = 64 * 1024 * 1024
+
+
+def _usage_total(raw: bytes) -> int | None:
+    """One assistant record's context total, or None for any other line.
+
+    None means "not a usage-bearing assistant record", which covers a blank line, a line this
+    process cannot parse, and a record of another type. It never means zero: a record summing to
+    zero is a measurement of an empty window, and `measure_context` has to tell those apart.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(d, dict) or d.get("type") != "assistant":
+        return None
+    usage = (d.get("message") or {}).get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return (
+        int(usage.get("input_tokens", 0) or 0)
+        + int(usage.get("cache_read_input_tokens", 0) or 0)
+        + int(usage.get("cache_creation_input_tokens", 0) or 0)
+    )
+
+
+def newest_usage(transcript_path: Path) -> int | None:
+    """The newest assistant `usage` total, read from the end of the file.
+
+    A transcript is append-only, so the record that describes the live window is the last one — and
+    reading the whole file to find it was costing the `UserPromptSubmit` hook, per the spec's §7.1
+    measurement of 2026-10-01, 1.410-2.575 s on every turn on the 208,143,252-byte ppss transcript.
+    Measured end to end on that same transcript on 2026-10-01, three runs of `lts pressure
+    --transcript` each way: 1.55-1.59 s wall and 1.72 GB peak RSS before, 0.04-0.06 s and 16 MB
+    after, same verdict out. The memory figure is the part that was understated — `read_text` holds
+    the file, and `splitlines()` then builds a Python str per line on top of it. This reads one
+    window from the end instead, and scans it backwards.
+
+    `None` is "no usage record was found", not "zero tokens". The caller falls back to the full read
+    on `None`, so a record beyond `_TAIL_CAP` is found the slow way rather than silently replaced by
+    an estimate of a different kind.
+    """
+    try:
+        size = transcript_path.stat().st_size
+    except OSError:
+        return None
+    window = _TAIL_WINDOW
+    while True:
+        start = max(0, size - window)
+        try:
+            with transcript_path.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read()
+        except OSError:
+            return None
+        lines = chunk.split(b"\n")
+        if start > 0:
+            # The window almost certainly began mid-record; that fragment is not a line.
+            del lines[0]
+        for raw in reversed(lines):
+            total = _usage_total(raw)
+            if total is not None:
+                return total
+        if start == 0 or window >= _TAIL_CAP:
+            return None
+        window *= 4
+
+
 def measure_context(transcript_path: Path) -> tuple[int, str]:
     """`(tokens, provenance)` — the number, and what kind of number it is.
 
-    One parse, in both of its two outcomes. `context_tokens` is this function's first element, so a
-    caller that wants the provenance pays nothing extra for it — and the `ESTIMATE` branch works
-    from the text already read here rather than opening the file a second time, which it used to
-    do. `USAGE` is a measurement of the live window; `ESTIMATE` is a size-derived guess about a
-    file that may span months; `NO_FILE` is neither.
+    The common path reads only the end of the file (`newest_usage`), because the record describing
+    the live window is the last one. The full read below survives as the fallback for a file whose
+    newest `usage` record lies beyond the widened windows, and for one that has none at all — where
+    it still computes `len(text) // 4` exactly as it always did, so no figure this function has ever
+    returned changes. `USAGE` is a measurement of the live window; `ESTIMATE` is a size-derived guess
+    about a file that may span months; `NO_FILE` is neither.
     """
     if not transcript_path.exists():
         return 0, NO_FILE
-    # Read once, here, and used by both branches below. Unguarded, exactly as before: an `OSError`
-    # on a file that exists is not "no file", and `NO_FILE` is the one state `lts pressure` prints
-    # `status.ESTIMATED` for — "estimated from file size" would be a false sentence about a file
-    # nothing could read. That mislabel is its own defect; widening its reach is not this change.
+    total = newest_usage(transcript_path)
+    if total is not None:
+        return total, USAGE
+    # Nothing in the tail windows. Read it all: the record may sit further back than `_TAIL_CAP`,
+    # and if there is none anywhere, this is also where the estimate's text comes from. Unguarded,
+    # exactly as before — `newest_usage` swallows its own `OSError` and answers `None`, so a file
+    # that exists and cannot be read still reaches this line and still raises. An `OSError` on such
+    # a file is not "no file", and `NO_FILE` is the one state `lts pressure` prints
+    # `status.ESTIMATED` for; "estimated from file size" would be a false sentence about a file
+    # nothing could read. That mislabel is its own defect, and widening its reach is not this change.
     text = transcript_path.read_text(encoding="utf-8", errors="ignore")
     last = 0
     # Tracked apart from `last`, because a real record summing to zero is a measurement of an

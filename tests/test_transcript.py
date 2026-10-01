@@ -188,8 +188,8 @@ def test_a_usage_record_summing_to_zero_is_a_measurement(tmp_path: Path):
     assert transcript.measure_context(t) == (0, transcript.USAGE)
 
 
-def test_measure_context_reads_the_file_once_in_either_branch(tmp_path: Path):
-    """One parse per call, including the branch that has no usage record to read.
+def test_measure_context_never_reads_the_whole_file_twice(tmp_path: Path):
+    """At most one full read per call — and none at all once the tail answers.
 
     `measure_context` read the whole transcript looking for `usage`, and when it found none called
     `estimate_tokens(path)`, which opened the same file again — a second full parse of bytes it had
@@ -198,6 +198,10 @@ def test_measure_context_reads_the_file_once_in_either_branch(tmp_path: Path):
     `measure_context`. On the 208,142,001-byte transcript measured on 2026-09-29 one parse is
     ~1.5 s, so the duplicate was ~1.5 s of the 3-5 s session-load budget of ТЗ §6 spent twice on
     the same bytes.
+
+    The usage branch now reads no whole file at all: `newest_usage` opens the file in binary and
+    reads one window from the end, so the count this test used to assert for that branch — exactly
+    one — is now zero, and the duplicate it was written to catch cannot come back by either route.
     """
     reads: list[Path] = []
     real = Path.read_text
@@ -218,8 +222,129 @@ def test_measure_context_reads_the_file_once_in_either_branch(tmp_path: Path):
 
     with mock.patch.object(Path, "read_text", counting):
         assert transcript.measure_context(with_usage) == (900, transcript.USAGE)
-        assert [p for p in reads if p == with_usage] == [with_usage]
+        assert [p for p in reads if p == with_usage] == []
         reads.clear()
         tokens, source = transcript.measure_context(without)
         assert source == transcript.ESTIMATE and tokens == without.stat().st_size // 4
         assert [p for p in reads if p == without] == [without]
+
+
+def _tail_assistant(uuid: str, when: str, *, input_tokens: int, cache_read: int = 0) -> str:
+    return json.dumps({
+        "uuid": uuid, "timestamp": when, "type": "assistant",
+        "message": {"role": "assistant", "content": "x",
+                    "usage": {"input_tokens": input_tokens,
+                              "cache_read_input_tokens": cache_read}},
+    })
+
+
+def _tail_filler(uuid: str, when: str, *, pad: int = 0) -> str:
+    return json.dumps({
+        "uuid": uuid, "timestamp": when, "type": "user",
+        "message": {"role": "user", "content": "y" * pad},
+    })
+
+
+def test_newest_usage_reads_the_tail_not_the_whole_file(tmp_path: Path):
+    """The newest `usage` record is at the end of an append-only file, so only the end is read.
+
+    The spec's §7.2 records the prototype's figures on the real ppss transcript (208,143,252 B):
+    1.529 s for the full parse, 0.0003 s for the tail, 228,889 tokens from both. Re-verified here
+    on 2026-10-01 against the five largest real transcripts (7.4 MB to 208 MB), tail parse against
+    the pre-change loop over the *same* bytes: identical totals in all five, 0.0002-0.0003 s against
+    0.018-0.697 s, and ppss still at 228,889. What this test owns is that agreement, which is the
+    part a unit test can pin; the speed belongs to the measurements above.
+    """
+    t = tmp_path / "t.jsonl"
+    lines = [_tail_filler(f"u{i}", "2026-10-01T06:00:00.000Z", pad=2000) for i in range(200)]
+    lines.insert(0, _tail_assistant("a-old", "2026-10-01T05:00:00.000Z", input_tokens=11))
+    lines.append(
+        _tail_assistant("a-new", "2026-10-01T07:00:00.000Z", input_tokens=4000, cache_read=1000))
+    t.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert t.stat().st_size > transcript._TAIL_WINDOW, "fixture must exceed one window"
+    assert transcript.newest_usage(t) == 5000
+    assert transcript.measure_context(t) == (5000, transcript.USAGE)
+
+
+def test_newest_usage_widens_its_window_until_it_finds_a_record(tmp_path: Path):
+    """A newest record further back than the first window must still be found, not missed.
+
+    Without the widening this returns None and `measure_context` falls back to the size estimate —
+    a figure of a different kind, silently, for a file that does carry a measurement.
+    """
+    t = tmp_path / "t.jsonl"
+    filler = [_tail_filler(f"u{i}", "2026-10-01T06:00:00.000Z", pad=4000) for i in range(200)]
+    t.write_text("\n".join([_tail_assistant("a1", "2026-10-01T05:00:00.000Z", input_tokens=777)]
+                           + filler) + "\n", encoding="utf-8")
+    assert t.stat().st_size > transcript._TAIL_WINDOW, "fixture must exceed one window"
+    assert transcript.newest_usage(t) == 777
+
+
+def test_a_file_with_no_usage_record_still_falls_back_to_the_estimate(tmp_path: Path):
+    """`ESTIMATE` must keep computing `len(text) // 4`, unchanged, byte for byte.
+
+    The tail scan can only conclude "no usage record here"; concluding "therefore estimate from the
+    size" without reading the file would change a figure that four surfaces print.
+    """
+    t = tmp_path / "junk.jsonl"
+    t.write_text("x" * 48, encoding="utf-8")
+    assert transcript.newest_usage(t) is None
+    assert transcript.measure_context(t) == (12, transcript.ESTIMATE)
+
+
+def test_a_truncated_final_line_does_not_hide_the_record_before_it(tmp_path: Path):
+    """A hook killed mid-write leaves a partial last line. The record before it is still the newest."""
+    t = tmp_path / "t.jsonl"
+    t.write_text(_tail_assistant("a1", "2026-10-01T06:00:00.000Z", input_tokens=321) + "\n"
+                 + '{"uuid": "a2", "type": "assist', encoding="utf-8")
+    assert transcript.newest_usage(t) == 321
+
+
+def test_newest_usage_is_none_for_a_file_that_is_not_there(tmp_path: Path):
+    assert transcript.newest_usage(tmp_path / "nope.jsonl") is None
+    assert transcript.measure_context(tmp_path / "nope.jsonl") == (0, transcript.NO_FILE)
+
+
+def test_the_fragment_the_window_cut_in_half_is_not_read_as_a_record(tmp_path: Path):
+    """The first line of a tail window is half a record, and must not be read as a whole one.
+
+    None of the fixtures above can fail if the window keeps that fragment: a half-written record
+    almost never parses. This one is built so that it does. Byte arithmetic puts the opening brace
+    of a decoy `usage` object exactly on the window boundary, so the fragment the window begins
+    with is valid JSON on its own — 999 tokens that were never a record. The real newest record is
+    321, one window further back, and dropping the fragment is what makes the scan widen to it.
+    """
+    decoy = b'{"type": "assistant", "message": {"usage": {"input_tokens": 999}}}'
+    real = _tail_assistant("a1", "2026-10-01T06:00:00.000Z", input_tokens=321).encode("utf-8")
+    pad_open = b'{"type": "user", "message": {"role": "user", "content": "'
+    pad_close = b'"}}\n'
+    # The window starts at `size - _TAIL_WINDOW`, so everything from the decoy's brace to EOF has
+    # to be exactly one window long for that boundary to land on the brace.
+    pad = transcript._TAIL_WINDOW - len(decoy) - 1 - len(pad_open) - len(pad_close)
+    tail = decoy + b"\n" + pad_open + b"y" * pad + pad_close
+    assert len(tail) == transcript._TAIL_WINDOW
+    # The decoy's line read whole is not valid JSON — only the half the window keeps is.
+    t = tmp_path / "t.jsonl"
+    t.write_bytes(real + b"\n" + pad_open + tail)
+
+    assert transcript.newest_usage(t) == 321
+
+
+def test_a_newest_usage_record_summing_to_zero_wins_over_an_older_one(tmp_path: Path):
+    """Zero is a reading, so the tail scan has to stop at it instead of looking further back.
+
+    `_usage_total` answers None for "not a usage record" and 0 for "a window measured as empty", and
+    a scan that tests its result for truth rather than for None walks straight past a freshly
+    compacted context and reports the previous turn's 4,096 tokens. The full-read fallback hides
+    that mutation — it runs to the end of the file either way and the last record still wins — so
+    this fixture leaves it nowhere to hide: both records are USAGE, and only the tail's own choice
+    decides which figure comes back.
+    """
+    t = tmp_path / "t.jsonl"
+    t.write_text("\n".join([
+        _tail_assistant("a-old", "2026-10-01T05:00:00.000Z", input_tokens=96, cache_read=4000),
+        _tail_assistant("a-new", "2026-10-01T06:00:00.000Z", input_tokens=0),
+    ]) + "\n", encoding="utf-8")
+    assert transcript.newest_usage(t) == 0
+    assert transcript.measure_context(t) == (0, transcript.USAGE)
