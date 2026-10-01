@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import anchor, digest, health, journal, paths, pending, status, stm
+from lts import anchor, digest, health, journal, notify, paths, pending, status, stm
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -28,10 +28,28 @@ _UNCONFIGURED_MSG = (
 )
 
 
-def build_context(event: dict, *, root: Path | None = None) -> str:
+def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
+    """`(context, system_message)` — what the model is given, and what the user is shown.
+
+    One function because the user's line is derived from the same `checks` and `metrics` this hook
+    already computes, and this is the hook that pays for the two directory walks: `sidecars` measured
+    599.686 ms on a Nextcloud checkout on 2026-10-01. Computing them twice to keep two entry points
+    tidy would double the most expensive thing this hook does.
+
+    `additionalContext` reaches the model and `systemMessage` reaches the user — observed, not
+    documented, on 2026-10-01 against `UserPromptSubmit` (spec §2.1.1). The same field on
+    `SessionStart` is documented but **unobserved**: the event fires only at session start and on
+    `/compact`, so it could not be probed in the session that probed the other one. What is proven
+    here is what this hook returns, not what the harness puts on the screen; the first `/compact`
+    after rollout is where the second half gets confirmed.
+    """
     cfg = load_config(root or event.get("cwd"))
     if not cfg.configured:
-        return _UNCONFIGURED_MSG.format(root=cfg.project_root)
+        # Nothing for the user's channel: `notify` speaks about checks and metrics, and an
+        # unconfigured project has neither — `status.collect` has no sidecar to read and no check
+        # ran. "Memory is not configured here" is also none of the three subjects spec §6.1 lists,
+        # so inventing a fourth one here would be a design decision taken in a hook.
+        return _UNCONFIGURED_MSG.format(root=cfg.project_root), ""
     snapshots = pending.list_snapshots(paths.pending_dir(cfg))
     stm_text = stm.read(paths.stm_file(cfg))
     stm_entries = len([ln for ln in stm_text.splitlines() if ln.strip()])
@@ -80,6 +98,11 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     # reachable, not theoretical: `status.collect` stats every pending snapshot, and a concurrent
     # /sleep calls `pending.clear_all` between the listing and the stat. A failure in the health
     # path must cost the health output and nothing else.
+    # Before the `try`, not inside it: `main()` turns any exception into `{}`, so the user's channel
+    # has to have a value even when the block below never reaches its last statement. Undefined here
+    # would mean a raise in the health path withholds the anchor again — 5bba7f2's bug, reintroduced
+    # by the code added to report it.
+    system_message = ""
     try:
         # One `status.collect` per run: `health.run` and `health.record` each compute their own when
         # none is given, so `metrics` saves the second one. What that second one costs is a full STM
@@ -111,21 +134,39 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
         # swallows every exception, so a broken journal costs the record and never the blocks.
         emitted = [name for name, body in blocks if body]
         journal.append(journal_file, health.record(cfg, checks, emitted, metrics=metrics))
+
+        # `{}` as the previous state, deliberately — not an oversight and not a missing read of
+        # `turn-state.json`: a new session states what is outstanding even if the previous session's
+        # last turn already said it. The per-turn hook owns the cadence, because it is the one that
+        # holds the fingerprints; this hook owns the opening statement, because a new session is a
+        # new screen and nothing on it carries over. The returned fingerprints are therefore
+        # discarded rather than stored — writing them would make this hook's statement suppress the
+        # per-turn hook's first one, which is the opposite of the intent.
+        #
+        # Last in the guarded block, after `journal.append`, so a raise here costs the user's line
+        # and not the health record as well.
+        system_message = notify.message(checks, metrics, {})[0]
     except Exception:
         pass
-    return "\n\n".join(body for _name, body in blocks if body)
+    return "\n\n".join(body for _name, body in blocks if body), system_message
+
+
+def build_context(event: dict, *, root: Path | None = None) -> str:
+    """The model's half of `build_blocks`, kept as the name every test already calls."""
+    return build_blocks(event, root=root)[0]
 
 
 def run(event: dict, *, root: Path | None = None) -> dict:
-    text = build_context(event, root=root)
-    if not text:
-        return {}
-    return {
-        "hookSpecificOutput": {
+    context, system_message = build_blocks(event, root=root)
+    out: dict = {}
+    if system_message:
+        out["systemMessage"] = system_message
+    if context:
+        out["hookSpecificOutput"] = {
             "hookEventName": "SessionStart",
-            "additionalContext": text,
+            "additionalContext": context,
         }
-    }
+    return out
 
 
 def main() -> None:

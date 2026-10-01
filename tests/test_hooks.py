@@ -900,6 +900,10 @@ def _quiet_project(root: Path, extra: str = "") -> Path:
     "Quiet" is the measured property: `ups.run` on this fixture returns no `systemMessage` — which
     `test_a_healthy_project_emits_no_system_message` is the assertion of, so the other tests can read
     a line as evidence about what they planted.
+
+    It is quiet for `SessionStart`'s wider set too, which runs all eleven checks rather than
+    `health.PER_TURN_IDS`: `test_session_start_says_nothing_to_the_user_when_all_is_well` is the
+    assertion of that half.
     """
     make_project(root, extra)
     _wire_hooks(root)
@@ -1042,3 +1046,97 @@ def test_the_per_turn_hook_leaves_the_tree_walks_to_session_start(tmp_path: Path
     assert "sidecars" not in ran, ran
     assert "vault" not in ran, ran
     assert "capture" not in ran, ran
+
+
+# `SessionStart`'s half of the user channel. These live beside the per-turn ones rather than with the
+# other `session_start` tests above because they need `_quiet_project`, and the plan's own fixtures
+# did not: written with a bare `make_project`, `test_session_start_says_nothing_to_the_user_when_all_is_well`
+# could not have passed — measured 2026-10-01 on this machine, `health.run` over the full check set
+# on that fixture returns `fail hooks` (no `.claude/settings.json`) and `fail vault` (no `.ai_vault`),
+# so the hook would have shown "Memory health: 2 checks failing — hooks, vault" and the test asserts
+# that nothing is shown. The same two failures would have ridden along in the sleep test's
+# `systemMessage`, where the line read as evidence would have been half about the fixture.
+#
+# `_quiet_project` was written for `health.PER_TURN_IDS`; `SessionStart` runs all eleven checks.
+# Measured the same way and the same day: over the full set it produces no `fail` and no `warn`
+# either — seven skips (`marks`, `capture`, `pressure`, `anchor_fresh`, `anchor_delivery`,
+# `capture_progress`, `capture_live`) and the rest `ok`. `test_session_start_says_nothing_to_the_user_when_all_is_well`
+# is the standing assertion of that, which is what lets the other two read a line as evidence.
+
+
+def test_session_start_shows_an_outstanding_sleep_to_the_user(tmp_path: Path):
+    """A new session is a new screen, so whatever is outstanding is stated once, regardless of
+    fingerprints carried over from the previous session's last turn.
+    """
+    from lts import paths, stm
+    _quiet_project(tmp_path)
+    cfg = load_config(tmp_path)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    paths.ensure_sidecar(cfg)
+    stm.append(paths.stm_file(cfg), text="something unconsolidated")
+    out = ss.run({"cwd": str(tmp_path)})
+    # The whole line, not a substring: on a quiet project this is the only subject with anything to
+    # say, so anything else in the field would be the fixture talking.
+    assert out["systemMessage"] == (
+        "Unconsolidated memory: 1 STM entry and 0 pending snapshots are waiting. "
+        "/sleep writes them into long-term notes."
+    )
+    # and the model's half is untouched
+    assert "Unfinished sleep" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_session_start_says_nothing_to_the_user_when_all_is_well(tmp_path: Path):
+    _quiet_project(tmp_path)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    out = ss.run({"cwd": str(tmp_path)})
+    assert "systemMessage" not in out, out.get("systemMessage")
+
+
+def test_the_user_channel_cannot_withhold_the_anchor(tmp_path: Path, monkeypatch):
+    """5bba7f2 again, for the new code path. The anchor outranks every addition to this hook.
+
+    `main()` prints `{}` on an exception, so a raise anywhere in `build_blocks` withholds the anchor,
+    the digest and the sleep demand at once — the two-month bug, reproduced by the code written to
+    report it. Confirmed to be the live risk and not a theoretical one on 2026-10-01: moving the
+    `notify.message` call out of the guard makes this the only failure in the suite.
+    """
+    from lts import anchor, paths
+    _quiet_project(tmp_path)
+    cfg = load_config(tmp_path)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    paths.ensure_sidecar(cfg)
+    anchor.write_anchor(
+        paths.anchor_file(cfg),
+        updated="2026-10-01 06:00",
+        last_session="[[S]]",
+        active_topics=["t"],
+        active_notes=["[[N1]]"],
+    )
+    monkeypatch.setattr(ss.notify, "message",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = ss.run({"cwd": str(tmp_path)})
+    assert "Session Anchor" in out["hookSpecificOutput"]["additionalContext"]
+    assert "[[N1]]" in out["hookSpecificOutput"]["additionalContext"]
+    assert "systemMessage" not in out
+
+
+def test_session_start_speaks_again_over_a_fingerprint_the_per_turn_hook_stored(tmp_path: Path):
+    """The asymmetry, measured rather than only commented: this hook passes `{}` as the previous
+    state on purpose, so the turn state the per-turn hook left behind cannot silence it.
+
+    Without this, swapping the `{}` for `turnstate.read(paths.turn_state_file(cfg))` breaks nothing:
+    every other fixture here starts with no turn state, so the two expressions are the same value.
+    The state planted below carries the exact fingerprint `notify` computes for one STM entry and no
+    snapshots — `1/0`, read off `notify.current` on 2026-10-01 -- which is what makes it a
+    suppression the hook has to override rather than a string that happens not to match.
+    """
+    from lts import paths, stm
+    _quiet_project(tmp_path)
+    cfg = load_config(tmp_path)
+    ss = _load("session_start", HOOKS / "session_start.py")
+    paths.ensure_sidecar(cfg)
+    stm.append(paths.stm_file(cfg), text="something unconsolidated")
+    turnstate.write(paths.turn_state_file(cfg),
+                    {"at": "2026-10-01T06:00:00.000Z", "misses": 0, "shown": {"sleep": "1/0"}})
+    out = ss.run({"cwd": str(tmp_path)})
+    assert "1 STM entry" in out.get("systemMessage", ""), out
