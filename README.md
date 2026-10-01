@@ -60,16 +60,82 @@ everything worth keeping into linked long-term notes **without losing a single n
 > long time, each found by accident: `SessionStart` withheld the anchor for ~2 months, `lts
 > pressure` measured 45,413,420 tokens against a hardcoded 200,000-token window (**22,707%**), and
 > the model stated a context percentage no component had produced. A liveness poll would have caught
-> none of them — every component was alive and the *claims* were false. So `lts doctor` now runs ten
-> checks in three kinds: **inventory** (is each part present — including that each of the four hooks
-> `lts` owns is wired and its script still exists on disk, since projects point at `~/tools` by
-> absolute path; a hook you wired yourself is outside what that check looks at), **invariants**
-> (is the sleep mark behind the capture mark, is the measured context inside the window), and
-> **trend**, which reads the sidecar's `health.jsonl` — the per-run log that records what
-> `SessionStart` actually emitted. That last one is the only way to catch "the anchor has not
-> reached the model in five sessions", which is invisible in a filesystem snapshot. A failed check
-> becomes a **demand** in context, not a line of information: quiet information is what the anchor
-> and `/recall` already proved gets ignored.
+> none of them — every component was alive and the *claims* were false. So `lts doctor` now runs
+> eleven checks in four kinds: **inventory** (is each part present — including that each of the
+> four hooks `lts` owns is wired and its script still exists on disk, since projects point at
+> `~/tools` by absolute path; a hook you wired yourself is outside what that check looks at),
+> **invariants** (is the sleep mark behind the capture mark, is the measured context inside the
+> window), **trend**, which reads the sidecar's `health.jsonl` — the per-run log that records what
+> `SessionStart` actually emitted, and is the only way to catch "the anchor has not reached the
+> model in five sessions", invisible in a filesystem snapshot — and **liveness**: `capture_live`
+> (below) is the only check that notices *mid-session* that the `Stop` hook has stopped
+> capturing. A failed check becomes a **demand** in context, not a line of information:
+> quiet information is what the anchor and `/recall` already proved gets ignored.
+
+> **Two channels.** A failed check reaches the model through the hook's `additionalContext` — the
+> check lines with a `Fix:` each — and the user through `systemMessage`, which Claude Code shows in
+> the transcript and the model never sees. The second exists because the first is an *instruction*:
+> the block says "tell the user", and a guarantee that depends on being repeated is the soft kind
+> this project already refused for STM capture. Both halves were **observed** on 2026-10-01, against
+> `UserPromptSubmit` in the deployed clone, rather than taken from the documentation: the user saw
+> the probe line verbatim, and two consecutive turns carried no trace of it in the model's injected
+> context while `additionalContext` arrived normally on both. The harness prefixes the block with
+> the event name (`UserPromptSubmit says: `), so each line has to be a self-contained sentence that
+> names its own subject; newlines survive the prefix (three lines and 279 characters arrived whole,
+> same observation). The user's line is deduplicated by a fingerprint per subject — the sorted ids
+> of the failing checks, the order of magnitude of the STM backlog and of the pending snapshots, the
+> window's ten-percent band — so a persistent problem is stated when it changes rather than on every
+> turn, and a subject that goes quiet is forgotten rather than remembered as empty, which is what
+> makes its return news again. `SessionStart` *emits* whatever is outstanding unconditionally,
+> because a new session is a new screen, and deliberately stores no fingerprints, so what it emits
+> cannot suppress the per-turn hook's first line — but see the paragraph below before assuming it
+> arrives.
+>
+> The same field on `SessionStart` is **documented but not yet observed.** That event fires only at
+> session start and on `/compact`, so it could not be probed in the session that probed
+> `UserPromptSubmit`, and printing the hook's JSON by hand proves what we emit, not what the harness
+> puts on the screen. The first `/compact` after this ships is where it gets confirmed; until then,
+> treat the session-start line as emitted and not as seen.
+
+> **`capture_live`** is the eleventh check, and the only one that detects a dead `Stop` hook
+> *mid-session*: the trend checks read the sidecar's `health.jsonl`, which gains a record only at
+> `SessionStart`, so between two compactions they keep answering `ok` from the same five records
+> while every exchange goes uncaptured. It asks two things at once — has the capture mark stayed put
+> across consecutive prompts, **and** does the transcript hold exchanges newer than it? Either half
+> alone lies. `stop.py` leaves the mark alone for a transcript it cannot read (so a reset cannot
+> replay the file) and writes the same value back for a turn that produced no exchange, so an
+> unmoved mark is not evidence by itself; and something being newer than the mark is the ordinary
+> state between a turn ending and the next `Stop` running. Together they mean the hook was given
+> work and did not do it.
+>
+> One miss is tolerated, because a turn the user interrupts runs no `Stop` hook at all and that is
+> something people do on purpose: the demand arrives only once **two consecutive prompts** have each
+> found the mark exactly where the prompt before them left it — the third run of the hook, counting
+> the one that set the baseline. The count restarts when the session id changes, because the state
+> file is per project with no session dimension and nothing deletes it, so an interrupted last turn
+> would otherwise hand the next session a failure it has not earned (and would not need: the next
+> working `Stop` captures from the mark, not from "this turn"). A mark that identifies its exchange
+> by `uuid` rather than by a usable timestamp is a `skip`, not a verdict — it still resolves exactly,
+> so the capture is working, while the timestamp both halves of the question compare stands still.
+> There is deliberately **no sleep exemption**, though the design document asked for one: the armed
+> branch of `stop.py` writes a fresh capture mark, so the mark moves during a sleep and the count
+> resets by itself, and `stop.py` is also what disarms the sleep flag — which makes a hook that is
+> not running the one state where that flag stays armed across prompts, exactly the state an
+> exemption would have blinded the check in.
+>
+> The per-turn hook runs the **eight** checks that neither walk a directory tree nor parse the whole
+> transcript — `config`, `hooks`, `marks`, `pressure`, `anchor_fresh`, `anchor_delivery`,
+> `capture_progress`, `capture_live` — and the subset is selected *before* the checks run, which is
+> the only reason it is cheaper than running them all. Measured 2026-10-01 on three real projects
+> (this one, `ppss`, `nextcloud-development`), every vault on the same fuseblk mount and each project
+> given its largest real transcript (13.4 MB / 209.0 MB / 89.0 MB): no check in that subset cost
+> more than **1.121 ms**, against **605.770 ms** for the `sidecars` tree walk and **1,463.639 ms**
+> for `capture`'s full-transcript parse. Those are figures for those projects on that filesystem on
+> that day — per project and per filesystem, not properties of the code — so re-measure before
+> quoting them about anything else. The membership is not configurable: a reliability guarantee an
+> operator can quietly switch off is not one. `capture_live` needs a transcript to reach a verdict,
+> so `lts doctor` without `--transcript` reports it as `ok`, or as a `skip` that names how many
+> prompts found the mark unmoved.
 
 > **Semantic search note:** Basic Memory serves full-text and graph links immediately on write,
 > but vector embeddings are rebuilt by `basic-memory reindex --embeddings -p <project>` (not on
@@ -247,7 +313,7 @@ own are left alone; only the ones the clone ships are overwritten.
 | `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts doctor [--json] [--transcript PATH]` | Ten health checks: inventory, invariants and trend. Exits non-zero on a failure. `--transcript` enables the two checks that must parse the transcript; hooks omit it. `--json` prints `{"worst": <level>, "checks": [{"id", "level", "message", "fix"}, ...]}`, one object per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
+| `lts doctor [--json] [--transcript PATH]` | Eleven health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--json` prints `{"worst": <level>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **eleven** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
 | `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |
