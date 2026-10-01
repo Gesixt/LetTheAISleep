@@ -66,6 +66,15 @@ def health_journal_file(cfg: Config) -> Path:
     return sidecar_root(cfg) / "health.jsonl"
 
 
+def turn_state_file(cfg: Config) -> Path:
+    """What the per-turn hook knew at the previous prompt (see `lts.turnstate`).
+
+    Beside `health_journal_file` and deliberately not inside it: a record per turn would redefine
+    the trend checks' `TREND_WINDOW` from five sessions to five turns.
+    """
+    return sidecar_root(cfg) / "turn-state.json"
+
+
 def ensure_sidecar(cfg: Config) -> None:
     """Create the sidecar — only ever at a configured project root, never at a bare cwd."""
     require_project(cfg)
