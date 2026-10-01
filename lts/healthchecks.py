@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +39,13 @@ _SKEW = timedelta(seconds=60)
 # exchange behind is the measured normal (the turn's last message is not flushed when Stop reads
 # the file), so both a count and a time threshold must be exceeded.
 _CAPTURE_TOLERANCE = timedelta(minutes=10)
+# How many consecutive prompts may pass with the capture mark unmoved *while the transcript holds
+# something newer than it* before the `Stop` hook is called dead. One is not evidence: a turn the user
+# interrupts runs no `Stop` hook at all, and that is a thing people do on purpose. Two in a row is.
+# The two states where a working hook legitimately leaves the mark alone — an unreadable transcript,
+# and a turn that produced no exchange (`stop.py:65-75`) — are excluded by the "something newer"
+# half of the question rather than by this tolerance.
+_CAPTURE_MISS_TOLERANCE = 2
 # The anchor's `updated` is minute-granular local time, so a sleep can look up to a minute older
 # than the note it just wrote.
 _ANCHOR_SKEW = timedelta(minutes=2)
@@ -69,23 +76,63 @@ class Check:
     fix: str | None = None
 
 
+# The checks cheap enough to run on every turn: everything that does not walk a directory tree.
+#
+# Measured 2026-10-01 through `health.run(cfg, ids=[one])`, minimum of five runs each, on the
+# LetTheAISleep / ppss / nextcloud-development projects (all vaults on the same fuseblk mount, each
+# given its largest real transcript — 13,399,354 / 208,988,417 / 89,022,622 B). The two excluded
+# walks: `sidecars` 3.391 / 130.884 / 605.770 ms and `vault` 0.300 / 24.272 / 0.415 ms. Everything in
+# the set below, worst column each: `config` 0.003, `hooks` 0.167, `marks` 0.316, `pressure` 0.004,
+# `anchor_fresh` 1.121, `anchor_delivery` 0.005, `capture_progress` 0.006, `capture_live` 0.263 ms —
+# so 1.121 ms is the ceiling of the whole set, against 605.770 ms for one check left out of it.
+# (The spec's §3.1 table measured the same two walks at 3.703 / 131.526 / 599.686 and 0.294 / 23.426
+# / 0.393 ms on the same day; it had no figure at all for `anchor_delivery`, whose probe raised, and
+# the two above are this measurement's own.)
+#
+# `capture` is excluded for the same reason by a different route: it parses the whole transcript, and
+# the same run measured it at 69.445 / 1463.639 / 643.384 ms. `capture_live` answers the part of its
+# question that matters per turn from a bounded tail scan instead, which is what buys its 0.263 ms.
+#
+# The membership is a measurement, not a taste, and it is not configurable — a reliability guarantee
+# an operator can quietly switch off is not one.
+#
+# `pressure` is in the set because the transcript stopped being expensive once the tail parse landed:
+# measured in the same run, `status.collect` costs 0.546 / 0.373 / 0.451 ms with a transcript against
+# 0.361 / 0.247 / 0.262 ms without one. The transcript adds 0.12-0.19 ms and the addition does not
+# grow with the file — the 209 MB one is the cheapest of the three — which is the property the tail
+# parse bought. The caller passes the result in as `metrics`, so that cost is paid once per turn and
+# not once per check.
+PER_TURN_IDS = (
+    "config", "hooks", "marks", "pressure",
+    "anchor_fresh", "anchor_delivery", "capture_progress", "capture_live",
+)
+
+
 def all_checks(
     cfg: Config,
     *,
     transcript_path: Path | None = None,
     metrics: dict | None = None,
     history: list[dict] | None = None,
+    turn: dict | None = None,
+    ids: Sequence[str] | None = None,
     now: datetime | None = None,
 ) -> list[Check]:
     """Every check this module can make about `cfg`, in the order the report states them.
 
     The one public entry point for making a check. The checks and the helpers they own stay private,
-    so this module's whole surface is `Check`, this function, and the two constants its callers must
-    name to use it: `TREND_WINDOW`, the number of journal records a trend needs, and `ANCHOR_BLOCK`,
-    the block name `_check_anchor_delivery` matches in those records. All four are re-exported by
-    `lts.health`, which is the module its consumers already import — `lts.cli` and the `SessionStart`
-    hook used to reach in here for the two constants by their private names, which made that surface
-    larger than the sentence above it admitted.
+    so this module's whole surface is `Check`, this function, and the three constants its callers must
+    name to use it: `TREND_WINDOW`, the number of journal records a trend needs, `ANCHOR_BLOCK`, the
+    block name `_check_anchor_delivery` matches in those records, and `PER_TURN_IDS`, the subset a
+    caller on the per-turn path passes as `ids`. All five are re-exported by `lts.health`, which is
+    the module its consumers already import — `lts.cli` and the `SessionStart` hook used to reach in
+    here for the two constants by their private names, which made that surface larger than the
+    sentence above it admitted.
+
+    `ids` selects a subset, and it does so before the checks run: see the comment on the registry
+    below, which is the only reason the registry is a list of thunks rather than a list of results.
+    `turn` is the state the per-turn hook left at the previous prompt (`lts.turnstate`), and
+    `_check_capture_live` is the only check that reads it.
 
     `now` is normalised here because every check that compares anything mixes a caller's `now` with
     a mark parsed out of a file, and one naive operand raises rather than answering. The order is
@@ -96,28 +143,37 @@ def all_checks(
     a health check that could break on it would be a new way for memory to die silently.
 
     A configured project is assumed. Without one, the config verdict is the only thing that can be
-    established — there is nothing for the other nine to measure — so that is all this returns, and
+    established — there is nothing for the other ten to measure — so that is all this returns, and
     `lts.health` says what the rest of the report reads like in that case.
 
     Every check is called through `_answered`, so one that raises costs its own answer and not the
-    other nine.
+    others.
     """
     now = _utc(now) or datetime.now(timezone.utc)
     config_check = _answered("config", lambda: _check_config(cfg))
     if not cfg.configured:
         return [config_check]
-    return [
-        config_check,
-        _answered("sidecars", lambda: _check_sidecars(cfg)),
-        _answered("hooks", lambda: _check_hooks(cfg)),
-        _answered("vault", lambda: _check_vault(cfg)),
-        _answered("marks", lambda: _check_marks(cfg, now)),
-        _answered("capture", lambda: _check_capture(cfg, transcript_path, now)),
-        _answered("pressure", lambda: _check_pressure(metrics)),
-        _answered("anchor_fresh", lambda: _check_anchor_fresh(cfg)),
-        _answered("anchor_delivery", lambda: _check_anchor_delivery(cfg, history)),
-        _answered("capture_progress", lambda: _check_capture_progress(history)),
+    # `(id, thunk)` pairs rather than a list of results: `ids` must be able to leave a check out
+    # *before* it runs. Filtering results afterwards would still pay for the walk — `sidecars`
+    # measured 599.686 ms on nextcloud-development and `vault` 23.426 ms on ppss (2026-10-01) —
+    # which is the whole reason a subset exists.
+    registry: list[tuple[str, Callable[[], Check]]] = [
+        ("sidecars", lambda: _check_sidecars(cfg)),
+        ("hooks", lambda: _check_hooks(cfg)),
+        ("vault", lambda: _check_vault(cfg)),
+        ("marks", lambda: _check_marks(cfg, now)),
+        ("capture", lambda: _check_capture(cfg, transcript_path, now)),
+        ("pressure", lambda: _check_pressure(metrics)),
+        ("anchor_fresh", lambda: _check_anchor_fresh(cfg)),
+        ("anchor_delivery", lambda: _check_anchor_delivery(cfg, history)),
+        ("capture_progress", lambda: _check_capture_progress(history)),
+        ("capture_live", lambda: _check_capture_live(cfg, turn, transcript_path)),
     ]
+    wanted = None if ids is None else set(ids)
+    checks = [config_check] if wanted is None or "config" in wanted else []
+    checks += [_answered(check_id, thunk) for check_id, thunk in registry
+               if wanted is None or check_id in wanted]
+    return checks
 
 
 def _answered(check_id: str, check: Callable[[], Check]) -> Check:
@@ -128,10 +184,10 @@ def _answered(check_id: str, check: Callable[[], Check]) -> Check:
     a settings.json of the wrong shape, `_check_anchor_fresh` on a note that vanished mid-scan,
     `_readable` on a journal field of the wrong type. Each of those guards was written after the
     raise had already taken the whole report down, which is the argument for this one: a raise
-    nobody has met yet costs the other nine checks the same way, and a report that does not appear
-    is the worst possible outcome for the subsystem whose job is to say whether memory is lying. In
-    `SessionStart` the loss is silent and permanent — the surrounding `try` keeps the anchor and the
-    digest, so the only visible effect is that the health block stops appearing and no journal
+    nobody has met yet costs every other check in the run the same way, and a report that does not
+    appear is the worst possible outcome for the subsystem whose job is to say whether memory is
+    lying. In `SessionStart` the loss is silent and permanent — the surrounding `try` keeps the anchor
+    and the digest, so the only visible effect is that the health block stops appearing and no journal
     record is written, which then starves the trend checks of the history they need and disables
     them too.
 
@@ -141,7 +197,7 @@ def _answered(check_id: str, check: Callable[[], Check]) -> Check:
     """
     try:
         return check()
-    except Exception as exc:     # noqa: BLE001 - deliberate: the alternative is losing nine checks
+    except Exception as exc:     # noqa: BLE001 - deliberate: the alternative is losing the rest
         return Check(
             check_id, "fail",
             f"this check itself raised {type(exc).__name__}: {exc} — its answer is missing from "
@@ -1008,3 +1064,71 @@ def _check_capture_progress(history: list[dict] | None) -> Check:
                  f"the capture mark has been frozen at {next(iter(marks))!r} and the buffer has "
                  f"not grown in {scope} — the Stop hook is not capturing",
                  "check /tmp/lts-hook-errors.log, and the hooks check above")
+
+
+def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | None) -> Check:
+    """Was the `Stop` hook given work between the last two prompts, and did it fail to do it?
+
+    The only detector of a dead `Stop` that works **mid-session**. `_check_capture_progress` reads the
+    health journal, which gains a record only at `SessionStart`, so between two compactions it answers
+    `ok` from the same records while every exchange since the last one goes uncaptured.
+
+    Two facts together, because either alone lies. The mark not moving is not enough: read
+    2026-10-01, `stop.py:65-75` leaves it alone for an unreadable transcript (the `if here:` guard,
+    so a reset cannot replay the file) and writes the same value back for a turn that produced no
+    exchange (`mark_of` names the newest *exchange*, and `transcript.is_scaffolding` drops a bare
+    slash command and an isMeta record). Something being newer than the mark is not enough either:
+    that is the ordinary state between a turn ending and the next `Stop` running. Together they say
+    the hook was given work and did not do it.
+
+    There is deliberately **no sleep exemption**, though the design document asked for one. The armed
+    branch of `stop.py:56-59` *writes* `watermark.mark_at(now)` to the capture mark, so during a sleep
+    the mark moves and the count resets by itself — the exemption's stated reason was invented. And
+    `stop.py` is what disarms the flag, so the one state in which it stays armed across prompts is a
+    `Stop` hook that is not running: an exemption keyed on that flag would be blind in exactly the
+    state this check exists to report.
+
+    The evidence is dated in the message because the turn state is as old as the last prompt; from
+    `lts doctor` that can be hours ago, and the present tense would be a claim this check cannot make.
+    """
+    if not turn:
+        return Check(
+            "capture_live", "skip",
+            "no turn state yet — the `UserPromptSubmit` hook writes it, and there is no previous "
+            "prompt to compare against",
+        )
+    misses = turn.get("misses")
+    at = turn.get("at")
+    if not isinstance(misses, int) or isinstance(misses, bool) or misses < 0:
+        return Check(
+            "capture_live", "skip",
+            f"the turn state carries no usable miss count: {misses!r}",
+            "delete the turn-state file; the next prompt writes a fresh one",
+        )
+    if misses < _CAPTURE_MISS_TOLERANCE:
+        return Check(
+            "capture_live", "ok",
+            f"{misses} consecutive prompt(s) without a capture, under the tolerance of "
+            f"{_CAPTURE_MISS_TOLERANCE} (as of {at})",
+        )
+    if transcript_path is None:
+        return Check(
+            "capture_live", "skip",
+            f"the capture mark has not moved in {misses} consecutive prompts (as of {at}), but "
+            "without a transcript there is no way to tell whether the Stop hook had anything to "
+            "capture",
+            "run `lts doctor --transcript <path>`, or read the per-turn report, which always has one",
+        )
+    mark = watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp")
+    if not transcript.newest_exchange_after(transcript_path, mark):
+        return Check(
+            "capture_live", "ok",
+            f"the capture mark has not moved in {misses} consecutive prompts (as of {at}), and "
+            "nothing in the transcript is newer than it — there was nothing to capture",
+        )
+    return Check(
+        "capture_live", "fail",
+        f"the capture mark has not moved in {misses} consecutive prompts (as of {at}) while the "
+        "transcript holds exchanges newer than it — the Stop hook is not capturing",
+        "check /tmp/lts-hook-errors.log and the hooks check above",
+    )

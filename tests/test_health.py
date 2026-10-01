@@ -1120,6 +1120,13 @@ def test_the_degenerate_states_in_this_table_never_report_ok(tmp_path: Path):
         script.mkdir()
         return cfg, {}
 
+    def a_turn_state_whose_miss_count_is_not_a_count(root: Path):
+        # `turnstate.read` guarantees a dict and nothing about what is in it: the file is best-effort
+        # and may have been half-written or hand-edited. A miss count that is not a count is no
+        # comparison, so the tolerance must not be applied to it — `"lots" < 2` raises, and
+        # `misses or 0` would quietly report the passing state.
+        return _healthy(root), {"turn": {"misses": "lots", "at": "2026-10-01T06:00:00.000Z"}}
+
     def settings_json_of_the_wrong_shape(root: Path):
         cfg = _healthy(root)
         (root / ".claude" / "settings.json").write_text(
@@ -1153,6 +1160,8 @@ def test_the_degenerate_states_in_this_table_never_report_ok(tmp_path: Path):
         ("a directory where the hook script belongs", a_directory_where_the_hook_script_belongs,
          "hooks"),
         ("valid-JSON settings of the wrong shape", settings_json_of_the_wrong_shape, "hooks"),
+        ("a turn state whose miss count is not a count", a_turn_state_whose_miss_count_is_not_a_count,
+         "capture_live"),
     ]
     try:
         for i, (label, build, check_id) in enumerate(states):
@@ -1174,7 +1183,7 @@ def test_the_degenerate_states_in_this_table_never_report_ok(tmp_path: Path):
 
 
 def _fully_measurable(root: Path):
-    """A project where all ten checks can actually measure, plus the inputs the trends need."""
+    """A project where all eleven checks can actually measure, plus the inputs the trends need."""
     cfg = _healthy(root)
     _vault(root, {"knowledge-base": ["Architecture"], "session-memory": ["Session_2026-09-29_1200"]})
     _anchor(cfg)
@@ -1184,7 +1193,10 @@ def _fully_measurable(root: Path):
         "2026-09-29T11:00:00.000Z", "2026-09-29T12:00:30.000Z", "2026-09-29T12:01:00.000Z",
     ])
     history = [{"blocks": ["anchor"], "capture_mark": f"M{i}", "stm_entries": 0} for i in range(5)]
-    return cfg, {"transcript_path": tr, "history": history}
+    # `capture_live` needs a previous prompt to compare against; without one it skips, and the table
+    # below asserts every check could measure. A mark that moved is the ordinary state, so 0 misses.
+    turn = {"misses": 0, "at": "2026-09-29T12:02:00.000Z"}
+    return cfg, {"transcript_path": tr, "history": history, "turn": turn}
 
 
 def test_every_ok_names_the_quantities_it_claims_to_have_measured(tmp_path: Path):
@@ -1220,6 +1232,10 @@ def test_every_ok_names_the_quantities_it_claims_to_have_measured(tmp_path: Path
         "anchor_delivery": [f"last {health.TREND_WINDOW} sessions"],
         "capture_progress": ["capture mark moved",
                              f"last {health.TREND_WINDOW} sessions"],
+        # The count it compared and the tolerance it compared it against — plus the stamp that dates
+        # the evidence, because this check's input is as old as the last prompt and from `lts doctor`
+        # that can be hours ago.
+        "capture_live": ["0 consecutive", "tolerance of 2", "2026-09-29T12:02:00.000Z"],
     }
     assert set(must_name) == set(health._IDS)        # every check, not a subset of them
     for check in checks:
@@ -1678,3 +1694,154 @@ def test_the_clean_sidecar_message_names_the_directories_it_did_not_search(tmp_p
     assert check.level == "ok", check
     for pruned in ("vendor", "node_modules", ".git", ".venv"):
         assert pruned in check.message, (pruned, check)
+
+
+# --- capture_live ------------------------------------------------------------------------------
+#
+# The only detector of a dead `Stop` hook that works mid-session: `capture_progress` reads the health
+# journal, which gains a record only at `SessionStart`, so between two compactions it answers `ok`
+# from the same records while every exchange since the last one goes uncaptured.
+#
+# It asks two things, because either alone lies. The mark not moving is not enough — read
+# 2026-10-01, `stop.py:65-75` leaves the mark alone for an unreadable transcript (the `if here:`
+# guard, so a reset cannot replay the file) and writes the same value back for a turn that produced
+# no exchange (`mark_of` names the newest *exchange*, and `is_scaffolding` drops a bare slash command
+# and an isMeta record). Something being newer than the mark is not enough either: that is the
+# ordinary state between a turn ending and the next `Stop` running.
+
+
+def _unmoved(root: Path, *, misses: int, newest: str = "2026-09-29T12:30:00.000Z"):
+    """A project where the capture mark has not moved and the transcript holds something newer.
+
+    `_T0` is the mark, so the default `newest` is half an hour past it: the state the check is built
+    to catch, and the only one in which it may fail.
+    """
+    cfg = _healthy(root)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(root / "t.jsonl", ["2026-09-29T11:00:00.000Z", newest])
+    return cfg, {"transcript_path": tr,
+                 "turn": {"misses": misses, "at": "2026-10-01T06:00:00.000Z"}}
+
+
+def test_one_prompt_without_a_capture_is_not_a_failure(tmp_path: Path):
+    """An interrupted turn runs no Stop hook at all, so one miss is not evidence of a dead hook.
+
+    The same shape as `_CAPTURE_TOLERANCE`, whose comment records that one exchange behind is the
+    measured normal. A check that failed on the first miss would fire every time the user pressed
+    Esc, and a demand that cries wolf is the mechanism by which demands get ignored.
+    """
+    cfg, kwargs = _unmoved(tmp_path, misses=1)
+    check = _by_id(health.run(cfg, now=_T0, **kwargs), "capture_live")
+    assert check.level == "ok", check
+    assert "1" in check.message and "2" in check.message, check
+
+
+def test_two_prompts_without_a_capture_fail(tmp_path: Path):
+    """Both halves true: the mark has not moved, and the transcript holds exchanges newer than it."""
+    cfg, kwargs = _unmoved(tmp_path, misses=2)
+    check = _by_id(health.run(cfg, now=_T0, **kwargs), "capture_live")
+    assert check.level == "fail", check
+    assert "2" in check.message and "2026-10-01T06:00:00.000Z" in check.message, check
+    assert check.fix, "a failure the user can act on must say how"
+
+
+def test_an_unmoved_mark_with_nothing_newer_than_it_is_not_a_dead_hook(tmp_path: Path):
+    """The correction this check carries: states 1 and 2 of `stop.py:65-75`, excluded at the root.
+
+    An unreadable transcript and a turn that produced no exchange both leave the mark exactly where
+    it was, with a `Stop` hook that ran and was right to leave it. The mark is on the newest
+    exchange here, so there was nothing to capture — and the miss count is deliberately far past the
+    tolerance, because what must not fire is the *second* half of the question, not the first.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    tr = _transcript(tmp_path / "t.jsonl", ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])
+    check = _by_id(health.run(cfg, now=_T0, transcript_path=tr,
+                              turn={"misses": 9, "at": "2026-10-01T06:00:00.000Z"}), "capture_live")
+    assert check.level == "ok", check
+    assert "nothing" in check.message.lower(), check
+    assert "9" in check.message, check
+
+
+def test_without_a_transcript_the_second_half_cannot_be_answered(tmp_path: Path):
+    """`lts doctor` without `--transcript` can establish the mark has not moved and nothing else.
+
+    A `fail` from the first half alone is the proxy this check was corrected away from, and an `ok`
+    would be a pass invented for a comparison that never ran.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    check = _by_id(health.run(cfg, now=_T0, turn={"misses": 2, "at": "2026-10-01T06:00:00.000Z"}),
+                   "capture_live")
+    assert check.level == "skip", check
+    assert "2" in check.message and "transcript" in check.message, check
+
+
+def test_a_sleep_in_progress_is_not_an_exemption(tmp_path: Path):
+    """The spec's sleep exemption is reinstated by nobody: it was justified by a false reading.
+
+    `stop.py:56-59` — the armed branch — *writes* `watermark.mark_at(now)` to the capture mark before
+    returning, so during a sleep the mark moves and the count resets by itself; there is nothing to
+    exempt. And the flag is disarmed by `stop.py` itself, so the one state in which it stays armed
+    across prompts is a `Stop` hook that is not running — exactly the failure this check exists to
+    report. An exemption keyed on the flag would therefore be permanently blind in that state.
+    """
+    cfg, kwargs = _unmoved(tmp_path, misses=2)
+    paths.sleep_flag_file(cfg).parent.mkdir(parents=True, exist_ok=True)
+    paths.sleep_flag_file(cfg).touch()
+    assert watermark.is_armed(paths.sleep_flag_file(cfg))
+    check = _by_id(health.run(cfg, now=_T0, **kwargs), "capture_live")
+    assert check.level == "fail", check
+    assert "sleep" not in check.message.lower(), check
+
+
+def test_capture_live_skips_when_no_turn_state_exists(tmp_path: Path):
+    cfg = _healthy(tmp_path)
+    check = _by_id(health.run(cfg), "capture_live")
+    assert check.level == "skip", check
+    assert "turn state" in check.message.lower(), check
+
+
+def test_the_per_turn_set_excludes_the_two_checks_that_walk_a_tree(tmp_path: Path):
+    """Measured 2026-10-01 on three real projects: `sidecars` 3.391/130.884/605.770 ms and `vault`
+    0.300/24.272/0.415 ms, against a ceiling of 1.121 ms for the whole set — including the two the
+    spec's §3.1 table had no figure for, `anchor_delivery` 0.005/0.003/0.004 ms and `capture_live`
+    0.235/0.212/0.263 ms on its expensive path. Every figure is in `PER_TURN_IDS`' comment with the
+    method; the split is that measurement, not a taste.
+    """
+    assert "sidecars" not in health.PER_TURN_IDS
+    assert "vault" not in health.PER_TURN_IDS
+    assert "capture" not in health.PER_TURN_IDS, "needs a full transcript parse"
+    assert "capture_live" in health.PER_TURN_IDS
+    assert set(health.PER_TURN_IDS) <= set(health._IDS)
+
+
+def test_selecting_a_subset_does_not_run_the_checks_left_out(tmp_path: Path):
+    """The point of the subset is cost, so it must be skipped before it is called, not filtered after.
+
+    A post-filter would still pay the 599.686 ms measured on nextcloud-development, on every turn.
+    """
+    cfg = _healthy(tmp_path)
+    calls: list[str] = []
+    original = healthchecks._check_sidecars
+    healthchecks._check_sidecars = lambda c: calls.append("sidecars") or original(c)
+    try:
+        ids = [c.id for c in health.run(cfg, ids=health.PER_TURN_IDS)]
+    finally:
+        healthchecks._check_sidecars = original
+    assert calls == [], "a check outside the subset was called anyway"
+    assert "sidecars" not in ids
+    assert ids == [i for i in health._IDS if i in health.PER_TURN_IDS]
+
+
+def test_an_unconfigured_root_skips_only_what_was_asked_for(tmp_path: Path):
+    """`run`'s own skip list is written here, so it has to honour `ids` as well.
+
+    Without this the per-turn hook in a project nobody configured would report eleven checks after
+    asking for eight — and a report naming checks the caller excluded is a report about a run that
+    did not happen.
+    """
+    cfg = load_config(tmp_path / "nowhere")
+    ids = [c.id for c in health.run(cfg, ids=health.PER_TURN_IDS)]
+    assert ids == [i for i in health._IDS if i in health.PER_TURN_IDS]
+    assert {c.level for c in health.run(cfg, ids=health.PER_TURN_IDS) if c.id != "config"} == {"skip"}

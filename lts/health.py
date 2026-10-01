@@ -20,19 +20,21 @@ documented and never called. A health report that is merely present would be ign
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
 from lts import healthchecks, paths, status, watermark
 from lts.config import Config
 # `Check` lives with the checks that build it; the import is one-way, so there is no cycle.
-# `TREND_WINDOW` and `ANCHOR_BLOCK` are re-exported deliberately, not incidentally: a caller of
-# `run` has to read exactly `TREND_WINDOW` journal records for the trend checks to measure anything,
-# and a caller of `record` has to name the anchor block `ANCHOR_BLOCK` for `_check_anchor_delivery`
-# to find it. Both facts belong to this module's contract, so they are reachable from here instead
-# of through `healthchecks`' private names, which `lts.cli` and the `SessionStart` hook were both
-# reaching into.
-from lts.healthchecks import ANCHOR_BLOCK, Check, TREND_WINDOW
+# `TREND_WINDOW`, `ANCHOR_BLOCK` and `PER_TURN_IDS` are re-exported deliberately, not incidentally: a
+# caller of `run` has to read exactly `TREND_WINDOW` journal records for the trend checks to measure
+# anything, a caller of `record` has to name the anchor block `ANCHOR_BLOCK` for
+# `_check_anchor_delivery` to find it, and a caller on the per-turn path has to pass `PER_TURN_IDS`
+# as `ids` to stay inside its budget. All three facts belong to this module's contract, so they are
+# reachable from here instead of through `healthchecks`' private names, which `lts.cli` and the
+# `SessionStart` hook were both reaching into.
+from lts.healthchecks import ANCHOR_BLOCK, PER_TURN_IDS, Check, TREND_WINDOW
 
 # Worst first. `skip` outranks `ok` because a check that did not run is not a check that passed.
 _ORDER = ("fail", "warn", "skip", "ok")
@@ -41,7 +43,7 @@ _SYMBOL = {"fail": "✗", "warn": "!", "skip": "·", "ok": "✓"}
 _IDS = (
     "config", "sidecars", "hooks", "vault",
     "marks", "capture", "pressure", "anchor_fresh",
-    "anchor_delivery", "capture_progress",
+    "anchor_delivery", "capture_progress", "capture_live",
 )
 
 _DEMAND_HEAD = (
@@ -118,6 +120,8 @@ def run(
     transcript_path: Path | None = None,
     metrics: dict | None = None,
     history: list[dict] | None = None,
+    turn: dict | None = None,
+    ids: Sequence[str] | None = None,
     now: datetime | None = None,
 ) -> list[Check]:
     """Every check, in `_IDS` order, assembled by `healthchecks.all_checks`.
@@ -155,19 +159,28 @@ def run(
     given history as an input, not a separate mechanism. It stays a plain list of dicts; the reason
     is with the checks that read it, in `healthchecks.all_checks`.
 
+    `turn` is the per-turn state as of the previous prompt (`lts.turnstate`), which only
+    `_check_capture_live` reads — without it that check has no previous prompt to compare against and
+    skips. `ids` restricts the run to those check ids, and it restricts it *before* they are called,
+    which is the whole point: the figures are in `healthchecks.PER_TURN_IDS`' comment.
+
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.
     """
     if not cfg.configured:
         # `all_checks` can establish the config verdict and nothing else without a project; the
-        # nine skips are this module's vocabulary, so they are written here.
-        return healthchecks.all_checks(cfg, now=now) + [
+        # ten skips are this module's vocabulary, so they are written here. `ids` is honoured on this
+        # path too: a report naming checks the caller excluded is a report about a run that did not
+        # happen.
+        wanted = None if ids is None else set(ids)
+        return healthchecks.all_checks(cfg, ids=ids, now=now) + [
             Check(check_id, "skip", "no lts project here") for check_id in _IDS[1:]
+            if wanted is None or check_id in wanted
         ]
     if metrics is None:
         metrics = status.collect(cfg, transcript_path=transcript_path)
     return healthchecks.all_checks(cfg, transcript_path=transcript_path, metrics=metrics,
-                                   history=history, now=now)
+                                   history=history, turn=turn, ids=ids, now=now)
 
 
 def record(

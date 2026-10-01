@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lts import (anchor, digest, health, journal, memorymap, naming, paths,
-                 pending, status, stm, sync, transcript, watermark)
+                 pending, status, stm, sync, transcript, turnstate, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
 
@@ -213,6 +213,10 @@ def _run(args) -> int:
             transcript_path=Path(args.transcript) if args.transcript else None,
             history=journal.tail(paths.health_journal_file(cfg), health.TREND_WINDOW)
             if cfg.configured else None,
+            # `capture_live` compares two prompts, and `doctor` has no prompt of its own: the last
+            # state the per-turn hook wrote is the only evidence available here, which is why the
+            # check dates what it says.
+            turn=turnstate.read(paths.turn_state_file(cfg)) if cfg.configured else None,
         )
         if args.json:
             print(json.dumps(

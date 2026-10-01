@@ -604,3 +604,60 @@ def test_doctor_never_greens_capture_from_a_file_with_no_exchanges(tmp_path: Pat
     check = levels(real)["capture"]
     assert check["level"] == "ok"
     assert check["message"].startswith("1 exchange(s) behind the capture mark")
+
+
+def test_doctor_reports_capture_live_from_the_state_on_disk(tmp_path: Path, capsys):
+    """`lts doctor` has no prompt of its own, so it reads the last state the hook wrote.
+
+    The message dates its evidence, because a state file is as old as the last prompt and a verdict
+    about the present would be a claim this command cannot make.
+
+    With `--transcript` both halves of the question can be answered, so this is also the one test
+    that drives the whole chain — turn state on disk, capture mark, tail scan — through the CLI. The
+    level is read out of the `--json` report rather than inferred from the exit code: this project is
+    `make_project` alone, so `hooks` and `vault` fail too and `doctor` would exit 1 with
+    `capture_live` skipped entirely.
+    """
+    from lts import paths, turnstate, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    watermark.write_mark(paths.capture_mark_file(cfg),
+                         {"timestamp": "2026-10-01T05:00:00.000Z"})
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant", "uuid": "u1", "timestamp": "2026-10-01T05:30:00.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "uncaptured"}],
+                    "usage": {"input_tokens": 100}},
+    }) + "\n", encoding="utf-8")
+    turnstate.write(paths.turn_state_file(cfg),
+                    {"at": "2026-10-01T06:00:00.000Z", "capture_mark": "m1", "misses": 2})
+    code = main(["doctor", "--root", str(tmp_path), "--transcript", str(transcript), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    live = next(c for c in report["checks"] if c["id"] == "capture_live")
+    assert live["level"] == "fail", live
+    assert "2026-10-01T06:00:00.000Z" in live["message"]
+    assert "2" in live["message"] and live["fix"]
+    assert code == 1
+
+
+def test_doctor_without_a_transcript_states_the_miss_count_and_no_verdict(tmp_path: Path, capsys):
+    """The same state, minus the transcript: `doctor`'s ordinary invocation.
+
+    It must still report what the state file says — that is the evidence a user can act on — while
+    skipping the verdict it cannot reach. An unmoved mark alone used to be the whole check, and this
+    is what stops it from being that again from this entry point.
+    """
+    from lts import paths, turnstate
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    turnstate.write(paths.turn_state_file(cfg),
+                    {"at": "2026-10-01T06:00:00.000Z", "capture_mark": "m1", "misses": 2})
+    main(["doctor", "--root", str(tmp_path), "--json"])
+    checks = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert checks["capture_live"]["level"] == "skip", checks["capture_live"]
+    assert "2026-10-01T06:00:00.000Z" in checks["capture_live"]["message"]
+    assert "transcript" in checks["capture_live"]["message"]
