@@ -348,3 +348,163 @@ def test_a_newest_usage_record_summing_to_zero_wins_over_an_older_one(tmp_path: 
     ]) + "\n", encoding="utf-8")
     assert transcript.newest_usage(t) == 0
     assert transcript.measure_context(t) == (0, transcript.USAGE)
+
+
+# --- newest_exchange_after ----------------------------------------------------------------------
+#
+# The bounded form of the question `watermark.entries_after` answers exhaustively. Every test below
+# compares it against `read_exchanges` where it can, because a second, looser notion of "an
+# exchange" in the same module would be a defect of its own: `_check_capture_live` turns a `True`
+# here into a `fail` that says the Stop hook is dead, and `stop.py` decides what to capture from
+# `read_exchanges`. If the two disagree about what counts, the check accuses a hook of skipping a
+# record the hook was never going to capture.
+
+
+def _exchange(uuid: str, when: str, *, role: str = "assistant", text: str = "hello") -> dict:
+    return {"type": role, "uuid": uuid, "timestamp": when,
+            "message": {"role": role, "content": [{"type": "text", "text": text}]}}
+
+
+def _any_newer_per_read_exchanges(path: Path, stamp: str) -> bool:
+    """The same question, answered the slow exhaustive way — `exchanges_after`'s timestamp branch."""
+    return any((e.get("timestamp") or "") > stamp for e in transcript.read_exchanges(path))
+
+
+def test_newest_exchange_after_agrees_with_read_exchanges_on_every_boundary(tmp_path: Path):
+    """The agreement is the contract, so it is checked at every boundary the fixture offers.
+
+    Not a sampled pair of marks: the two implementations are compared at a stamp before, equal to
+    and after each exchange in the file, which is every answer the function has. `read_exchanges`
+    is the definition; this function is an optimisation of it that must not also be a redefinition.
+    """
+    t = _raw(tmp_path / "t.jsonl", [
+        _exchange("e1", "2026-10-01T05:00:00.000Z", role="user", text="question"),
+        _exchange("e2", "2026-10-01T06:00:00.000Z"),
+        _user("/compact", "c1"),                                   # scaffolding: a bare command
+        _exchange("e3", "2026-10-01T07:00:00.000Z", role="user", text="next"),
+        _exchange("e4", "2026-10-01T08:00:00.000Z"),
+    ])
+    boundaries = [
+        "2026-10-01T04:00:00.000Z",
+        "2026-10-01T05:00:00.000Z", "2026-10-01T05:30:00.000Z",
+        "2026-10-01T06:00:00.000Z", "2026-10-01T06:30:00.000Z",
+        "2026-10-01T07:00:00.000Z", "2026-10-01T07:30:00.000Z",
+        "2026-10-01T08:00:00.000Z", "2026-10-01T09:00:00.000Z",
+    ]
+    for stamp in boundaries:
+        assert transcript.newest_exchange_after(t, stamp) == _any_newer_per_read_exchanges(t, stamp), \
+            stamp
+    # And the two ends of that list are the two answers the check acts on, named outright so a
+    # fixture that stopped producing both would not pass this test by producing one twice.
+    assert transcript.newest_exchange_after(t, "2026-10-01T04:00:00.000Z") is True
+    assert transcript.newest_exchange_after(t, "2026-10-01T08:00:00.000Z") is False
+
+
+def test_a_mark_at_the_newest_exchange_has_nothing_after_it(tmp_path: Path):
+    """The ordinary state between a turn ending and the next prompt: `Stop` captured everything.
+
+    This is the state that must not read as a dead hook, and it is the one `stop.py` leaves behind
+    on every successful turn — it writes `watermark.mark_of`, which names the newest exchange.
+    """
+    t = _raw(tmp_path / "t.jsonl", [
+        _exchange("e1", "2026-10-01T05:00:00.000Z"),
+        _exchange("e2", "2026-10-01T06:00:00.000Z"),
+    ])
+    mark = transcript.read_exchanges(t)[-1]["timestamp"]
+    assert transcript.newest_exchange_after(t, mark) is False
+
+
+def test_scaffolding_newer_than_the_mark_is_not_something_to_capture(tmp_path: Path):
+    """State 2 of `stop.py:65-75`: a turn whose records are all plumbing moves no mark.
+
+    `mark_of` names the newest *exchange*, so a turn that produced only a bare slash command, an
+    isMeta caveat and a compaction summary writes the same mark value back — `Stop` ran and was
+    correct. Counting those records as work would make this check demand attention from a working
+    hook, which is the false-demand class the amended design exists to remove.
+    """
+    t = _raw(tmp_path / "t.jsonl", [
+        _exchange("e1", "2026-10-01T05:00:00.000Z"),
+        {**_user("/compact", "c1"), "timestamp": "2026-10-01T06:00:00.000Z"},
+        {**_user("<local-command-stdout>Compacted</local-command-stdout>", "c2"),
+         "timestamp": "2026-10-01T06:00:01.000Z"},
+        {**_user("summary of the session so far", "c3", isCompactSummary=True),
+         "timestamp": "2026-10-01T06:00:02.000Z"},
+        {"type": "user", "uuid": "c4", "timestamp": "2026-10-01T06:00:03.000Z",
+         "message": {"role": "user", "content": [{"type": "tool_result", "content": "noise"}]}},
+    ])
+    assert [e["uuid"] for e in transcript.read_exchanges(t)] == ["e1"]
+    assert transcript.newest_exchange_after(t, "2026-10-01T05:00:00.000Z") is False
+
+
+def test_a_mark_that_cannot_be_ordered_leaves_no_boundary_to_be_newer_than(tmp_path: Path):
+    """`None`, an empty string and a stamp of another shape: everything in the file qualifies.
+
+    The comparison is lexicographic, as `watermark.exchanges_after` documents, and that is only
+    chronological within one ISO-8601 shape. `"2026-10-01T…" > "whenever"` is False — so a mark of
+    another shape, left to the comparison, would quietly answer "nothing to capture" and turn a
+    dead hook into an `ok`. There is no boundary here, so the answer is the one the caller can act
+    on, and the broken mark itself is the `marks` check's subject, not this one's.
+    """
+    t = _raw(tmp_path / "t.jsonl", [_exchange("e1", "2026-10-01T05:00:00.000Z")])
+    for stamp in (None, "", "whenever", "2026-10-01", 7):
+        assert transcript.newest_exchange_after(t, stamp) is True, stamp
+
+
+def test_a_file_with_nothing_in_it_answers_that_nothing_is_newer(tmp_path: Path):
+    """No file, an empty file, and a file of pure scaffolding: nothing observed is newer.
+
+    `False` and not `True`, even for the absent file: this is state 1 of `stop.py:65-75` — an
+    unreadable transcript, where the `if here:` guard deliberately leaves the mark alone rather
+    than replaying the whole file — and a hook that was handed nothing did not fail to capture it.
+    """
+    assert transcript.newest_exchange_after(tmp_path / "nope.jsonl", None) is False
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert transcript.newest_exchange_after(empty, None) is False
+    scaffold = _raw(tmp_path / "s.jsonl", [_user("/sleep", "c1")])
+    assert transcript.read_exchanges(scaffold) == []
+    assert transcript.newest_exchange_after(scaffold, None) is False
+
+
+def test_an_exchange_further_back_than_one_window_is_still_found(tmp_path: Path):
+    """The widening is shared with `newest_usage`, and the `True` answer depends on it.
+
+    Without it a tail full of tool results — a long run of tool calls, which is an ordinary way for
+    a turn to end — would answer "nothing newer" and hide a dead Stop hook.
+    """
+    t = tmp_path / "t.jsonl"
+    filler = [json.dumps({"type": "user", "uuid": f"f{i}", "timestamp": "2026-10-01T07:00:00.000Z",
+                          "message": {"role": "user",
+                                      "content": [{"type": "tool_result", "content": "y" * 4000}]}})
+              for i in range(200)]
+    t.write_text("\n".join([json.dumps(_exchange("e1", "2026-10-01T06:00:00.000Z"))] + filler)
+                 + "\n", encoding="utf-8")
+    assert t.stat().st_size > transcript._TAIL_WINDOW, "fixture must exceed one window"
+    assert transcript.newest_exchange_after(t, "2026-10-01T05:00:00.000Z") is True
+
+
+def test_the_scan_stops_at_the_first_exchange_the_mark_covers(tmp_path: Path):
+    """Why the answer is cheap: `False` is reached from the end of the file, not from its start.
+
+    An append-only transcript is chronological, so the first exchange at or before the mark ends the
+    question — everything before it is older still. Without that exit the ordinary per-turn case
+    (the mark sitting on the newest exchange) would read every widening window up to `_TAIL_CAP`,
+    ~85 MiB, on every prompt. Measured here by counting the windows the scan opens.
+    """
+    t = tmp_path / "t.jsonl"
+    pad = json.dumps({"type": "user", "uuid": "p", "timestamp": "2026-10-01T01:00:00.000Z",
+                      "message": {"role": "user", "content": "y" * 300_000}})
+    t.write_text("\n".join([pad, json.dumps(_exchange("e1", "2026-10-01T06:00:00.000Z"))]) + "\n",
+                 encoding="utf-8")
+    assert t.stat().st_size > transcript._TAIL_WINDOW, "fixture must exceed one window"
+    reads = []
+    real_open = Path.open
+
+    def counting_open(self, *a, **kw):
+        if self == t:
+            reads.append(1)
+        return real_open(self, *a, **kw)
+
+    with mock.patch.object(Path, "open", counting_open):
+        assert transcript.newest_exchange_after(t, "2026-10-01T06:00:00.000Z") is False
+    assert len(reads) == 1, f"the scan opened {len(reads)} windows for an answer the first one held"

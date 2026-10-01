@@ -145,6 +145,44 @@ def _usage_total(raw: bytes) -> int | None:
     )
 
 
+def _tail_lines(transcript_path: Path):
+    """The file's lines, newest first, over windows that widen until the whole file is covered.
+
+    Shared by the two bounded questions asked of a transcript — the newest `usage` record and
+    whether anything is newer than a mark — because both want the same thing: the end of an
+    append-only file, read in one `pread`-style window rather than parsed from the start. Keeping
+    one walk keeps the two honest about the same three details, each of which was a defect before it
+    was a rule: the first line of a window is a fragment of a record and is not a line; a file that
+    cannot be stat'd or read yields nothing rather than raising, because both callers are on a
+    hook's path; and the widening restarts the scan over the wider window rather than continuing,
+    so a caller that stops at its first match reads the duplicated head at most once per widening.
+
+    Yields `bytes`, undecoded: the callers hand each line to `json.loads`, which takes bytes, and
+    decoding a 256 KiB window to find one record was the cost `newest_usage` removed.
+    """
+    try:
+        size = transcript_path.stat().st_size
+    except OSError:
+        return
+    window = _TAIL_WINDOW
+    while True:
+        start = max(0, size - window)
+        try:
+            with transcript_path.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read()
+        except OSError:
+            return
+        lines = chunk.split(b"\n")
+        if start > 0:
+            # The window almost certainly began mid-record; that fragment is not a line.
+            del lines[0]
+        yield from reversed(lines)
+        if start == 0 or window >= _TAIL_CAP:
+            return
+        window *= 4
+
+
 def newest_usage(transcript_path: Path) -> int | None:
     """The newest assistant `usage` total, read from the end of the file.
 
@@ -161,30 +199,92 @@ def newest_usage(transcript_path: Path) -> int | None:
     on `None`, so a record beyond `_TAIL_CAP` is found the slow way rather than silently replaced by
     an estimate of a different kind.
     """
-    try:
-        size = transcript_path.stat().st_size
-    except OSError:
+    for raw in _tail_lines(transcript_path):
+        total = _usage_total(raw)
+        if total is not None:
+            return total
+    return None
+
+
+# The shape of the one ISO-8601 stamp Claude Code writes into a transcript, which is also the shape
+# `watermark.mark_at` writes into a mark. `newest_exchange_after` compares stamps lexicographically,
+# as `watermark.exchanges_after` does and for the reason given there — but that is chronological only
+# within one shape, so a stamp of another shape is no boundary at all rather than a boundary that
+# sorts wrongly. `"2026-10-01T05:00:00.000Z" > "whenever"` is False, and left to the comparison a
+# mark nothing can order would answer "nothing newer" about a file full of uncaptured exchanges.
+_ISO_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def _exchange_of(raw: bytes) -> dict | None:
+    """The exchange this transcript line holds, or `None` when the line is not one.
+
+    `read_exchanges`' four rules for one line, in its order and through its two helpers, so that
+    there is one definition of "an exchange" in this module and not two: a `user` or `assistant`
+    record, whose `text` blocks are non-empty, and which `is_scaffolding` does not claim. The caller
+    turns a `True` into an accusation that the `Stop` hook failed to capture something, and `stop.py`
+    decides what to capture from `read_exchanges` — a looser rule here would accuse it of skipping a
+    record it was never going to take.
+
+    The two `isinstance` guards are the one deliberate difference, and they are what reading a window
+    instead of whole lines costs: the first line of a tail window is a fragment, and a fragment can be
+    valid JSON of any shape (`_usage_total` guards the same thing for the same reason). On a full line
+    they can never fire, so they narrow nothing that `read_exchanges` accepts.
+    """
+    raw = raw.strip()
+    if not raw:
         return None
-    window = _TAIL_WINDOW
-    while True:
-        start = max(0, size - window)
-        try:
-            with transcript_path.open("rb") as fh:
-                fh.seek(start)
-                chunk = fh.read()
-        except OSError:
-            return None
-        lines = chunk.split(b"\n")
-        if start > 0:
-            # The window almost certainly began mid-record; that fragment is not a line.
-            del lines[0]
-        for raw in reversed(lines):
-            total = _usage_total(raw)
-            if total is not None:
-                return total
-        if start == 0 or window >= _TAIL_CAP:
-            return None
-        window *= 4
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(d, dict) or d.get("type") not in ("user", "assistant"):
+        return None
+    msg = d.get("message")
+    msg = msg if isinstance(msg, dict) else {}
+    role = msg.get("role") or d.get("type")
+    text = extract_text(msg.get("content"))
+    if not text or is_scaffolding(d, role, text):
+        return None
+    return {"role": role, "text": text, "uuid": d.get("uuid"), "timestamp": d.get("timestamp")}
+
+
+def newest_exchange_after(transcript_path: Path, stamp: str | None) -> bool:
+    """Is there an exchange in the tail of this transcript newer than `stamp`?
+
+    A bounded form of the question `watermark.entries_after` answers exhaustively. The caller —
+    `healthchecks._check_capture_live` — needs only "is there at least one", never how many, so the
+    tail windows of `newest_usage` are enough: the newest records are at the end of an append-only
+    file, so if anything is newer than `stamp`, the newest exchange is.
+
+    `False` is reached from the end of the file rather than from its start, and that early exit is
+    what makes the common case cheap. A transcript is chronological, so the first exchange found at
+    or before `stamp` settles it: everything further back is older still. Without it, the ordinary
+    per-turn state — the mark sitting on the newest exchange, which is exactly what `stop.py` leaves
+    behind after a successful turn — would widen through every window up to `_TAIL_CAP`, ~85 MiB
+    read on every prompt, to establish the answer the first window already held.
+
+    An exchange carrying no timestamp is passed over rather than counted, which is what
+    `watermark.exchanges_after`'s timestamp branch does with it too; a `stamp` that is not in Claude
+    Code's one ISO-8601 shape (including `None`) is no boundary at all and makes this `True`, per
+    `_ISO_STAMP`.
+
+    Returns `False` for a file that cannot be read, holds no record, or holds nothing but
+    scaffolding, which is the honest answer: nothing observed is newer than the mark, so there was
+    nothing for the `Stop` hook to capture.
+    """
+    boundary = stamp if isinstance(stamp, str) and _ISO_STAMP.match(stamp) else None
+    for raw in _tail_lines(transcript_path):
+        exchange = _exchange_of(raw)
+        if exchange is None:
+            continue
+        if boundary is None:
+            return True
+        when = exchange.get("timestamp") or ""
+        if when > boundary:
+            return True
+        if when:
+            return False
+    return False
 
 
 def measure_context(transcript_path: Path) -> tuple[int, str]:
