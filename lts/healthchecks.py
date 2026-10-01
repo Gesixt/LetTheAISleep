@@ -1081,6 +1081,10 @@ def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | 
     that is the ordinary state between a turn ending and the next `Stop` running. Together they say
     the hook was given work and did not do it.
 
+    A third state is excluded by the `_classify_mark` branch below rather than by the question: a mark
+    whose `timestamp` is absent or unparseable advances by `uuid` and not by time, so it reads as
+    unmoved while the capture is correct. See the comment there.
+
     There is deliberately **no sleep exemption**, though the design document asked for one. The armed
     branch of `stop.py:56-59` *writes* `watermark.mark_at(now)` to the capture mark, so during a sleep
     the mark moves and the count resets by itself — the exemption's stated reason was invented. And
@@ -1119,8 +1123,25 @@ def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | 
             "capture",
             "run `lts doctor --transcript <path>`, or read the per-turn report, which always has one",
         )
-    mark = watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp")
-    if not transcript.newest_exchange_after(transcript_path, mark):
+    state, _when, mark, raw = _classify_mark(paths.capture_mark_file(cfg))
+    if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP):
+        # The third state in which a working `Stop` hook leaves the mark looking unmoved, found
+        # 2026-10-01 reading `stop.py` for the two above. `mark_of` writes `timestamp: None` for an
+        # exchange that carried no stamp, and that mark still advances by `uuid` — so
+        # `watermark.entries_after` resolves it exactly and the capture is correct, while the
+        # timestamp, which is what the turn state compares and what the transcript would be compared
+        # against, stands still. Both halves would then answer yes about a healthy hook. An absent or
+        # unreadable mark is deliberately not in here: `stop.py` rewrites one it cannot read
+        # (`entries_after` with an empty mark returns the whole file), so a mark still missing a
+        # prompt later is evidence, not noise. The mark itself is the `marks` check's subject.
+        return Check(
+            "capture_live", "skip",
+            f"the capture mark has not moved in {misses} consecutive prompts (as of {at}), but it "
+            f"carries no timestamp the transcript can be ordered against: {mark!r} — a mark like "
+            "this still resolves by uuid, so the Stop hook may be capturing correctly",
+            "see the marks check above, which is where this mark's own state is reported",
+        )
+    if not transcript.newest_exchange_after(transcript_path, raw):
         return Check(
             "capture_live", "ok",
             f"the capture mark has not moved in {misses} consecutive prompts (as of {at}), and "

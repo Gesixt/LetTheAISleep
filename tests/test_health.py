@@ -1845,3 +1845,52 @@ def test_an_unconfigured_root_skips_only_what_was_asked_for(tmp_path: Path):
     ids = [c.id for c in health.run(cfg, ids=health.PER_TURN_IDS)]
     assert ids == [i for i in health._IDS if i in health.PER_TURN_IDS]
     assert {c.level for c in health.run(cfg, ids=health.PER_TURN_IDS) if c.id != "config"} == {"skip"}
+
+
+def test_a_capture_mark_with_no_orderable_stamp_skips_rather_than_demanding(tmp_path: Path):
+    """The third state in which a working `Stop` hook leaves the mark looking unmoved.
+
+    Found 2026-10-01 while reading `stop.py` for the two the plan names. `mark_of` writes
+    `{"uuid", "timestamp", "count"}`, and `timestamp` is `None` for an exchange that carried no stamp
+    — the state `test_a_positional_capture_mark_skips_the_marks_check_rather_than_demanding` pins for
+    `marks`, and the state the degenerate table calls "a transcript whose entries carry no
+    timestamps". Such a mark still advances by uuid, so `watermark.entries_after` resolves it exactly
+    and `Stop` captures correctly; but the *timestamp* is what the turn state compares, so it reads as
+    unmoved, and it is also what this check would compare the transcript against. Both halves of the
+    question would then answer yes about a hook that is working.
+
+    So a mark that exists and cannot be ordered is no evidence either way: `skip`, with the mark in
+    the message. `marks` is the check whose subject that mark is, and it reports it. An absent or
+    unreadable mark is **not** this state and must keep failing — `stop.py` rewrites a mark it cannot
+    read (`entries_after` with an empty mark returns the whole file), so a mark still missing two
+    prompts later means nothing is running; that is the assertion at the end.
+
+    The degenerate-state table cannot catch this: it accepts `skip`, `warn` *or* `fail`, and the
+    defect here produces a `fail`.
+    """
+    for label, payload in (("no stamp", {"uuid": "u0", "timestamp": None, "count": 1}),
+                           ("unorderable stamp", {"uuid": "u0", "timestamp": "not-a-date",
+                                                  "count": 1})):
+        cfg = _healthy(tmp_path / label.replace(" ", "-"))
+        _raw_mark(cfg, "capture", payload)
+        tr = _transcript(cfg.project_root / "t.jsonl",
+                         ["2026-09-29T11:00:00.000Z", "2026-09-29T12:30:00.000Z"])
+        check = _by_id(health.run(cfg, now=_T0, transcript_path=tr,
+                                  turn={"misses": 2, "at": "2026-10-01T06:00:00.000Z"}),
+                       "capture_live")
+        assert check.level == "skip", (label, check)
+        assert "u0" in check.message, (label, check)
+        assert "not capturing" not in check.message, (label, check)
+
+    # And the two states that are not this one: no mark file at all, and one nothing can read.
+    for label, write in (("absent", lambda c: None),
+                         ("truncated", lambda c: _raw_mark(c, "capture", '{"timestamp": "2026-09-2'))):
+        cfg = _healthy(tmp_path / f"still-fails-{label}")
+        paths.ensure_sidecar(cfg)
+        write(cfg)
+        tr = _transcript(cfg.project_root / "t.jsonl",
+                         ["2026-09-29T11:00:00.000Z", "2026-09-29T12:30:00.000Z"])
+        check = _by_id(health.run(cfg, now=_T0, transcript_path=tr,
+                                  turn={"misses": 2, "at": "2026-10-01T06:00:00.000Z"}),
+                       "capture_live")
+        assert check.level == "fail", (label, check)
