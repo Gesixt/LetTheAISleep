@@ -56,12 +56,18 @@ everything worth keeping into linked long-term notes **without losing a single n
 > group, then the alphabet to break ties. Session notes are ranked by title, since the title is the
 > date and, unlike an mtime, it survives a `git clone`.
 
-> **Memory health.** Three memory failures have been found in this project, each after running a
-> long time, each found by accident: `SessionStart` withheld the anchor for ~2 months, `lts
-> pressure` measured 45,413,420 tokens against a hardcoded 200,000-token window (**22,707%**), and
-> the model stated a context percentage no component had produced. A liveness poll would have caught
-> none of them — every component was alive and the *claims* were false. So `lts doctor` now runs
-> eleven checks in four kinds: **inventory** (is each part present — including that each of the
+> **Memory health.** Three memory failures were found in this project, each after running a long
+> time, each found by accident: `SessionStart` withheld the anchor for ~2 months; `lts pressure`
+> divided 45,413,420 estimated tokens by a hardcoded 200,000-token window, and the percentage
+> recorded beside that count — "9900%" — follows from no window at all (22,707% is the figure that
+> reconciles, computed afterwards, never printed); and the model stated a context percentage no
+> component had produced. **A liveness poll would have caught none of those three** — every component
+> was alive and the *claims* were false, which is why liveness is not the organising principle here.
+>
+> A **fourth** failure mode turned up while this was being built, and it *is* a liveness failure: a
+> `Stop` hook that dies mid-session, where nothing notices until the next `/compact` because the only
+> record of what happened is written at `SessionStart`. So `lts doctor` runs eleven checks in four
+> kinds: **inventory** (is each part present — including that each of the
 > four hooks `lts` owns is wired and its script still exists on disk, since projects point at
 > `~/tools` by absolute path; a hook you wired yourself is outside what that check looks at),
 > **invariants** (is the sleep mark behind the capture mark, is the measured context inside the
