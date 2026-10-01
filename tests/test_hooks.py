@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 import importlib.util
 
+from lts import hooklog, paths, sync, turnstate
+from lts.config import load_config
 from tests.helpers import make_project
 
 
@@ -862,3 +864,181 @@ def test_user_prompt_submit_says_when_the_context_figure_was_estimated(tmp_path:
     text = ups.build_context({"transcript_path": str(junk)}, root=tmp_path)
     assert "12/1,000,000" in text
     assert "estimated from file size" in text
+
+
+# The capture mark these tests plant, and an exchange that is newer than it. Two values rather than
+# one `now`: `_check_capture_live` asks whether the transcript holds anything newer than the mark,
+# so a fixture where the two coincide tests the other branch of that question.
+_MARK_AT = "2026-10-01T06:00:00.000Z"
+_NEWER = "2026-10-01T06:05:00.000Z"
+
+
+def _wire_hooks(root: Path) -> None:
+    """Wire all four events at real script files, the way `lts sync` writes them.
+
+    Without this the `hooks` check fails: observed 2026-10-01 on a bare `make_project` fixture,
+    `health.run(..., ids=PER_TURN_IDS)` returns `fail hooks no <root>/.claude/settings.json`. Every
+    test below reads the notification, so a fixture that fails a check of its own would hand them a
+    line about the fixture instead of about the state they set up.
+    """
+    scripts = root / "hooks"
+    scripts.mkdir(parents=True, exist_ok=True)
+    wiring = {}
+    for event, script in sync.HOOK_EVENTS.items():
+        (scripts / script).write_text("", encoding="utf-8")
+        wiring[event] = [
+            {"hooks": [{"type": "command", "command": f'python3 "{scripts / script}"'}]}
+        ]
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": wiring}), encoding="utf-8")
+
+
+def _quiet_project(root: Path, extra: str = "") -> Path:
+    """A project where every per-turn check passes or skips, and the map has a note to name.
+
+    "Quiet" is the measured property: `ups.run` on this fixture returns no `systemMessage` — which
+    `test_a_healthy_project_emits_no_system_message` is the assertion of, so the other tests can read
+    a line as evidence about what they planted.
+    """
+    make_project(root, extra)
+    _wire_hooks(root)
+    _vault_note(root, "knowledge-base", "Cart Service")
+    return root
+
+
+def _plant_capture_mark(cfg, timestamp: str = _MARK_AT) -> None:
+    paths.ensure_sidecar(cfg)
+    paths.capture_mark_file(cfg).write_text(
+        json.dumps({"uuid": "a0", "timestamp": timestamp, "count": 1}), encoding="utf-8")
+
+
+def _uncaptured_turn(root: Path) -> Path:
+    """A transcript holding an exchange newer than `_MARK_AT` — i.e. work the `Stop` hook left."""
+    return _transcript(root / "t.jsonl", [_msg("user", "hello", "u1", _NEWER),
+                                          _msg("assistant", "hi there", "a1", _NEWER)])
+
+
+def test_the_per_turn_hook_puts_a_failure_in_front_of_the_user(tmp_path: Path):
+    """The whole point: the user sees it whatever the model does with `additionalContext`."""
+    _quiet_project(tmp_path, "[sleep]\ncontext_window = 1000000\n")
+    cfg = load_config(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    _plant_capture_mark(cfg)
+    # One miss already recorded against the same mark the file carries, so this prompt is the second
+    # — `healthchecks._CAPTURE_MISS_TOLERANCE` is 2. The stored mark must equal the file's: a
+    # different value reads as the mark having moved and resets the count, which is what the
+    # `advance` contract says and is why this fixture is not two unrelated strings.
+    turnstate.write(paths.turn_state_file(cfg),
+                    {"at": _MARK_AT, "capture_mark": _MARK_AT, "misses": 1})
+    out = ups.run({"transcript_path": str(_uncaptured_turn(tmp_path))}, root=tmp_path)
+    assert "systemMessage" in out
+    assert "capture_live" in out["systemMessage"]
+    # and the model's half is untouched
+    assert "Memory map" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_healthy_project_emits_no_system_message(tmp_path: Path):
+    _quiet_project(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    out = ups.run({"transcript_path": str(tmp_path / "t.jsonl")}, root=tmp_path)
+    assert "systemMessage" not in out
+
+
+def test_the_turn_state_is_written_every_prompt(tmp_path: Path):
+    _quiet_project(tmp_path)
+    cfg = load_config(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    ups.run({"transcript_path": str(tmp_path / "t.jsonl")}, root=tmp_path)
+    state = turnstate.read(paths.turn_state_file(cfg))
+    assert state["at"]
+    assert "misses" in state
+
+
+def test_two_prompts_without_a_capture_reach_the_user(tmp_path: Path):
+    """End to end: the mark does not move across three prompts, and the second miss is announced.
+
+    The fourth prompt is the other half of the cadence: the same failure, the same fingerprint, so
+    nothing is said again. That round-trips `shown` through the state file, which is the only place
+    the hook keeps it.
+    """
+    _quiet_project(tmp_path)
+    cfg = load_config(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    _plant_capture_mark(cfg)
+    transcript = _uncaptured_turn(tmp_path)
+    seen = []
+    for _ in range(4):
+        seen.append(ups.run({"transcript_path": str(transcript)},
+                            root=tmp_path).get("systemMessage", ""))
+    assert seen[0] == "" and seen[1] == ""
+    assert "capture_live" in seen[2], seen
+    assert seen[3] == "", seen
+
+
+def test_the_notification_path_cannot_cost_the_memory_map(tmp_path: Path, monkeypatch):
+    """The lesson of 5bba7f2: the detector must not be able to cause the failure it detects.
+
+    `main()` prints `{}` on an exception, so a raise anywhere in the new code would withhold the
+    memory map and the context line from every turn — which is a worse outage than the one this
+    feature reports.
+    """
+    _quiet_project(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    log = tmp_path / "hook-errors.log"
+    monkeypatch.setattr(hooklog, "ERROR_LOG", log)
+
+    def boom(*a, **k):
+        raise RuntimeError("the notification path exploded")
+
+    monkeypatch.setattr(ups.notify, "message", boom)
+    out = ups.run({"transcript_path": str(tmp_path / "t.jsonl")}, root=tmp_path)
+    assert "Memory map" in out["hookSpecificOutput"]["additionalContext"]
+    assert "systemMessage" not in out
+    # Swallowed, not lost: the guard logs where `hooklog` logs, which is the only trace a hook
+    # failure leaves and the first place the `hooks` check's fix text sends the reader.
+    assert "the notification path exploded" in log.read_text(encoding="utf-8")
+
+
+def test_an_unwritable_sidecar_costs_the_state_and_not_the_turn(tmp_path: Path, monkeypatch):
+    _quiet_project(tmp_path)
+    cfg = load_config(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    log = tmp_path / "hook-errors.log"
+    monkeypatch.setattr(hooklog, "ERROR_LOG", log)
+    monkeypatch.setattr(ups.turnstate, "write",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    out = ups.run({"transcript_path": str(tmp_path / "t.jsonl")}, root=tmp_path)
+    assert "Memory map" in out["hookSpecificOutput"]["additionalContext"]
+    assert "read-only" in log.read_text(encoding="utf-8")
+    assert turnstate.read(paths.turn_state_file(cfg)) == {}      # the state, and only the state
+
+
+def test_the_per_turn_hook_leaves_the_tree_walks_to_session_start(tmp_path: Path, monkeypatch):
+    """`ids=health.PER_TURN_IDS` is the per-turn budget, and nothing but this test enforces it.
+
+    Dropping the argument runs all eleven checks on every prompt and nothing else goes red:
+    confirmed 2026-10-01 by changing it to `ids=None`, when the other 420 tests passed and this was
+    the only failure. The figures in `healthchecks.PER_TURN_IDS`' comment, measured the same day, are
+    what makes that silence expensive — `sidecars` 605.770 ms and `capture` 1463.639 ms, worst
+    column, against 1.121 ms for the dearest check that stays.
+
+    The checks are read off `health.run`'s return rather than off its `ids` argument, so the test
+    pins what ran and not how it was asked for.
+    """
+    _quiet_project(tmp_path)
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    ran: list[str] = []
+    real = ups.health.run
+
+    def spy(*a, **k):
+        checks = real(*a, **k)
+        ran.extend(check.id for check in checks)
+        return checks
+
+    monkeypatch.setattr(ups.health, "run", spy)
+    ups.run({"transcript_path": str(tmp_path / "t.jsonl")}, root=tmp_path)
+    assert "capture_live" in ran, ran        # the hook reached health.run at all
+    assert "sidecars" not in ran, ran
+    assert "vault" not in ran, ran
+    assert "capture" not in ran, ran
