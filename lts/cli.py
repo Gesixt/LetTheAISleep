@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import (anchor, digest, doctor, memorymap, naming, paths, pending, status, stm,
-                 sync, transcript, watermark)
+from lts import (anchor, digest, health, journal, memorymap, naming, paths,
+                 pending, status, stm, sync, transcript, turnstate, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
 
@@ -18,6 +19,28 @@ def _cfg(root: str | None):
 
 def _add_root(sp) -> None:
     sp.add_argument("--root", default=None)
+
+
+def _unusable_transcript(value: str) -> str | None:
+    """Why `value` cannot be read as a transcript, or None when it can.
+
+    The value is quoted in every message: a whitespace argument otherwise prints as an empty tail
+    and the reader cannot see what was wrong with it.
+    """
+    # An empty or blank value is a bad path, not an absent flag. It is what an unset shell
+    # variable expands to — and `Path("")` is `.`, so letting it through reached the filesystem
+    # as the current directory: `pressure` raised IsADirectoryError, `status` silently dropped
+    # its context line.
+    if not value.strip():
+        return f"transcript path is empty: {value!r}"
+    path = Path(value)
+    if not path.exists():
+        return f"transcript not found: {str(path)!r}"
+    if not path.is_file():
+        return f"transcript is not a file: {str(path)!r}"
+    if not os.access(path, os.R_OK):
+        return f"transcript is not readable: {str(path)!r}"
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,8 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true")
 
     p_doctor = sub.add_parser("doctor")
-    _add_root(p_doctor)
     p_doctor.add_argument("--json", action="store_true")
+    p_doctor.add_argument(
+        "--transcript",
+        help="transcript path, enabling the capture and pressure checks (the SessionStart hook "
+             "omits it: one parse of a large transcript measured ~1.5 s, and the two these "
+             "checks need would consume most of the session-load budget on every run)",
+    )
+    _add_root(p_doctor)
 
     p_digest = sub.add_parser("digest")
     _add_root(p_digest)
@@ -91,6 +120,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run(args) -> int:
     cfg = _cfg(getattr(args, "root", None))
+
+    # One rule for every command that takes `--transcript`, read once here rather than per
+    # command: downstream, an unreadable transcript is not an absent measurement but a green one.
+    # `transcript.context_tokens` returns 0 for a file that is not there, so `lts pressure` prints
+    # "none", `status`'s pressure block reads 0%, and `doctor`'s `pressure` check lands on `ok` —
+    # each a confident answer from a read that never happened. All three take the path from a
+    # human at a terminal, where a typo is the ordinary case; nothing shells out to them.
+    # Only `None` — the flag omitted — skips the guard. An omitted flag asks a narrower question,
+    # and the commands that allow it already say which measurements they did not make; an empty
+    # string is a path that was given and is unusable, and `_unusable_transcript` says so.
+    given = getattr(args, "transcript", None)
+    unusable = _unusable_transcript(given) if given is not None else None
+    if unusable:
+        print(f"lts: {unusable}", file=sys.stderr)
+        return 2
 
     if args.cmd == "stm":
         if args.op in ("append", "clear"):
@@ -137,14 +181,21 @@ def _run(args) -> int:
         elif args.op == "clear":
             pending.clear_all(d)
     elif args.cmd == "pressure":
-        # Must match what the hook reports. This used to measure `len(file) / 4` against a
-        # hardcoded 200k window: a transcript is append-only across `--resume`, so its size is
-        # the whole history of the project. On a real one that read 45,413,420 tokens (9900%)
-        # while the session was at 28%.
-        tokens = transcript.context_tokens(Path(args.transcript))
-        print(transcript.pressure_level(
+        # Must match what the hook reports. This used to measure `len(file) // 4` against a
+        # hardcoded 200,000-token window: a transcript is append-only across `--resume`, so its
+        # size is the whole history of the project. On ppss that estimate was 45,413,420 tokens —
+        # 22,707% of that window, computed from the recorded count — while the live session held
+        # 301,343 tokens of its configured 1,000,000. (The "9900%" this branch quoted alongside
+        # the same token count follows from no window; `_check_pressure` says what reconciles.)
+        # A transcript with no `usage` record yet is a real state — a session before its first
+        # assistant message — and there the size estimate is all there is, so the fallback stays.
+        # What it must not do is read like a measurement: the level leads the line, and the line
+        # says when the figure behind it was estimated. Same wording as `lts status`.
+        tokens, source = transcript.measure_context(Path(args.transcript))
+        level = transcript.pressure_level(
             tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
-        ))
+        )
+        print(f"{level}{status.provenance_note(source)}")
     elif args.cmd == "status":
         tp = Path(args.transcript) if args.transcript else None
         metrics = status.collect(cfg, transcript_path=tp)
@@ -153,12 +204,37 @@ def _run(args) -> int:
         else:
             print(status.render(metrics))
     elif args.cmd == "doctor":
-        report = doctor.collect(cfg)
+        # The journal is read here for the same reason the hook reads it: `anchor_delivery` and
+        # `capture_progress` are the two checks with no filesystem evidence to work from, so
+        # without history they skip — and they skipped on every human-run `doctor`, in the one
+        # command whose job is to report health.
+        checks = health.run(
+            cfg,
+            transcript_path=Path(args.transcript) if args.transcript else None,
+            history=journal.tail(paths.health_journal_file(cfg), health.TREND_WINDOW)
+            if cfg.configured else None,
+            # `capture_live` compares two prompts, and `doctor` has no prompt of its own: the last
+            # state the per-turn hook wrote is the only evidence available here, which is why the
+            # check dates what it says.
+            turn=turnstate.read(paths.turn_state_file(cfg)) if cfg.configured else None,
+        )
         if args.json:
-            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+            print(json.dumps(
+                {
+                    "worst": health.worst(checks),
+                    "checks": [
+                        # No `default=` encoder: `Check`'s four fields are `str | None` by
+                        # construction, so a field that is not one should raise here rather than
+                        # be stringified into a shape the caller cannot parse back.
+                        {"id": c.id, "level": c.level, "message": c.message, "fix": c.fix}
+                        for c in checks
+                    ],
+                },
+                ensure_ascii=False, indent=2,
+            ))
         else:
-            print(doctor.render(report))
-        return 0 if report["ok"] else 1
+            print(health.render(checks))
+        return 1 if health.worst(checks) == "fail" else 0
     elif args.cmd == "digest":
         report = digest.collect(cfg, since=args.since)
         if args.json:

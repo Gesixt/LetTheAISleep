@@ -20,7 +20,9 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
 
     pressure = None
     if transcript_path is not None:
-        tokens = transcript.context_tokens(Path(transcript_path))
+        # `measure_context`, not `context_tokens`: `source` is what lets `_check_pressure` refuse
+        # to green a figure that was estimated from a file holding no usage record at all.
+        tokens, source = transcript.measure_context(Path(transcript_path))
         window = cfg.context_window
         pressure = {
             "tokens": tokens,
@@ -29,6 +31,7 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
             "level": transcript.pressure_level(
                 tokens, window, cfg.pressure_warn, cfg.pressure_force
             ),
+            "source": source,
         }
 
     a = anchor.read_anchor(paths.anchor_file(cfg))
@@ -67,6 +70,49 @@ def _name_hint(metrics: dict) -> str | None:
     return f"  Basic Memory: reindex -p {name}  ·  project info {slug}"
 
 
+# One wording for both surfaces that print a figure to a human: `lts status` and `lts pressure`.
+ESTIMATED = "estimated from file size — no usage record was found"
+UNREAD = "not measured — the transcript could not be read"
+
+
+def provenance_note(source: str) -> str:
+    """The parenthetical for a figure's provenance, or "" when it was really measured.
+
+    Keyed on the provenance itself, not on `!= USAGE`. Every caller used the latter, which made
+    `ESTIMATED` the label for `NO_FILE` too — a sentence claiming a file-size estimate for a file
+    nothing could read. It was unreachable, but only by accident and in two different modules:
+    `lts pressure` refuses an unreadable path at exit 2, and `_context_line` returns nothing when
+    the token count is 0, which `NO_FILE` always is. A guard in one module is not what should keep
+    a sentence in another module true.
+    """
+    if source == transcript.USAGE:
+        return ""
+    return f"  ({ESTIMATED if source == transcript.ESTIMATE else UNREAD})"
+
+
+def _context_figure(pr: dict) -> str:
+    """The context reading, with a percentage only where one can be true.
+
+    This line printed "45413420/1000000 tok (4541%) — unknown": an honest level beside a figure
+    that cannot be one, in the same sentence, in the report a human reads. A percentage above 100
+    is never real, so the numbers are stated and no percentage is computed — the same rule
+    `UserPromptSubmit._context_line` follows, kept identical on purpose.
+    """
+    tokens, window = pr["tokens"], pr["window"]
+    if window <= 0:
+        return f"{tokens} tok, no context window configured — set `[context] window` in config.toml"
+    if tokens > window:
+        return (f"{tokens}/{window} tok — impossible, so the measurement or `[context] window` "
+                f"is wrong; treat the figure as unknown")
+    warn = "  ⚠ time to /sleep" if pr["level"] == "force" else (
+        "  ⚠ consider /sleep" if pr["level"] == "warn" else ""
+    )
+    # An estimate says so here rather than reading like a measurement: it is `len(file) // 4` over
+    # a transcript that spans the whole project, which is how this figure went wrong to begin with.
+    note = provenance_note(pr.get("source", transcript.USAGE))
+    return f"{tokens}/{window} tok ({round(pr['ratio'] * 100)}%) — {pr['level']}{warn}{note}"
+
+
 def render(metrics: dict) -> str:
     s = metrics["stm"]
     p = metrics["pending"]
@@ -84,13 +130,7 @@ def render(metrics: dict) -> str:
     ]
     pr = metrics["pressure"]
     if pr is not None:
-        pct = round(pr["ratio"] * 100)
-        warn = "  ⚠ time to /sleep" if pr["level"] == "force" else (
-            "  ⚠ consider /sleep" if pr["level"] == "warn" else ""
-        )
-        lines.append(
-            f"  Context:      {pr['tokens']}/{pr['window']} tok ({pct}%) — {pr['level']}{warn}"
-        )
+        lines.append(f"  Context:      {_context_figure(pr)}")
     anchor_state = "present" if a["exists"] else "absent"
     updated = f", updated {a['updated']}" if a["updated"] else ""
     lines.append(

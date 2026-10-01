@@ -55,7 +55,16 @@ def mark_at(when: datetime | None = None) -> dict:
 
 def entries_after(transcript_path: Path, mark: dict) -> list[dict]:
     """The exchanges of `transcript_path` that follow `mark` (all of them when it is empty)."""
-    exchanges = read_exchanges(Path(transcript_path))
+    return exchanges_after(read_exchanges(Path(transcript_path)), mark)
+
+
+def exchanges_after(exchanges: list[dict], mark: dict) -> list[dict]:
+    """The same resolution, over exchanges already in hand.
+
+    Split out so that a caller which must also ask whether the transcript yielded any exchanges at
+    all — `healthchecks._check_capture`, which reports a skip rather than a clean bill when it
+    yielded none — can answer both questions from one parse instead of reading the file twice.
+    """
     if not mark:
         return exchanges
 
