@@ -74,11 +74,14 @@ def advance(previous: dict, *, capture_mark: str | None, at: str | None = None,
     from "this turn". So a `session_id` that differs from the stored one starts the count at 0.
 
     `session_id` is "a stable identifier for this session", and the caller chooses it. The per-turn
-    hook should read `session_id` from its event payload: that field name is *not* observed in a real
-    `UserPromptSubmit` payload, but it is in a real `Stop` one (`{"session_id": ..., "cwd": ...,
-    "hook_event_name": "Stop", ...}`, recorded 2026-10-01 from a trace log the user had pasted into
-    their terminal) alongside the other common envelope fields, and `claude/hooks/pre_compact.py` has
-    read `event.get("session_id", "default")` in production since before this branch. `None` means
+    hook reads `session_id` from its event payload, and that field **is** there: observed 2026-10-01
+    with a probe in the deployed clone, a real `UserPromptSubmit` payload carries
+    `{"session_id", "transcript_path", "cwd", "scratchpad_dir", "prompt_id", "permission_mode",
+    "hook_event_name", "prompt"}`. (When this docstring was first written the payload had not been
+    captured, and it said the field was *not* observed there — reasoning from a real `Stop` payload
+    and from `claude/hooks/pre_compact.py`, which has read `event.get("session_id", "default")` in
+    production since before this branch. The inference was right and the claim about the evidence was
+    not, which is why it is corrected here rather than quietly deleted.) `None` means
     the caller could not tell — `lts doctor` reads this file and never writes it — and is not a new
     session: the count continues, because a reset on every unknown would disable the only
     mid-session detector of a dead `Stop` hook. A caller with no id in hand but a per-session path in
