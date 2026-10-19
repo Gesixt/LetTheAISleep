@@ -150,8 +150,21 @@ def _run(args) -> int:
             # Step 6 of /sleep runs mid-turn: tell the hooks that everything up to now is
             # consolidated, or the Stop hook refills the buffer with the sleep's own
             # narration and the following /compact snapshots a chapter already in notes.
+            #
+            # Only when a note was actually written, though. Arming is a claim about long-term
+            # memory, and the skill's "clear **only after** the writes above succeeded" is a soft
+            # instruction the model can reorder or skip, while this half is hard. Emptying the
+            # buffer stays unconditional — a developer discarding a buffer on purpose gets that —
+            # but it no longer declares the span behind it consolidated.
             paths.ensure_sidecar(cfg)
-            watermark.arm(paths.sleep_flag_file(cfg))
+            if watermark.note_written_since(
+                paths.vault_root(cfg), watermark.read_mark(paths.sleep_mark_file(cfg))
+            ):
+                watermark.arm(paths.sleep_flag_file(cfg))
+            else:
+                print("buffer cleared, but no note in the vault is newer than the sleep mark — "
+                      "not marking this span consolidated. If a sleep is in progress, write the "
+                      "session note first, then clear.")
     elif args.cmd == "anchor":
         if args.op == "render":
             print(anchor.render_anchor(anchor.read_anchor(paths.anchor_file(cfg))))

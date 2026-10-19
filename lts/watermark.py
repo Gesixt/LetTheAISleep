@@ -158,6 +158,43 @@ def armed_at(flag_path: Path) -> str | None:
     return stamp if isinstance(stamp, str) and stamp else None
 
 
+def note_written_since(vault_root: Path, mark: dict) -> bool:
+    """Does the vault hold a note modified after `mark` — i.e. did a sleep actually write anything?
+
+    The one fact that distinguishes "a sleep finished here" from "the buffer was emptied here".
+    `lts stm clear` arms the sleep latch, and the latch is a claim that everything behind it is in
+    long-term notes; before 2026-10-19 that claim rested on nothing but the command having been
+    run. On 2026-10-16 it was run in `nextcloud-development` on a day whose vault gained no file
+    at all, and the sleep mark later jumped ~20 hours over material no note held.
+
+    mtime rather than frontmatter: Basic Memory writes the file, so the filesystem's own record is
+    the cheapest honest evidence, and it cannot be back-dated by a note's contents. The walk stops
+    at the first note newer than the mark — on a vault of 250 notes the full walk measured
+    23.84–29.28 ms on fuseblk (2026-10-01), and this runs once per sleep, not per turn.
+
+    `False` for a vault that is absent or empty, and for a mark whose timestamp is unreadable the
+    floor is the epoch, so *any* note counts — an unreadable mark is not grounds to refuse a sleep
+    that did write something.
+    """
+    root = Path(vault_root)
+    if not root.is_dir():
+        return False
+    floor = 0.0
+    stamp = (mark or {}).get("timestamp") if isinstance(mark, dict) else None
+    if isinstance(stamp, str) and stamp:
+        try:
+            floor = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            floor = 0.0
+    for note in root.rglob("*.md"):
+        try:
+            if note.stat().st_mtime > floor:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def armed_recently(flag_path: Path, now: datetime | None = None,
                    max_age: timedelta = SLEEP_FLAG_MAX_AGE) -> bool:
     """Is this flag a sleep finishing *now*, rather than a latch left on disk?

@@ -46,6 +46,7 @@ def test_stm_append_read_clear(tmp_path: Path, capsys):
     main(["stm", "read", "--root", str(tmp_path)])
     assert "fact one" in capsys.readouterr().out
     main(["stm", "clear", "--root", str(tmp_path)])
+    capsys.readouterr()  # the clear explains why it did not arm; this test is about the buffer
     main(["stm", "read", "--root", str(tmp_path)])
     assert capsys.readouterr().out.strip() == ""
 
@@ -222,10 +223,42 @@ def test_stm_clear_arms_the_sleep_flag(tmp_path: Path):
     from lts import paths, watermark
     from lts.config import load_config
     make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    # Steps 3–4 of the skill ran first: a note exists, and it is newer than the sleep mark.
+    note = paths.vault_root(cfg) / "session-memory" / "Session_2026-10-19_0835.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# consolidated", encoding="utf-8")
+
     main(["stm", "append", "--root", str(tmp_path), "--text", "a fact"])
     main(["stm", "clear", "--root", str(tmp_path)])
-    cfg = load_config(tmp_path)
     assert watermark.is_armed(paths.sleep_flag_file(cfg))
+
+
+def test_stm_clear_does_not_arm_when_the_vault_gained_nothing(tmp_path: Path, capsys):
+    """Arming says "a sleep happened"; only a note written past the sleep mark is evidence of one.
+
+    Reproduced in production 2026-10-16: `lts stm clear` ran in `nextcloud-development` with no
+    note written that day, armed the flag, and a later `Stop` advanced the sleep mark ~20 hours
+    over material no note held. The clear itself is still honoured — a developer emptying the
+    buffer on purpose gets what they asked for — but it no longer declares the span consolidated.
+    """
+    from lts import paths, stm, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    stale = paths.vault_root(cfg) / "knowledge-base" / "Old.md"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("# written long before this sleep mark", encoding="utf-8")
+    os.utime(stale, (1_760_000_000, 1_760_000_000))  # 2025-10-09, well behind the mark below
+    watermark.write_mark(paths.sleep_mark_file(cfg), watermark.mark_at())
+
+    main(["stm", "append", "--root", str(tmp_path), "--text", "a fact"])
+    main(["stm", "clear", "--root", str(tmp_path)])
+
+    assert stm.is_empty(paths.stm_file(cfg)), "the buffer is still cleared"
+    assert not watermark.is_armed(paths.sleep_flag_file(cfg))
+    assert "no note" in capsys.readouterr().out.lower(), "and the caller is told why"
 
 
 def _sync_fixture(tmp_path: Path):
