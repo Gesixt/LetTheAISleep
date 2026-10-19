@@ -28,14 +28,23 @@ def run(event: dict, *, root: Path | None = None, now: datetime | None = None) -
     transcript_path = Path(event.get("transcript_path", ""))
     mark_file = paths.sleep_mark_file(cfg)
 
-    if watermark.is_armed(paths.sleep_flag_file(cfg)):
-        # A sleep is finishing in this very turn (auto-compact can beat the Stop hook to it):
-        # everything up to here is already consolidated. The flag stays armed — only Stop
-        # knows when the turn ends, and disarming here left the rest of the sleep's own
-        # narration to be captured into the buffer the sleep had just emptied.
-        watermark.write_mark(mark_file, watermark.mark_at(now))
-        log_note("pre_compact.py", "sleep in progress; nothing to snapshot")
-        return {}
+    flag = paths.sleep_flag_file(cfg)
+    if watermark.is_armed(flag):
+        if watermark.armed_recently(flag, now):
+            # A sleep is finishing in this very turn (auto-compact can beat the Stop hook to it):
+            # everything up to here is already consolidated. The flag stays armed — only Stop
+            # knows when the turn ends, and disarming here left the rest of the sleep's own
+            # narration to be captured into the buffer the sleep had just emptied.
+            watermark.write_mark(mark_file, watermark.mark_at(now))
+            log_note("pre_compact.py", "sleep in progress; nothing to snapshot")
+            return {}
+        # Not a sleep in progress but a latch left on disk, and this hook advances the sleep mark
+        # on that path too — so the rule is enforced here as well, or the frontier could still
+        # move. Disarmed rather than left: the turn it belonged to is long over.
+        stale = watermark.armed_at(flag)
+        watermark.disarm(flag)
+        log_note("pre_compact.py", f"sleep flag armed at {stale or 'an unrecorded time'} is past "
+                                   f"{watermark.SLEEP_FLAG_MAX_AGE}; snapshotting as usual")
 
     new = watermark.entries_after(transcript_path, watermark.read_mark(mark_file))
     if not new:

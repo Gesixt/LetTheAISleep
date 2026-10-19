@@ -162,6 +162,7 @@ def all_checks(
         ("hooks", lambda: _check_hooks(cfg)),
         ("vault", lambda: _check_vault(cfg)),
         ("marks", lambda: _check_marks(cfg, now)),
+        ("sleep_evidence", lambda: _check_sleep_evidence(cfg)),
         ("capture", lambda: _check_capture(cfg, transcript_path, now)),
         ("pressure", lambda: _check_pressure(metrics)),
         ("anchor_fresh", lambda: _check_anchor_fresh(cfg)),
@@ -596,6 +597,92 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
     return Check("marks", "ok",
                  f"marks consistent: the sleep mark ({sleep.isoformat()}) is at or behind the "
                  f"capture mark ({capture.isoformat()})")
+
+
+def _check_sleep_evidence(cfg: Config) -> Check:
+    """Does the vault hold anything written where the sleep mark says consolidation reached?
+
+    `_check_marks` compares the two marks **with each other**; both can be perfectly coherent while
+    the sleep mark stands somewhere no sleep ever stood. That is the 2026-10-16 state in
+    `nextcloud-development`: sleep mark at 09:40:03Z, newest note 20 hours behind it, `marks` `ok`,
+    `vault` `ok` on 40 notes, and 90 buffered exchanges the mark declared already remembered.
+
+    This is the backstop, not the fix. `lts stm clear` no longer arms without a note, and a stale
+    latch no longer moves the mark — but both of those guard the *writers*, and this is the only
+    check that reads the claim itself and asks what backs it.
+
+    The slack is `watermark.SLEEP_FLAG_MAX_AGE`, reused rather than measured into its own constant.
+    The span is not the same one that bound measures — the latch bound is `lts stm clear` → `Stop`
+    (8.3–16.9 s over six sleeps), while this gap starts earlier, at the note write, and so also
+    carries the rest of step 6. Measured 2026-10-19 on the two projects whose most recent event is
+    a real sleep: **14 s** and **43 s**. Five minutes is ~7× the larger, and the direction that
+    matters is one-sided anyway — a note *newer* than the mark is the healthy case and is never
+    reported, which is the ordinary state of a project that has worked since its last sleep
+    (measured the same day: 32 min and 86 min ahead on two others).
+
+    Note what it does **not** subsume. `_check_marks` catches the variant where `PreCompact` ate the
+    stale latch, because that hook moves the sleep mark alone and leaves it ahead of the capture
+    mark — found live in `ppss`, 2026-10-16. It cannot catch the `Stop` variant, which writes both
+    marks to the same instant and so stays perfectly consistent — `nextcloud-development`, the same
+    day. Two signatures, one cause, and only this check sees both.
+
+    Deliberately **not** in `PER_TURN_IDS` — it walks the vault (23.84–29.28 ms on 250 notes over
+    fuseblk, 2026-10-01), which is the cost the per-turn subset exists to avoid.
+    """
+    mark = watermark.read_mark(paths.sleep_mark_file(cfg))
+    stamp = mark.get("timestamp") if isinstance(mark, dict) else None
+    if not isinstance(stamp, str) or not stamp:
+        return Check("sleep_evidence", "skip",
+                     "no sleep mark with a timestamp — nothing claims to be consolidated yet")
+    try:
+        frontier = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return Check("sleep_evidence", "skip",
+                     f"the sleep mark carries no readable timestamp ({stamp!r}) — `marks` reports "
+                     "that, and this check cannot place the frontier without it")
+
+    vault = paths.vault_root(cfg)
+    newest, newest_note = None, None
+    for note in vault.rglob("*.md") if vault.is_dir() else []:
+        try:
+            when = note.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or when > newest:
+            newest, newest_note = when, note
+    if newest is None:
+        return Check("sleep_evidence", "skip",
+                     "no readable notes in the vault to compare the sleep mark against — `vault` "
+                     "reports an empty or missing vault")
+
+    written = datetime.fromtimestamp(newest, timezone.utc)
+    gap = frontier - written
+    if gap > watermark.SLEEP_FLAG_MAX_AGE:
+        return Check(
+            "sleep_evidence", "fail",
+            f"the sleep mark ({frontier.isoformat()}) is {_duration(gap)} ahead of the newest note "
+            f"in the vault ({written.isoformat()}, {newest_note.name if newest_note else '?'}) — "
+            "it claims that span is consolidated and nothing was written there",
+            "treat everything after that note as un-consolidated: it is still in the STM buffer "
+            "unless the buffer was cleared too, and otherwise only in the transcript. Run /sleep, "
+            "and do not rely on the buffer's size as the measure of what is missing",
+        )
+    side = "behind" if gap >= timedelta(0) else "ahead of"
+    return Check("sleep_evidence", "ok",
+                 f"the sleep mark ({frontier.isoformat()}) is backed by the vault: the newest note "
+                 f"({written.isoformat()}) is {_duration(gap)} {side} it")
+
+
+def _duration(gap: timedelta) -> str:
+    """`timedelta` prints `0:00:14` and `1 day, 3:40:00`; this check's message is read by a human."""
+    seconds = int(abs(gap).total_seconds())
+    if seconds < 90:
+        return f"{seconds} s"
+    if seconds < 5400:
+        return f"{seconds // 60} min"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 86400:.1f} days"
 
 
 def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> Check:

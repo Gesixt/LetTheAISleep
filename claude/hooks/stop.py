@@ -53,14 +53,23 @@ def capture(event: dict, *, root: Path | None = None, now: datetime | None = Non
     paths.ensure_sidecar(cfg)
     transcript_path = Path(event.get("transcript_path", ""))
 
-    if watermark.is_armed(paths.sleep_flag_file(cfg)):
-        here = watermark.mark_at(now)
-        watermark.write_mark(paths.capture_mark_file(cfg), here)
-        watermark.write_mark(paths.sleep_mark_file(cfg), here)
-        # Stop is the only hook that knows the turn has ended, so it owns disarming.
-        watermark.disarm(paths.sleep_flag_file(cfg))
-        log_note("stop.py", "sleep just finished; dropped this turn instead of refilling STM")
-        return 0
+    flag = paths.sleep_flag_file(cfg)
+    if watermark.is_armed(flag):
+        if watermark.armed_recently(flag, now):
+            here = watermark.mark_at(now)
+            watermark.write_mark(paths.capture_mark_file(cfg), here)
+            watermark.write_mark(paths.sleep_mark_file(cfg), here)
+            # Stop is the only hook that knows the turn has ended, so it owns disarming.
+            watermark.disarm(flag)
+            log_note("stop.py", "sleep just finished; dropped this turn instead of refilling STM")
+            return 0
+        # A latch nobody consumed. Honouring it would advance the sleep mark to *now* and mark
+        # everything behind it consolidated — the 2026-10-16 incident, where that span was ~20
+        # hours and 90 buffered exchanges that no note held. See `watermark.SLEEP_FLAG_MAX_AGE`.
+        stale = watermark.armed_at(flag)
+        watermark.disarm(flag)
+        log_note("stop.py", f"sleep flag armed at {stale or 'an unrecorded time'} is past "
+                            f"{watermark.SLEEP_FLAG_MAX_AGE}; ignored it and captured normally")
 
     new = watermark.entries_after(transcript_path, _capture_mark(cfg))
     buf = paths.stm_file(cfg)

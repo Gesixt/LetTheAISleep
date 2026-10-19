@@ -21,10 +21,27 @@ message of the turn may not be in the file yet when the hook reads it.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lts.transcript import read_exchanges
+
+#: How long after `arm` a sleep flag may still be honoured.
+#:
+#: Measured 2026-10-19 over the six sleeps whose arming and consumption are both on record, in two
+#: real projects: `lts stm clear` → the `Stop` that consumed it took **8.3, 9.3, 11.0, 13.6, 14.4 and
+#: 16.9 seconds**. The latch is meant to be eaten by the very next `Stop`, so that is the whole
+#: intended lifetime.
+#:
+#: Five minutes is an ~18× margin over the slowest of those six, and the margin is deliberate rather
+#: than measured: a sleep whose tail runs long — a big vault reindex, team-mode reminders, a long
+#: closing message — would extend the gap, and no such sleep is in the six. The margin is safe to
+#: spend because the two errors are not symmetric. **Too generous and the sleep mark moves over
+#: material nobody consolidated, silently, with every check green** — that is the 2026-10-16
+#: incident, whose gap was hours, four orders of magnitude outside this bound. **Too tight and the
+#: sleep's own narration lands in the buffer**, which the next sleep folds in and which `lts status`
+#: shows. Noise is recoverable; a moved frontier is not.
+SLEEP_FLAG_MAX_AGE = timedelta(minutes=5)
 
 
 def mark_of(transcript_path: Path) -> dict:
@@ -103,15 +120,108 @@ def write_mark(path: Path, mark: dict) -> None:
     path.write_text(json.dumps(mark, ensure_ascii=False), encoding="utf-8")
 
 
-def arm(flag_path: Path) -> None:
-    """Announce that a sleep just finished, so the hooks discard their own noise."""
+def arm(flag_path: Path, at: datetime | None = None) -> None:
+    """Announce that a sleep just finished, so the hooks discard their own noise.
+
+    The instant is written into the flag because the flag is a **latch on disk with no owner**:
+    `lts stm clear` sets it and only the next `Stop` clears it, so nothing bounds how long it
+    waits. Consumed 2026-10-16 by a `Stop` hours after it was set, it advanced the sleep mark
+    ~20 hours over material that was in no note — the consolidation frontier moved in the
+    direction of forgetting, with every health check green. See `armed_at`.
+    """
     flag_path = Path(flag_path)
     flag_path.parent.mkdir(parents=True, exist_ok=True)
-    flag_path.write_text("", encoding="utf-8")
+    flag_path.write_text(json.dumps(mark_at(at), ensure_ascii=False), encoding="utf-8")
 
 
 def is_armed(flag_path: Path) -> bool:
     return Path(flag_path).exists()
+
+
+def armed_at(flag_path: Path) -> str | None:
+    """When the flag was armed, or `None` when that cannot be established.
+
+    `None` is not "now" and not "long ago" — it is ignorance, and it has one ordinary cause: every
+    flag written before this field existed is an empty file, so each deployed project may hold one.
+    The caller decides, and `stop.py`/`pre_compact.py` decide the same way: an age they cannot
+    establish is treated as stale. The asymmetry is what settles it — honouring a latch of unknown
+    age moves the sleep mark over material nobody consolidated, while ignoring one costs the few
+    captured lines of the sleep's own narration, which the next sleep folds in anyway.
+    """
+    try:
+        data = json.loads(Path(flag_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    stamp = data.get("timestamp")
+    return stamp if isinstance(stamp, str) and stamp else None
+
+
+def note_written_since(vault_root: Path, mark: dict) -> bool:
+    """Does the vault hold a note modified after `mark` — i.e. did a sleep actually write anything?
+
+    The one fact that distinguishes "a sleep finished here" from "the buffer was emptied here".
+    `lts stm clear` arms the sleep latch, and the latch is a claim that everything behind it is in
+    long-term notes; before 2026-10-19 that claim rested on nothing but the command having been
+    run. On 2026-10-16 it was run in `nextcloud-development` on a day whose vault gained no file
+    at all, and the sleep mark later jumped ~20 hours over material no note held.
+
+    mtime rather than frontmatter: Basic Memory writes the file, so the filesystem's own record is
+    the cheapest honest evidence, and it cannot be back-dated by a note's contents. The walk stops
+    at the first note newer than the mark — on a vault of 250 notes the full walk measured
+    23.84–29.28 ms on fuseblk (2026-10-01), and this runs once per sleep, not per turn.
+
+    `False` for a vault that is absent or empty, and for a mark whose timestamp is unreadable the
+    floor is the epoch, so *any* note counts — an unreadable mark is not grounds to refuse a sleep
+    that did write something.
+    """
+    root = Path(vault_root)
+    if not root.is_dir():
+        return False
+    floor = 0.0
+    stamp = (mark or {}).get("timestamp") if isinstance(mark, dict) else None
+    if isinstance(stamp, str) and stamp:
+        try:
+            floor = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            floor = 0.0
+    for note in root.rglob("*.md"):
+        try:
+            if note.stat().st_mtime > floor:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def armed_recently(flag_path: Path, now: datetime | None = None,
+                   max_age: timedelta = SLEEP_FLAG_MAX_AGE) -> bool:
+    """Is this flag a sleep finishing *now*, rather than a latch left on disk?
+
+    Both hooks ask this one question so they cannot drift apart — `pre_compact.py` advances the
+    sleep mark on the armed path too, so a rule enforced in only one of them would leave the other
+    able to move the frontier on its own.
+
+    `False` for every state that is not a readable stamp inside `[now, now - max_age]`: no flag, no
+    stamp (`armed_at` explains why that is ordinary), an unparseable stamp, an age past the bound,
+    and an age **below zero**. A flag stamped in the future is as unverifiable as one with no stamp:
+    the two clocks are the same clock, so the only ways to get there are a rewritten file or a
+    machine whose time moved, and neither is evidence that a sleep is in progress.
+    """
+    stamp = armed_at(flag_path)
+    if stamp is None:
+        return False
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return timedelta(0) <= now - when <= max_age
 
 
 def disarm(flag_path: Path) -> None:

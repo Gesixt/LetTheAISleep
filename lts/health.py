@@ -42,7 +42,7 @@ _SYMBOL = {"fail": "✗", "warn": "!", "skip": "·", "ok": "✓"}
 
 _IDS = (
     "config", "sidecars", "hooks", "vault",
-    "marks", "capture", "pressure", "anchor_fresh",
+    "marks", "sleep_evidence", "capture", "pressure", "anchor_fresh",
     "anchor_delivery", "capture_progress", "capture_live",
 )
 

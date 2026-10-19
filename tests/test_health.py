@@ -1222,6 +1222,10 @@ def test_every_ok_names_the_quantities_it_claims_to_have_measured(tmp_path: Path
         "vault": ["2 notes", str(paths.vault_root(cfg))],
         # Both instants, because "consistent" is a claim about comparing them.
         "marks": ["2026-09-29T11:00:00+00:00", "2026-09-29T12:00:00+00:00"],
+        # The frontier it placed. The other side of its comparison is a note's mtime, which this
+        # fixture leaves at the filesystem's real clock and so cannot be named here; the comparison
+        # itself is pinned with controlled mtimes in the `sleep_evidence` tests below.
+        "sleep_evidence": ["2026-09-29T11:00:00+00:00", "newest note"],
         # The backlog it counted and the tolerance it compared the lag against.
         "capture": ["2 exchanges", "10 min"],
         # The two numbers whose ratio is the percentage.
@@ -1894,3 +1898,79 @@ def test_a_capture_mark_with_no_orderable_stamp_skips_rather_than_demanding(tmp_
                                   turn={"misses": 2, "at": "2026-10-01T06:00:00.000Z"}),
                        "capture_live")
         assert check.level == "fail", (label, check)
+
+
+def _one(cfg, check_id: str):
+    """The one check, through the real registry rather than a private call."""
+    found = [c for c in healthchecks.all_checks(cfg, ids={check_id}) if c.id == check_id]
+    assert len(found) == 1, f"{check_id} is not in the registry"
+    return found[0]
+
+def test_sleep_evidence_fails_when_the_frontier_outran_every_note(tmp_path: Path):
+    """The detector for the 2026-10-16 incident, reconstructed as a fixture.
+
+    The sleep mark says everything behind it is in long-term notes. The newest note in that
+    vault was from the previous day, 20 hours behind the mark — so the claim was false and no
+    check said so. `marks` compares the two marks with each other and both were coherent;
+    `vault` counts notes and there were 40; `capture_progress` was the only one that fired, an
+    hour later, and it is about the journal rather than about this.
+    """
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"session-memory": ["Session_2026-10-15_1250"]})
+    paths.ensure_sidecar(cfg)
+    note = next(paths.vault_root(cfg).rglob("*.md"))
+    day_before = datetime(2026, 10, 15, 9, 50, tzinfo=timezone.utc)
+    os.utime(note, (day_before.timestamp(), day_before.timestamp()))
+    watermark.write_mark(paths.sleep_mark_file(cfg),
+                         watermark.mark_at(datetime(2026, 10, 16, 9, 40, 3, tzinfo=timezone.utc)))
+
+    check = _one(cfg, "sleep_evidence")
+    assert check.level == "fail"
+    assert "2026-10-15" in check.message and "2026-10-16" in check.message
+
+
+def test_sleep_evidence_is_ok_right_after_a_real_sleep(tmp_path: Path):
+    """A sleep writes the note, then clears: the mark lands seconds *after* the newest note."""
+    cfg = _cfg(tmp_path)
+    _vault(tmp_path, {"session-memory": ["Session_2026-10-19_0835"]})
+    paths.ensure_sidecar(cfg)
+    note = next(paths.vault_root(cfg).rglob("*.md"))
+    written = datetime(2026, 10, 19, 5, 35, tzinfo=timezone.utc)
+    os.utime(note, (written.timestamp(), written.timestamp()))
+    watermark.write_mark(paths.sleep_mark_file(cfg),
+                         watermark.mark_at(written + timedelta(seconds=14)))
+
+    assert _one(cfg, "sleep_evidence").level == "ok"
+
+
+def test_sleep_evidence_skips_rather_than_guessing(tmp_path: Path):
+    """Two states it must not call healthy, and must not call broken either."""
+    cfg = _cfg(tmp_path)
+    paths.ensure_sidecar(cfg)
+    _vault(tmp_path, {"session-memory": ["Session_2026-10-19_0835"]})
+    assert _one(cfg, "sleep_evidence").level == "skip", "no sleep mark yet"
+
+    bare = _cfg(tmp_path / "bare")
+    paths.ensure_sidecar(bare)
+    watermark.write_mark(paths.sleep_mark_file(bare), watermark.mark_at())
+    assert _one(bare, "sleep_evidence").level == "skip", "no vault to read"
+
+
+def test_the_docs_state_the_number_of_checks_this_build_actually_has():
+    """The count in prose must depend on `_IDS`, not merely agree with it today.
+
+    `README.md` and the `/memory-status` skill both spell the number out, and prose is the one
+    place this project keeps getting wrong: the journal bound is still sized from a ten-check
+    record, and "eleven" survived in six places until `sleep_evidence` was added. A number that
+    only *agrees* goes quietly stale; this makes it fail loudly instead.
+    """
+    words = {9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen"}
+    expected = words[len(health._IDS)]
+    stale = set(words.values()) - {expected}
+    root = Path(__file__).resolve().parent.parent
+    for doc in (root / "README.md", root / "claude" / "skills" / "memory-status" / "SKILL.md"):
+        text = doc.read_text(encoding="utf-8").lower()
+        assert expected in text, f"{doc.name} never states the check count"
+        for wrong in stale:
+            assert f"{wrong} checks" not in text and f"{wrong} health checks" not in text, (
+                f"{doc.name} still says {wrong}, but there are {len(health._IDS)}")

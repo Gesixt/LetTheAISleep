@@ -130,6 +130,82 @@ def test_stop_drops_the_sleep_turn_when_the_sleep_flag_is_armed(tmp_path: Path):
     assert not watermark.is_armed(paths.sleep_flag_file(cfg))
 
 
+def test_stop_ignores_a_sleep_flag_older_than_the_bound(tmp_path: Path):
+    """A latch nobody consumed is not a sleep in progress, and must not move the sleep mark.
+
+    Reproduced in production 2026-10-16 in `nextcloud-development`: `lts stm clear` armed the flag,
+    no `Stop` consumed it for hours, and the one that finally did advanced the sleep mark ~20 hours
+    over 90 buffered exchanges that were in no note. Measured gap for six real sleeps: 8.3–16.9 s.
+    """
+    from datetime import datetime, timedelta, timezone
+    from lts import paths, stm, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "a day of work", "u1", "2026-10-16T09:00:00.000Z"),
+        _msg("assistant", "and its answer", "u2", "2026-10-16T09:30:00.000Z"),
+    ])
+    armed = datetime(2026, 10, 16, 6, 0, 0, tzinfo=timezone.utc)
+    watermark.arm(paths.sleep_flag_file(cfg), at=armed)
+
+    stop = _load("stop", HOOKS / "stop.py")
+    captured = stop.capture({"transcript_path": str(transcript)}, root=tmp_path,
+                            now=armed + timedelta(hours=3, minutes=40))
+
+    assert captured == 2, "a stale latch must not cost the turn"
+    assert not stm.is_empty(paths.stm_file(cfg))
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == {}, "the frontier must not move"
+    assert not watermark.is_armed(paths.sleep_flag_file(cfg)), "and the latch is cleared, not left"
+
+
+def test_stop_ignores_a_sleep_flag_that_cannot_say_when_it_was_armed(tmp_path: Path):
+    """Every flag on disk in a deployed project predates the stamp — an empty file."""
+    from lts import paths, stm, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    flag = paths.sleep_flag_file(cfg)
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("", encoding="utf-8")
+    transcript = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "work", "u1", "2026-10-16T09:00:00.000Z"),
+        _msg("assistant", "answer", "u2", "2026-10-16T09:30:00.000Z"),
+    ])
+
+    stop = _load("stop", HOOKS / "stop.py")
+    assert stop.capture({"transcript_path": str(transcript)}, root=tmp_path) == 2
+    assert not stm.is_empty(paths.stm_file(cfg))
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == {}
+    assert not watermark.is_armed(flag)
+
+
+def test_pre_compact_snapshots_rather_than_trusting_a_stale_latch(tmp_path: Path):
+    """The same latch reaches `PreCompact`, which advances the sleep mark on its own."""
+    from datetime import datetime, timedelta, timezone
+    from lts import paths, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    t = tmp_path / "t.jsonl"
+    _transcript(t, [
+        _msg("user", "unconsolidated material", "u1", "2026-10-16T09:00:00.000Z"),
+        _msg("assistant", "and its answer", "u2", "2026-10-16T09:30:00.000Z"),
+    ])
+    armed = datetime(2026, 10, 16, 6, 0, 0, tzinfo=timezone.utc)
+    watermark.arm(paths.sleep_flag_file(cfg), at=armed)
+
+    pre = _load("pre_compact", HOOKS / "pre_compact.py")
+    pre.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path,
+            now=armed + timedelta(hours=3, minutes=40))
+
+    assert len(_snapshots(tmp_path)) == 1, "material in no note must still be snapshotted"
+    assert not watermark.is_armed(paths.sleep_flag_file(cfg))
+
+
 def test_stop_marks_the_sleep_so_the_next_compact_is_silent(tmp_path: Path):
     make_project(tmp_path)
     from lts import paths, watermark
@@ -485,7 +561,10 @@ def test_stop_marks_the_sleep_at_the_hook_instant_not_the_last_flushed_message(t
     paths.ensure_sidecar(cfg)
     t = tmp_path / "t.jsonl"
     _transcript(t, [_msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z")])
-    watermark.arm(paths.sleep_flag_file(cfg))
+    # On the fixture's own clock, and inside the measured 8.3–16.9 s the latch really lives:
+    # armed "now" against a hook running in 2026-08-26 made this flag stale by two months.
+    watermark.arm(paths.sleep_flag_file(cfg),
+                  at=datetime(2026, 8, 26, 11, 1, 50, tzinfo=timezone.utc))
     hook_ran_at = datetime(2026, 8, 26, 11, 2, 3, 928000, tzinfo=timezone.utc)
 
     stop = _load("stop", HOOKS / "stop.py")
@@ -515,7 +594,8 @@ def test_pre_compact_leaves_the_sleep_flag_for_stop(tmp_path: Path):
     paths.ensure_sidecar(cfg)
     t = tmp_path / "t.jsonl"
     _transcript(t, [_msg("user", "/sleep", "u1", "2026-08-26T11:01:00.000Z")])
-    watermark.arm(paths.sleep_flag_file(cfg))
+    watermark.arm(paths.sleep_flag_file(cfg),
+                  at=datetime(2026, 8, 26, 11, 1, 20, tzinfo=timezone.utc))
 
     pre = _load("pre_compact", HOOKS / "pre_compact.py")
     pre.run({"session_id": "s", "transcript_path": str(t)},
