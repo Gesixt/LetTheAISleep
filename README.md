@@ -66,7 +66,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 >
 > A **fourth** failure mode turned up while this was being built, and it *is* a liveness failure: a
 > `Stop` hook that dies mid-session, where nothing notices until the next `/compact` because the only
-> record of what happened is written at `SessionStart`. So `lts doctor` runs eleven checks in four
+> record of what happened is written at `SessionStart`. So `lts doctor` runs twelve checks in four
 > kinds: **inventory** (is each part present — including that each of the
 > four hooks `lts` owns is wired and its script still exists on disk, since projects point at
 > `~/tools` by absolute path; a hook you wired yourself is outside what that check looks at),
@@ -103,7 +103,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 > puts on the screen. The first `/compact` after this ships is where it gets confirmed; until then,
 > treat the session-start line as emitted and not as seen.
 
-> **`capture_live`** is the eleventh check, and the only one that detects a dead `Stop` hook
+> **`capture_live`** is the only check that detects a dead `Stop` hook
 > *mid-session*: the trend checks read the sidecar's `health.jsonl`, which gains a record only at
 > `SessionStart`, so between two compactions they keep answering `ok` from the same five records
 > while every exchange goes uncaptured. It asks two things at once — has the capture mark stayed put
@@ -319,7 +319,7 @@ own are left alone; only the ones the clone ships are overwritten.
 | `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts doctor [--json] [--transcript PATH]` | Eleven health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--json` prints `{"worst": <level>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **eleven** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
+| `lts doctor [--json] [--transcript PATH]` | Twelve health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--json` prints `{"worst": <level>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **twelve** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
 | `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |
