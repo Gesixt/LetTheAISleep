@@ -39,6 +39,33 @@ everything worth keeping into linked long-term notes **without losing a single n
 > stamped when it is produced. Claude Code's own bookkeeping records — the four `user` entries
 > a `/compact` writes, and the compaction summary — are filtered out of the transcript
 > entirely, so they reach neither the STM buffer nor a snapshot.
+>
+> **The mark is not moved by `lts stm clear` itself.** The command sets a flag, and the next hook to
+> run — `Stop`, or `PreCompact` if an auto-compact beats it — is what writes the mark. That flag is a
+> latch on disk with no owner, and until 2026-10-19 nothing bounded how long it could wait. Both live
+> failures it produced are on record, on the same day, from the same cause:
+>
+> | project | what consumed the stale latch | marks afterwards | what `marks` said |
+> |---|---|---|---|
+> | `nextcloud-development` | `Stop` | sleep **and** capture set to one instant | `ok` — perfectly consistent |
+> | `ppss` | `PreCompact` | sleep mark alone, 42 s past the capture mark | `fail` |
+>
+> In the first the frontier moved ~20 hours over 90 exchanges that no note held *at that moment*,
+> and every check stayed green; in the second, 2.6 hours past every note in a 267-note vault. The
+> first span was recovered three days later only because the buffer happened not to be cleared
+> again — `PreCompact`'s backstop was off for it, since that hook snapshots only what lies *after*
+> the sleep mark. So the latch now
+> carries **when it was armed**, and a hook honours it only within `watermark.SLEEP_FLAG_MAX_AGE`
+> (5 minutes; the six sleeps on record consumed it in 8.3–16.9 s). Anything else — no stamp, an
+> unreadable one, one from the future, one past the bound — is a latch nobody consumed, and the hook
+> captures normally instead, logging why. Every flag written before this exists is an empty file, so
+> each already-installed project holds exactly that case.
+>
+> And `lts stm clear` **arms only when the vault gained a note** newer than the current sleep mark.
+> Arming claims the span behind it is in long-term notes; the skill's "clear only after the writes
+> succeeded" is an instruction the model can reorder, while the half that moves the frontier is not.
+> Emptying the buffer stays unconditional — doing that on purpose is a real thing to want — but it
+> then says plainly that it is not declaring anything consolidated.
 
 > **The memory map.** `/recall` is a skill, so using it is the model's decision — and the model
 > cannot decide to read notes it does not know exist. `SessionStart` used to return the "unfinished
@@ -71,7 +98,9 @@ everything worth keeping into linked long-term notes **without losing a single n
 > four hooks `lts` owns is wired and its script still exists on disk, since projects point at
 > `~/tools` by absolute path; a hook you wired yourself is outside what that check looks at),
 > **invariants** (is the sleep mark behind the capture mark, is the measured context inside the
-> window), **trend**, which reads the sidecar's `health.jsonl` — the per-run log that records what
+> window, and — `sleep_evidence` — is *anything written* where the sleep mark says consolidation
+> reached, which is the only check that reads that claim rather than comparing it with another
+> claim), **trend**, which reads the sidecar's `health.jsonl` — the per-run log that records what
 > `SessionStart` actually emitted, and is the only way to catch "the anchor has not reached the
 > model in five sessions", invisible in a filesystem snapshot — and **liveness**: `capture_live`
 > (below) is the only check that notices *mid-session* that the `Stop` hook has stopped
@@ -125,9 +154,13 @@ everything worth keeping into linked long-term notes **without losing a single n
 > so the capture is working, while the timestamp both halves of the question compare stands still.
 > There is deliberately **no sleep exemption**, though the design document asked for one: the armed
 > branch of `stop.py` writes a fresh capture mark, so the mark moves during a sleep and the count
-> resets by itself, and `stop.py` is also what disarms the sleep flag — which makes a hook that is
-> not running the one state where that flag stays armed across prompts, exactly the state an
-> exemption would have blinded the check in.
+> resets by itself. The original argument against the exemption was that `stop.py` is also what
+> disarms the flag, making a hook that is not running the one state where it stays armed across
+> prompts — exactly the state an exemption would have blinded the check in. Since the latch gained a
+> bound that is no longer the only such state: a flag can also outlive its turn and sit there stale.
+> The conclusion is unchanged and now rests on something simpler — an exemption keyed on the flag
+> would be keyed on a file whose age the check would have to judge anyway, and `capture_live`
+> already asks a question the sleep answers correctly.
 >
 > The per-turn hook runs the **eight** checks that neither walk a directory tree nor parse the whole
 > transcript — `config`, `hooks`, `marks`, `pressure`, `anchor_fresh`, `anchor_delivery`,
