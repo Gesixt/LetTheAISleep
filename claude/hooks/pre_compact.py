@@ -66,7 +66,7 @@ def run(event: dict, *, root: Path | None = None, now: datetime | None = None,
     )
     # Parsed once and kept: `new` is the tail to snapshot, `exchanges` is what the new mark is
     # measured against. The parse is the running client's own, and this line is the only place in
-    # this hook the adapter touches — Task 3 shaped the rest of it so that stayed true.
+    # this hook the adapter touches, and the rest of it is shaped so that stays true.
     exchanges = adapter.read_exchanges(transcript_path)
     new = watermark.exchanges_after(exchanges, frontier)
     if not new:

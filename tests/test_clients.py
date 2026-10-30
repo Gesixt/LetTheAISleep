@@ -57,6 +57,20 @@ def test_a_dangling_flag_does_not_raise_in_a_hook():
     assert clients.from_argv(["--client"]) == clients.DEFAULT
 
 
+def test_an_empty_client_value_degrades_like_any_other_malformed_line():
+    """`--client=` is a malformed command line, not a client named "".
+
+    The likely source is an unset shell variable in the wiring. Passed through, the empty string
+    reaches `resolve`, which refuses it — and a refusal costs the hook its turn, which is the
+    price reserved for a name that would read a transcript with the wrong parser.
+    """
+    assert clients.from_argv(["--client="]) == clients.DEFAULT
+    assert clients.from_argv(["--client", ""]) == clients.DEFAULT
+    # Still refused where it does matter: only the command line degrades.
+    with pytest.raises(clients.UnknownClient):
+        clients.resolve("")
+
+
 def test_the_adapter_answers_the_bounded_newest_exchange_question_too(tmp_path: Path):
     """The third seam method, which `healthchecks._check_capture_live` is the only caller of.
 

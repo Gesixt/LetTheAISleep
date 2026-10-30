@@ -37,7 +37,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 > | `stm/buffer.md` | shared | the buffer a sleep consolidates — sharing it is the point of wiring two clients to one project |
 > | `anchor.json` | shared | the last sleep chose those notes for the project, not for a transcript |
 > | `sleep-mark.json` | shared | it claims that notes exist, and a note is the project's |
-> | `stm/.lts-sleep-armed` | shared | one sleep, one latch; the next hook to run — in whichever client — is what turns it into the sleep mark |
+> | `stm/.lts-sleep-armed` | shared, and **not soundly so** | one sleep, one latch: the next hook to run is what turns it into the sleep mark. With two clients wired that hook may be the *other* one's `Stop`, which then discards its own turn and advances its capture mark past it — so that turn reaches neither the buffer nor a note, and nothing will capture it later. Unreachable while one client is wired, which is why it is recorded rather than fixed: a per-client latch and an armed branch that captures its tail first are both design decisions. See `paths.client_state_dir` |
 > | `pending_consolidation/` | shared | material no note holds yet is owed to the project; snapshots are keyed by session id, so they cannot collide |
 > | `clients/<client>/capture-mark.json` | one client | it names an exchange by `uuid` *inside one transcript* |
 > | `clients/<client>/snapshot-mark.json` | one client | the same kind of position, named the same way |
@@ -90,10 +90,14 @@ everything worth keeping into linked long-term notes **without losing a single n
 >   turns into the mark). It is shared by every client, because a note is the project's, not a
 >   transcript's;
 > - the **snapshot mark** — `<root>/.ai_memory/clients/<client>/snapshot-mark.json` — claims only
->   that a **pending snapshot** holds the material, and no note does — until that snapshot is
->   consolidated or dropped (`lts pending clear`), after which the mark says only that the material
->   was once flushed. `PreCompact` writes it. It is per client because it names a position *inside
->   one transcript*, and resolved against another client's transcript that position means nothing.
+>   that a **pending snapshot** holds the material, and no note does. `PreCompact` writes it, and
+>   `lts pending clear` resets it: deleting the snapshots is the one thing that falsifies the
+>   claim, and the pending directory is shared, so every client's copy of the mark goes.
+>   `PreCompact` is the only reader that *works from* this mark — `marks` tests nothing about it
+>   but its clock — so a copy left standing over deleted snapshots would quietly become the
+>   frontier the next compaction excludes material behind. It is per client because it names a
+>   position *inside one transcript*, and resolved against another client's transcript that
+>   position means nothing.
 >
 > `PreCompact` snapshots the tail that neither claim covers, i.e. whatever follows the later of the
 > two marks — so a compact that finds nothing new writes no snapshot, nothing already consolidated
@@ -458,7 +462,7 @@ own are left alone; only the ones the clone ships are overwritten.
 | `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts doctor [--json] [--transcript PATH] [--client ID]` | Twelve health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--client` says whose state to report on, default `claude_code`: `marks`, `capture` and `capture_live` read one client's capture mark (the last two also parse its transcript, with that client's parser), and an unknown id is refused at exit 2 rather than reported on as an empty state directory. `--json` prints `{"worst": <level>, "client": <id>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **twelve** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
+| `lts doctor [--json] [--transcript PATH] [--client ID]` | Twelve health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--client` says whose state to report on, default `claude_code`: `marks`, `capture` and `capture_live` read one client's capture mark — `marks` its snapshot mark as well — and `capture` and `capture_live` also parse its transcript, with that client's parser, and an unknown id is refused at exit 2 rather than reported on as an empty state directory. `--json` prints `{"worst": <level>, "client": <id>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **twelve** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
 | `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |

@@ -518,8 +518,36 @@ def _resolves_by_uuid(exchanges: list[dict], uuid: str) -> bool:
     return any(ex.get("uuid") == uuid for ex in exchanges)
 
 
+# What to tell an operator about each mark that stands ahead of the clock. Separate texts because
+# the remedy is not the same: the `Stop` hook rewrites the capture and sleep marks from the clock
+# on its next run, while `PreCompact` writes the snapshot mark *only when it finds something new*
+# — and with that mark dated in the future it never does, because the mark is the frontier it
+# measures "new" against. So that one has to be removed by hand once the clock is right.
+_MARK_CLOCK_FIX = {
+    "capture": "check the system clock; the next Stop hook will then correct it",
+    "sleep": "check the system clock; the next Stop hook will then correct it",
+    "snapshot": "check the system clock, then delete the snapshot mark file — PreCompact "
+                "snapshots only what follows this mark and writes no mark when it finds nothing "
+                "new, so running it again does not correct the date. The next compaction then "
+                "re-snapshots the tail",
+}
+
+
+def _future_mark(name: str, when: datetime | None, now: datetime) -> Check | None:
+    """The `fail` for a mark standing ahead of the clock, or None when it does not.
+
+    A mark that did not parse arrives here as `None` and is not reported: there is no instant to
+    compare. For the capture and sleep marks those states have their own verdicts above; for the
+    snapshot mark they are not reported at all, because no claim this check makes rests on it.
+    """
+    if when is None or when <= now + _SKEW:
+        return None
+    return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
+                 _MARK_CLOCK_FIX[name])
+
+
 def _check_marks(cfg: Config, now: datetime, client: str = clients.DEFAULT) -> Check:
-    """The two marks must tell a consistent story about what has been read and consolidated.
+    """The capture and sleep marks must tell a consistent story about reading and consolidation.
 
     Both marks are classified before either is used. "Marks consistent" is a claim about a
     comparison, and with one mark unreadable the comparison short-circuited on `None` while this
@@ -530,13 +558,30 @@ def _check_marks(cfg: Config, now: datetime, client: str = clients.DEFAULT) -> C
     The capture mark is `client`'s; the sleep mark is shared. So the comparison is "has
     consolidation claimed material *this* client never read", and another client's capture mark
     standing well ahead cannot answer it.
+
+    The snapshot mark takes part in no comparison here, and one test applies to it: it may not
+    stand ahead of the clock. `PreCompact` writes it in the positional shape, where a uuid is
+    normal and a `None` timestamp is a legitimate value, so the sleep mark's time-only expectation
+    says nothing about it — while a mark dated after `now` is a fault of any mark, and this one is
+    the frontier the next `PreCompact` measures "new material" against.
     """
     capture_file = paths.capture_mark_file(cfg, client)
     sleep_file = paths.sleep_mark_file(cfg)
     capture_state, capture, capture_mark, capture_stamp = _classify_mark(capture_file)
     sleep_state, sleep, sleep_mark, sleep_stamp = _classify_mark(sleep_file)
+    # `client`'s own, like the capture mark and for the same reason: it names a position inside
+    # one transcript.
+    _snapshot_state, snapshot, _snapshot_mark, _snapshot_stamp = _classify_mark(
+        paths.snapshot_mark_file(cfg, client)
+    )
     if capture_state == _MARK_MISSING and sleep_state == _MARK_MISSING:
-        return Check("marks", "skip", "no marks yet — nothing has been captured or consolidated")
+        # Nothing to compare — but a snapshot mark can stand here alone (a compaction before this
+        # client's first `Stop` ever ran), and a clock fault of its own is not excused by the two
+        # marks that are absent.
+        return _future_mark("snapshot", snapshot, now) or Check(
+            "marks", "skip",
+            "no capture or sleep mark yet — nothing has been captured or consolidated",
+        )
 
     both = (
         ("capture", capture_state, capture_stamp, capture_mark, capture_file),
@@ -565,12 +610,12 @@ def _check_marks(cfg: Config, now: datetime, client: str = clients.DEFAULT) -> C
                 f"delete the {name} mark file, then run /sleep to re-consolidate this material",
             )
     # The clock next, and before any `skip`: a mark ahead of `now` is a fault of the mark that
-    # parsed, so the *other* mark being positional cannot excuse reporting it. A positional skip
-    # used to be returned first, and a sleep mark hours in the future then went unreported.
-    for name, when in (("capture", capture), ("sleep", sleep)):
-        if when is not None and when > now + _SKEW:
-            return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
-                         "check the system clock; the next Stop hook will then correct it")
+    # parsed, so another mark being positional cannot excuse reporting it. A positional skip used
+    # to be returned first, and a sleep mark hours in the future then went unreported.
+    for name, when in (("capture", capture), ("sleep", sleep), ("snapshot", snapshot)):
+        future = _future_mark(name, when, now)
+        if future:
+            return future
 
     # A mark carrying a uuid still resolves: `entries_after` tries the uuid branch first and never
     # looks at the timestamp on a match, so this is a legitimate `mark_of` shape, not corruption.

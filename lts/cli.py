@@ -196,6 +196,18 @@ def _run(args) -> int:
                 print(snap)
         elif args.op == "clear":
             pending.clear_all(d)
+            # The snapshots were the whole backing of every snapshot mark that pointed into them,
+            # so deleting them is what falsifies that claim. A mark left standing makes the next
+            # `PreCompact` take it as its frontier and exclude material that no snapshot and no
+            # note holds — and the only other reader of it, the `marks` health check, tests
+            # nothing but its clock, so that happens with every check green. Resetting it costs
+            # at worst one re-snapshot of the tail, which is noise, and
+            # noise is the side this project errs on. In the ordinary sleep it costs nothing:
+            # `later_of({}, sleep)` and `later_of(copy, sleep)` pick the same frontier once the
+            # sleep mark has advanced. The pending directory is shared, so every client's mark
+            # goes, not only the one this command happens to be about — it is about none of them.
+            for client in paths.client_ids_on_disk(cfg):
+                paths.snapshot_mark_file(cfg, client).unlink(missing_ok=True)
     elif args.cmd == "pressure":
         # Must match what the hook reports. This used to measure `len(file) // 4` against a
         # hardcoded 200,000-token window: a transcript is append-only across `--resume`, so its

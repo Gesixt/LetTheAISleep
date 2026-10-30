@@ -62,6 +62,26 @@ def pending_dir(cfg: Config) -> Path:
     return sidecar_root(cfg) / "pending_consolidation"
 
 
+def clients_root(cfg: Config) -> Path:
+    """The parent of the per-client state directories (see `client_state_dir`)."""
+    return sidecar_root(cfg) / "clients"
+
+
+def client_ids_on_disk(cfg: Config) -> list[str]:
+    """The clients this sidecar holds state for, as the directory names under `clients_root`.
+
+    Read off the disk rather than from `lts.clients.known()`: a directory left behind by a client
+    that is no longer registered still holds a snapshot mark, and the caller this exists for —
+    `lts pending clear`, resetting the claim the snapshots it has just deleted were backing — has
+    to reach that one too. An absent or unreadable `clients/` directory answers with an empty
+    list; that is also what a project still on the pre-split flat layout looks like.
+    """
+    try:
+        return sorted(entry.name for entry in clients_root(cfg).iterdir() if entry.is_dir())
+    except OSError:
+        return []
+
+
 def client_state_dir(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
     """State that belongs to one client's transcript rather than to the project.
 
@@ -82,8 +102,19 @@ def client_state_dir(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
     The buffer, the anchor, the sleep mark, the sleep latch and the pending snapshots stay shared:
     they are the project's memory, and sharing them is the point of wiring both clients to one
     project. Snapshots are already keyed by session id, so they cannot collide.
+
+    **The sleep latch is the one of those whose sharing is not sound for two clients.** It is
+    recorded here and deliberately not fixed. `/sleep` in client B arms it; if a turn ends in
+    client A within `watermark.SLEEP_FLAG_MAX_AGE`, A's `Stop` takes the armed branch — it writes
+    A's capture mark to `mark_at(now)`, writes the shared sleep mark, disarms and returns without
+    capturing its own turn. A's turn is discarded *and* A's mark jumps past it, so nothing captures
+    it later and B's notes never held it. The `PreCompact` armed branch has the mirror shape.
+    Nothing emits `--client` yet, so there is exactly one client and the state is unreachable
+    today; it becomes reachable with the first wiring that declares a second. The resolutions — a
+    per-client latch, or an armed branch that captures its own tail before disarming — are design
+    decisions, not something this split settled.
     """
-    return sidecar_root(cfg) / "clients" / client
+    return clients_root(cfg) / client
 
 
 def capture_mark_file(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
@@ -146,7 +177,9 @@ def _adopt_flat_state(cfg: Config, client: str = DEFAULT_CLIENT) -> bool:
     Only ever for `DEFAULT_CLIENT`: the flat files were written by Claude Code, because it was the
     only client that existed while they were being written. Handing them to a second client would
     hand it a capture mark naming a uuid out of a transcript it has never read — the exact failure
-    `client_state_dir` exists to prevent.
+    `client_state_dir` exists to prevent. The guard is the first line of the body, so the
+    invariant lives in the function that states it. It answers `True`: there was nothing here to
+    adopt, which is not a failure worth retrying, so the caller may record the marker.
 
     Failures are swallowed rather than raised. Five projects are running this code inside hooks; a
     capture mark that fails to move costs one replay of the transcript into the buffer, which is
@@ -154,6 +187,8 @@ def _adopt_flat_state(cfg: Config, client: str = DEFAULT_CLIENT) -> bool:
     *reported*, though: returning False withholds the marker, so the next `ensure_sidecar` tries
     again rather than recording a migration that did not happen.
     """
+    if client != DEFAULT_CLIENT:
+        return True
     root = sidecar_root(cfg)
     state = client_state_dir(cfg, client)
     moved = True
@@ -177,8 +212,8 @@ def _adopt_flat_state(cfg: Config, client: str = DEFAULT_CLIENT) -> bool:
     # `sleep_evidence` announce that nothing is consolidated across five live projects, which is a
     # manufactured demand, and a false demand is what trains demands away. It becomes time-only by
     # itself at the next real sleep.
-    sleep_mark = sidecar_root(cfg) / "sleep-mark.json"
-    snapshot = state / "snapshot-mark.json"
+    sleep_mark = sleep_mark_file(cfg)
+    snapshot = snapshot_mark_file(cfg, client)
     if sleep_mark.exists() and not snapshot.exists():
         try:
             snapshot.write_text(sleep_mark.read_text(encoding="utf-8"), encoding="utf-8")
@@ -194,11 +229,11 @@ def ensure_sidecar(cfg: Config, client: str = DEFAULT_CLIENT) -> None:
     pending_dir(cfg).mkdir(parents=True, exist_ok=True)
     client_state_dir(cfg, client).mkdir(parents=True, exist_ok=True)
     # Keyed on a marker this function writes, never on the directory: see `adoption_marker_file`.
-    # Only the default client adopts — the flat files were written by Claude Code, because it was
-    # the only client that existed while they were being written.
+    # Only the default client has flat files to adopt, and `_adopt_flat_state` enforces that
+    # itself rather than being trusted to be called correctly.
     marker = adoption_marker_file(cfg, client)
     if not marker.exists():
-        adopted = _adopt_flat_state(cfg, client) if client == DEFAULT_CLIENT else True
+        adopted = _adopt_flat_state(cfg, client)
         if adopted:
             try:
                 marker.touch()

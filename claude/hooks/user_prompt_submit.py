@@ -119,11 +119,11 @@ def _notification(cfg, transcript_path: Path, session_id: str | None, client: st
     # one `status.collect` costs 0.571 / 0.434 / 0.453 ms with a transcript against 0.385 / 0.325 /
     # 0.273 ms without one (minimum of five runs, on this project and the ppss and
     # nextcloud-development ones, each given its largest real transcript — 13,684,392 / 209,435,898
-    # / 89,022,622 B; the figures do not grow with the file, which is what the tail parse of Task 1
-    # bought). Paying ~0.2 ms for one path that produces the whole metrics dict is worth more
-    # than a second place where a pressure figure is assembled by hand -- the 45,413,420-token
-    # reading divided by a window nobody had measured it against came from exactly that kind of
-    # second place, and `healthchecks._check_pressure` holds the account of it.
+    # / 89,022,622 B; the figures do not grow with the file, which is what reading only the tail
+    # of the transcript bought). Paying ~0.2 ms for one path that produces the whole metrics dict
+    # is worth more than a second place where a pressure figure is assembled by hand -- the
+    # 45,413,420-token reading divided by a window nobody had measured it against came from
+    # exactly that kind of second place, and `healthchecks._check_pressure` holds the account.
     metrics = status.collect(cfg, transcript_path=transcript_path, client=client)
     checks = health.run(cfg, metrics=metrics, turn=state, ids=health.PER_TURN_IDS,
                         transcript_path=transcript_path, client=client)

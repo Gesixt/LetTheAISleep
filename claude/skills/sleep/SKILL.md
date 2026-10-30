@@ -36,10 +36,12 @@ Never run `git fetch`, `git pull`, `git commit` or `git push` yourself. Publishi
   `lts pending list` → prints the absolute path of each snapshot (nothing if there are none).
   Read those paths with your file tools.
 
-  A snapshot holds **only what was said after the last sleep** — the sleep mark
-  (`.ai_memory/sleep-mark.json`) keeps everything already consolidated out of it. So treat a
-  snapshot as new material and consolidate it. Do not open the session's notes to check whether
-  it duplicates them; it does not, and that check used to burn a whole turn every session.
+  A snapshot holds **only material that neither a note nor an earlier snapshot already holds** —
+  `PreCompact` starts from whichever is later of the sleep mark and its own snapshot mark, and
+  keeps everything behind it out. So treat a snapshot as new material and consolidate it. Do not
+  open the session's notes to check whether it duplicates them; it does not, and that check used
+  to burn a whole turn every session. (Both marks are the hooks' own bookkeeping inside the
+  sidecar; this skill never reads them, and `lts doctor` is what reports on them.)
 - Add the significant remaining conversation context (exclude noise).
 
 ## 2. Extract (with preservation, never compress)

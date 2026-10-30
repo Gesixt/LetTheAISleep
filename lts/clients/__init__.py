@@ -38,8 +38,16 @@ class UnknownClient(ValueError):
 
 
 class Client(Protocol):
-    id: str
-    default_context_window: int
+    # Properties and not variable members: a variable member demands a *settable* attribute, and
+    # every adapter is a frozen dataclass — correctly, since an adapter is a description of a
+    # client and not state. Declared as `id: str` the registry line below was a type error
+    # (`dict[str, ClaudeCode]` not assignable to `dict[str, Client]`) in the one file the next
+    # adapter will be written from.
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def default_context_window(self) -> int: ...
 
     def read_exchanges(self, path: Path) -> list[dict]: ...
 
@@ -53,10 +61,12 @@ class Client(Protocol):
     #   shape this client writes. **Either is no boundary at all and answers `True` whenever the
     #   file holds any exchange**, because nothing has been established about how far the mark
     #   reaches. `_check_capture_live` arrives here with `stamp=None` whenever the mark file is
-    #   *missing* — it returns early only for a mark that is present and undated — and in that
-    #   state a live transcript means the `Stop` hook was given work. Answering `False` there
-    #   ("no stamp I can parse, so nothing is newer") turns the project's only mid-session
-    #   detector of a dead `Stop` hook into a confident `ok` about one;
+    #   *missing or unreadable* — `_classify_mark` answers `None` for both, and the early return
+    #   covers only a mark that is present and undated. Neither state establishes a boundary: a
+    #   mark that cannot be read says nothing about how far capture got, exactly as an absent one
+    #   does not. In either, a live transcript means the `Stop` hook was given work. Answering
+    #   `False` there ("no stamp I can parse, so nothing is newer") turns the project's only
+    #   mid-session detector of a dead `Stop` hook into a confident `ok` about one;
     # - the comparison is **strict**: the mark's own exchange is not newer than itself, and that
     #   equality is the measured normal rather than a miss — `stop.py` leaves the mark sitting on
     #   the newest exchange, which is the input behind `_check_capture_live`'s "nothing to
@@ -115,13 +125,19 @@ def from_argv(argv: list[str]) -> str:
     Deliberately not `argparse`. A hook's contract is to read JSON on stdin and write JSON on
     stdout; `argparse` answers an argument it dislikes with `SystemExit(2)` and a usage block on
     stderr, which in a hook means capture silently stops. Unrecognised arguments are ignored here,
-    and so is a `--client` with nothing after it. An unknown *client name* is a different matter and
-    is refused by `resolve` — the difference is that a malformed command line is the wiring's
-    problem, while a wrong client name would corrupt memory.
+    and so is a `--client` whose value is missing or empty — `--client`, `--client=` and
+    `--client ""` are all a malformed command line, not a client. An unknown *client name* is a
+    different matter and is refused by `resolve` — the difference is that a malformed command line
+    is the wiring's problem, while a wrong client name would corrupt memory.
+
+    The empty value is guarded in both forms because the one place it is likely to come from is an
+    unset shell variable in the wiring, which expands to exactly that. Passed through, it reaches
+    `resolve`, which refuses it — and the refusal costs the hook its turn, which is the price
+    reserved for a name that would read a transcript with the wrong parser.
     """
     for i, arg in enumerate(argv):
-        if arg == "--client" and i + 1 < len(argv):
+        if arg == "--client" and i + 1 < len(argv) and argv[i + 1]:
             return argv[i + 1]
-        if arg.startswith("--client="):
+        if arg.startswith("--client=") and arg.split("=", 1)[1]:
             return arg.split("=", 1)[1]
     return DEFAULT

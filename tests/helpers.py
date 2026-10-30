@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from lts import clients, transcript
+from lts import clients, paths, transcript
 
 _BASE = '[vault]\nproject = "test-project"\n'
 
@@ -67,3 +67,14 @@ def register_probe_client(monkeypatch) -> str:
     """Register `ProbeClient` for the duration of one test; returns its id."""
     monkeypatch.setitem(clients._REGISTRY, ProbeClient.id, ProbeClient())
     return ProbeClient.id
+
+
+def flat_state_file(cfg, name: str) -> Path:
+    """Where `name` lived before the per-client split, composed from `paths._FLAT`.
+
+    The pre-split locations have no public accessor, and deliberately so: nothing but the adoption
+    in `lts.paths` reads or writes them any more. `_FLAT` is the one place that records where they
+    were, so a test spelling the old path out by hand stops tracking that dict the moment it moves
+    — and spelling a sidecar path by hand is what the project forbids everywhere else.
+    """
+    return paths.sidecar_root(cfg).joinpath(*paths._FLAT[name])

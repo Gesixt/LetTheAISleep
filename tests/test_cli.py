@@ -105,6 +105,42 @@ def test_pending_list_and_clear(tmp_path: Path, capsys):
     assert capsys.readouterr().out.strip() == "no"
 
 
+def test_pending_clear_resets_every_clients_snapshot_mark(tmp_path: Path, capsys):
+    """Dropping the snapshots falsifies the mark that says a snapshot holds the material.
+
+    Left standing it is a claim nothing backs, and no check reads it: the next `PreCompact` takes
+    `later_of(snapshot mark, sleep mark)` as its frontier, excludes everything behind it and logs
+    "no material since the last sleep or snapshot" about material that no snapshot and no note
+    holds. The reachable way in is a `/sleep` whose `lts stm clear` found no note and so never
+    armed the latch, leaving the sleep mark where it was while the snapshots went. Resetting the
+    mark costs at worst one re-snapshot of the tail, and this project prefers noise to a moved
+    frontier.
+
+    The pending directory is shared by every client, so every client's mark has to go.
+    """
+    from lts import clients, paths, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    paths.ensure_sidecar(cfg, "second")
+    positional = {"uuid": "u9", "timestamp": "2026-10-30T10:00:00.000Z", "count": 9}
+    for client in (clients.DEFAULT, "second"):
+        watermark.write_mark(paths.snapshot_mark_file(cfg, client), positional)
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-29T09:00:00.000Z"})
+    main(["pending", "dump", "--root", str(tmp_path), "--session", "s", "--text", "raw"])
+    capsys.readouterr()
+
+    main(["pending", "clear", "--root", str(tmp_path)])
+
+    for client in (clients.DEFAULT, "second"):
+        assert watermark.read_mark(paths.snapshot_mark_file(cfg, client)) == {}, client
+    # The sleep mark carries the other claim — notes exist — and clearing snapshots says nothing
+    # about notes. Resetting it here would announce that nothing is consolidated.
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == \
+        {"timestamp": "2026-10-29T09:00:00.000Z"}
+
+
 def test_anchor_write_then_render(tmp_path: Path, capsys):
     make_project(tmp_path)
     main([

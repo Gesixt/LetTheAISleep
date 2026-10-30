@@ -10,7 +10,7 @@ import pytest
 
 from lts import clients, hooklog, paths, sync, turnstate
 from lts.config import load_config
-from tests.helpers import make_project, register_alias_client
+from tests.helpers import flat_state_file, make_project, register_alias_client
 
 
 def _load(name: str, path: Path):
@@ -259,7 +259,7 @@ def test_stop_migrates_the_legacy_capture_offset(tmp_path: Path):
     from lts.config import load_config
     cfg = load_config(tmp_path)
     paths.ensure_sidecar(cfg)
-    (paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset").write_text("2", encoding="utf-8")
+    paths.legacy_capture_offset_file(cfg).write_text("2", encoding="utf-8")
     transcript = _transcript(tmp_path / "t.jsonl", [
         _msg("user", "already captured", "u1", "2026-08-26T10:00:00Z"),
         _msg("assistant", "also already captured", "u2", "2026-08-26T10:01:00Z"),
@@ -271,7 +271,36 @@ def test_stop_migrates_the_legacy_capture_offset(tmp_path: Path):
     buf = stm.read(paths.stm_file(cfg))
     assert "genuinely new" in buf
     assert "already captured" not in buf
-    assert not (paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset").exists()
+    assert not paths.legacy_capture_offset_file(cfg).exists()
+
+
+def test_an_upgraded_project_captures_only_the_tail(tmp_path: Path):
+    """Adoption precedes the capture-mark read, or the whole transcript replays.
+
+    On a project installed before the split the mark is one directory up. Read before adoption
+    it is simply absent, and `exchanges_after` with an empty mark returns every exchange in the
+    file — 209 MB of it on one live project, into the shared buffer.
+    """
+    from lts import stm
+    root = make_project(tmp_path)
+    cfg = load_config(root)
+    flat = flat_state_file(cfg, "capture-mark.json")
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_text(
+        json.dumps({"uuid": "u2", "timestamp": "2026-10-30T10:00:01.000Z", "count": 2}),
+        encoding="utf-8")
+    t = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "old-one", uuid="u1", ts="2026-10-30T10:00:00.000Z"),
+        _msg("assistant", "old-two", uuid="u2", ts="2026-10-30T10:00:01.000Z"),
+        _msg("user", "brand-new", uuid="u3", ts="2026-10-30T10:00:02.000Z"),
+    ])
+    stop = _load("stop", HOOKS / "stop.py")
+
+    n = stop.capture({"cwd": str(root), "transcript_path": str(t)})
+
+    assert n == 1, f"replayed {n} exchanges instead of 1"
+    buf = stm.read(paths.stm_file(cfg))
+    assert "old-one" not in buf and "brand-new" in buf
 
 
 def test_session_start_injects_anchor_when_clean(tmp_path: Path):

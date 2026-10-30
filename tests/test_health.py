@@ -444,10 +444,16 @@ def test_render_shows_a_fix_only_where_something_is_wrong(tmp_path: Path):
     assert "Fix: run /sleep" in out
 
 
+_MARK_FILES = {
+    "capture": paths.capture_mark_file,
+    "sleep": paths.sleep_mark_file,
+    "snapshot": paths.snapshot_mark_file,
+}
+
+
 def _mark(cfg, which: str, when: datetime) -> None:
-    target = paths.capture_mark_file(cfg) if which == "capture" else paths.sleep_mark_file(cfg)
     paths.ensure_sidecar(cfg)
-    watermark.write_mark(target, watermark.mark_at(when))
+    watermark.write_mark(_MARK_FILES[which](cfg), watermark.mark_at(when))
 
 
 def _transcript(path: Path, stamps: list[str]) -> Path:
@@ -489,6 +495,51 @@ def test_a_mark_in_the_future_fails(tmp_path: Path):
     check = _by_id(health.run(cfg, now=_T0), "marks")
     assert check.level == "fail"
     assert "future" in check.message
+
+
+def test_a_snapshot_mark_in_the_future_fails_like_the_other_two(tmp_path: Path):
+    """The clock test covers all three marks, not the two that predate the split.
+
+    `PreCompact` writes this mark on every ordinary compaction, so a clock that is wrong puts it
+    in the future exactly as it does the other two — and from there it is the frontier the next
+    `PreCompact` snapshots from, which would exclude everything up to a time that has not
+    happened.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "snapshot", _T0 + timedelta(hours=1))
+    check = _by_id(health.run(cfg, now=_T0), "marks")
+    assert check.level == "fail", check
+    assert "future" in check.message and "snapshot" in check.message
+
+
+def test_a_snapshot_mark_in_the_future_is_reported_even_on_its_own(tmp_path: Path):
+    """No capture and no sleep mark is the "nothing to compare" skip, and a compaction can still
+    have written a snapshot mark before this client's first `Stop` ever ran. The clock is a fault
+    of that mark alone, so it is not excused by the two marks that are absent."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "snapshot", _T0 + timedelta(hours=1))
+    check = _by_id(health.run(cfg, now=_T0), "marks")
+    assert check.level == "fail", check
+    assert "future" in check.message and "snapshot" in check.message
+
+
+def test_a_positional_snapshot_mark_is_not_a_fault(tmp_path: Path):
+    """Only the clock test reaches the snapshot mark.
+
+    `mark_of_exchanges` writes it as uuid + timestamp + count by design, and a `None` timestamp is
+    a legitimate value there (an exchange that carried no stamp). The sleep mark's time-only
+    expectation does not apply to it, so neither shape may turn the comparison of the other two
+    marks into a skip or a demand.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "sleep", _T0 - timedelta(minutes=5))
+    watermark.write_mark(paths.snapshot_mark_file(cfg),
+                         {"uuid": "u9", "timestamp": None, "count": 7})
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "ok", check
+    assert "consistent" in check.message
 
 
 def test_no_marks_at_all_is_a_skip_not_a_pass(tmp_path: Path):
