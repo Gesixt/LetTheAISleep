@@ -2,7 +2,7 @@ import pytest
 
 from pathlib import Path
 from lts.config import NotAnLtsProject, load_config
-from lts import paths
+from lts import paths, turnstate
 from tests.helpers import make_project
 
 
@@ -60,3 +60,108 @@ def test_vault_root_expands_user(tmp_path: Path):
     )
     cfg = load_config(tmp_path)
     assert paths.vault_root(cfg) == Path.home() / "vaults" / "mine"
+
+
+def test_transcript_bound_state_is_per_client(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    a = paths.capture_mark_file(cfg, "claude_code")
+    b = paths.capture_mark_file(cfg, "second")
+    assert a != b
+    assert a.parent.name == "claude_code" and b.parent.name == "second"
+    for fn in (paths.turn_state_file, paths.health_journal_file, paths.snapshot_mark_file):
+        assert fn(cfg, "claude_code") != fn(cfg, "second")
+
+
+def test_project_level_memory_stays_shared(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    # One project, one memory: these are the files the "both clients, shared memory" decision is
+    # about, and a client argument on any of them would quietly undo it.
+    for fn in (paths.stm_file, paths.anchor_file, paths.sleep_mark_file,
+               paths.sleep_flag_file, paths.pending_dir):
+        assert "clients" not in fn(cfg).parts
+
+
+def test_the_pre_split_files_are_adopted_once_by_the_default_client(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "u9"}', encoding="utf-8")
+    (root / "turn-state.json").write_text('{"misses": 2}', encoding="utf-8")
+    (root / "health.jsonl").write_text('{"event": "session_start"}\n', encoding="utf-8")
+
+    paths.ensure_sidecar(cfg)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == '{"uuid": "u9"}'
+    assert paths.turn_state_file(cfg).read_text(encoding="utf-8") == '{"misses": 2}'
+    assert paths.health_journal_file(cfg).read_text(encoding="utf-8").strip() == \
+        '{"event": "session_start"}'
+    assert not (root / "stm" / "capture-mark.json").exists()
+    assert not (root / "turn-state.json").exists()
+    assert not (root / "health.jsonl").exists()
+
+
+def test_a_second_client_never_inherits_the_first_clients_position(tmp_path: Path):
+    # The whole reason this state splits: a capture mark names an exchange by uuid inside ONE
+    # transcript. Handed to another client it resolves against a file that has never contained
+    # that uuid, and `watermark.exchanges_after` falls through to dropping everything older.
+    cfg = _cfg(tmp_path)
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "u9"}', encoding="utf-8")
+
+    paths.ensure_sidecar(cfg, "second")
+
+    assert not paths.capture_mark_file(cfg, "second").exists()
+    assert (root / "stm" / "capture-mark.json").exists()
+
+
+def test_adoption_still_happens_when_a_hook_created_the_directory_first(tmp_path: Path):
+    # The production sequence on a live project: `SessionStart`'s `journal.append` and
+    # `UserPromptSubmit`'s `turnstate.write` each mkdir their own parent, so the client directory
+    # exists before any hook calls `ensure_sidecar`. Gating adoption on the directory meant it
+    # never ran: the flat capture mark stayed orphaned and the next Stop replayed the whole
+    # transcript into the shared buffer.
+    cfg = _cfg(tmp_path)
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "u9"}', encoding="utf-8")
+    turnstate.write(paths.turn_state_file(cfg), {"misses": 0})
+
+    paths.ensure_sidecar(cfg)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == '{"uuid": "u9"}'
+    assert not (root / "stm" / "capture-mark.json").exists()
+
+
+def test_adoption_does_not_run_a_second_time(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "old"}', encoding="utf-8")
+    paths.ensure_sidecar(cfg)
+    paths.capture_mark_file(cfg).write_text('{"uuid": "new"}', encoding="utf-8")
+
+    # A flat file reappearing later (a stale clone, a restored backup) must not overwrite the
+    # position the hooks have been maintaining since.
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "stale"}', encoding="utf-8")
+    paths.ensure_sidecar(cfg)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == '{"uuid": "new"}'
+
+
+def test_a_flat_file_that_reappears_after_the_target_was_deleted_is_refused(tmp_path: Path):
+    # The one property only the marker has, and the reason the per-file guard is not enough on its
+    # own: `lts doctor`'s remedy for a mark that cannot be read is "delete the capture mark file".
+    # Without the marker the next `ensure_sidecar` would adopt a flat file into that gap and
+    # resurrect the position the operator had just removed.
+    cfg = _cfg(tmp_path)
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "u9"}', encoding="utf-8")
+    paths.ensure_sidecar(cfg)
+    paths.capture_mark_file(cfg).unlink()
+
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "stale"}', encoding="utf-8")
+    paths.ensure_sidecar(cfg)
+
+    assert not paths.capture_mark_file(cfg).exists()

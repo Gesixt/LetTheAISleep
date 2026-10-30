@@ -1220,3 +1220,106 @@ def test_session_start_speaks_again_over_a_fingerprint_the_per_turn_hook_stored(
                     {"at": "2026-10-01T06:00:00.000Z", "misses": 0, "shown": {"sleep": "1/0"}})
     out = ss.run({"cwd": str(tmp_path)})
     assert "1 STM entry" in out.get("systemMessage", ""), out
+
+
+# --- the upgrade from the pre-split flat sidecar -------------------------------------------------
+#
+# These two are the only thing holding the `paths.ensure_sidecar(cfg)` calls in `session_start` and
+# `user_prompt_submit`. Every other hook test here pre-creates the sidecar in its own setup, which
+# writes the adoption marker before the hook runs, so none of them can see whether the hook calls
+# `ensure_sidecar` at all — the whole suite passed with both calls deleted.
+
+
+def _pre_upgrade_journal(count: int) -> list[dict]:
+    """`count` records shaped as `health.record` writes them, each with its own capture mark.
+
+    Distinct marks are the point: `_check_capture_progress` reads `capture_mark` and `stm_entries`
+    across the window and answers `ok` when the mark moved. That makes "this run was given a
+    history" visible in the record the run itself writes.
+    """
+    return [{
+        "at": f"2026-10-{i + 1:02d}T00:00:00.000Z",
+        "event": "session_start",
+        "blocks": ["anchor"],
+        "checks": {"capture_progress": "ok"},
+        "stm_entries": i,
+        "stm_bytes": 100 * i,
+        "capture_mark": f"2026-10-{i + 1:02d}T00:00:00.000Z",
+        "sleep_mark": None,
+        "pending": 0,
+        "notes": 1,
+    } for i in range(count)]
+
+
+def test_session_start_adopts_the_flat_sidecar_before_it_reads_the_journal(tmp_path: Path):
+    """A project upgraded from the pre-split layout, driven through the real hook.
+
+    Three separate claims, because no one assertion reaches all of them:
+
+    - **adopt before append.** `paths._adopt_flat_state` refuses to move a legacy file onto a target
+      that already exists, so an adoption that ran *after* this hook's own `journal.append` would
+      have found `health.jsonl` already in the client directory and left the pre-upgrade records
+      stranded at the flat path. The flat file being gone *and* the old records still being the
+      journal's first lines can therefore only both hold if adoption came first. `len(lines) ==
+      TREND_WINDOW + 1` carries the same argument's other half: `SessionStart` appends exactly one
+      record per run, which is what makes "first lines" a statement about ordering at all.
+    - **adopt before read.** That pairing says nothing about `journal.tail`, which is a pure read —
+      `journal._records` returns `[]` for a missing path and creates nothing — so a call to
+      `ensure_sidecar` sitting between the read and the append would satisfy everything above while
+      the trend checks still computed from an empty history, which is the harm the hook's comment
+      names. The last line of the journal is this run's own record, and `health.record` stores
+      `{check.id: check.level}`: with a history, `_check_capture_progress` sees the mark move across
+      the window and answers `ok`; without one, `_trend_window` returns a `skip` saying "0 of 5 runs
+      journalled". Nothing else in this fixture can reach that level: `_check_capture_progress`
+      takes `history` and nothing else — no `cfg`, no filesystem — so it is a pure function of what
+      `journal.tail` returned, which is what makes the assertion a probe of the ordering rather
+      than a coincidence. So the level in the record this run wrote states what it was given.
+    - the mark and the turn state keep their contents, which is adoption rather than re-creation.
+    """
+    from lts import health
+    cfg = load_config(make_project(tmp_path))
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "u9"}', encoding="utf-8")
+    (root / "turn-state.json").write_text('{"misses": 2}', encoding="utf-8")
+    before = _pre_upgrade_journal(health.TREND_WINDOW)
+    (root / "health.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in before), encoding="utf-8")
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == '{"uuid": "u9"}'
+    assert paths.turn_state_file(cfg).read_text(encoding="utf-8") == '{"misses": 2}'
+    assert not (root / "stm" / "capture-mark.json").exists()
+    assert not (root / "turn-state.json").exists()
+    assert not (root / "health.jsonl").exists()
+
+    lines = paths.health_journal_file(cfg).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == health.TREND_WINDOW + 1
+    assert [json.loads(line)["at"] for line in lines[:-1]] == [r["at"] for r in before]
+    assert json.loads(lines[-1])["checks"]["capture_progress"] == "ok"
+
+
+def test_user_prompt_submit_adopts_the_capture_mark_before_it_reads_it(tmp_path: Path):
+    """`_notification` reads the capture mark on its first line, so adoption has to precede it.
+
+    On an upgraded project the mark is one directory up. Read before adoption it is simply absent,
+    and the turn state would start counting misses against a mark that was sitting right there —
+    `capture_live` demanding a sleep nobody owes. Nothing else in this hook ever moves it, so the
+    stored `capture_mark` is the assertion that it was adopted *and then read*.
+    """
+    cfg = load_config(make_project(tmp_path, "[sleep]\ncontext_window = 1000\n"))
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    mark = '{"uuid": "u9", "timestamp": "2026-10-30T10:00:00.000Z"}'
+    (root / "stm" / "capture-mark.json").write_text(mark, encoding="utf-8")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 100)
+
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    ups.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == mark
+    assert not (root / "stm" / "capture-mark.json").exists()
+    assert turnstate.read(paths.turn_state_file(cfg))["capture_mark"] == "2026-10-30T10:00:00.000Z"

@@ -98,6 +98,14 @@ def _notification(cfg, transcript_path: Path, session_id: str | None) -> str:
     `SessionStart`; see that constant's comment for the measurement — worst column, 605.770 ms for
     one of the two excluded walks against 1.121 ms for the dearest check in the set that stays.
     """
+    # First, before the capture mark is read: this hook is often the first to touch the sidecar in
+    # a session, and on a project upgraded from the pre-split layout it is where the flat capture
+    # mark and turn state are adopted. Reading before adopting would see neither and count a miss
+    # against a mark that is sitting one directory up. The `configured` test is belt and braces —
+    # `run` already calls this function only under the same test — and it states what
+    # `ensure_sidecar` requires: it raises rather than create a sidecar off a project root.
+    if cfg.configured:
+        paths.ensure_sidecar(cfg)
     mark = watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp")
     previous = turnstate.read(paths.turn_state_file(cfg))
     state = turnstate.advance(previous, capture_mark=mark, session_id=session_id)

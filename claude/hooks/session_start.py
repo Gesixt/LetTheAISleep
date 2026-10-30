@@ -121,6 +121,14 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
         # fixing: the duplicate walk is ~0.05% of the 3-5 s session-load budget of ТЗ §6, and
         # removing it would mean threading a check's internal note count into the journal record.
         metrics = status.collect(cfg)
+        # Before the journal is read, not after: `journal.tail` is the next line, and this is where
+        # a project upgraded from the pre-split layout adopts its flat `health.jsonl`. Adopting
+        # afterwards would leave the first session after the upgrade computing its trend checks
+        # from an empty history. The `configured` test is belt and braces — this block is already
+        # past `build_blocks`' early return for an unconfigured project — and it states what
+        # `ensure_sidecar` requires: it raises rather than create a sidecar off a project root.
+        if cfg.configured:
+            paths.ensure_sidecar(cfg)
         journal_file = paths.health_journal_file(cfg)
         checks = health.run(cfg, metrics=metrics,
                             history=journal.tail(journal_file, health.TREND_WINDOW))
