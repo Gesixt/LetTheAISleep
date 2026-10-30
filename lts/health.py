@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from lts import healthchecks, paths, status, watermark
+from lts import clients, healthchecks, paths, status, watermark
 from lts.config import Config
 # `Check` lives with the checks that build it; the import is one-way, so there is no cycle.
 # `TREND_WINDOW`, `ANCHOR_BLOCK` and `PER_TURN_IDS` are re-exported deliberately, not incidentally: a
@@ -123,14 +123,15 @@ def run(
     turn: dict | None = None,
     ids: Sequence[str] | None = None,
     now: datetime | None = None,
+    client: str = clients.DEFAULT,
 ) -> list[Check]:
     """Every check, in `_IDS` order, assembled by `healthchecks.all_checks`.
 
     `metrics` is a `status.collect` result, taken as an argument so that health never recomputes
     memory load and `status.collect` stays the single place that counts it. It is not a parse
     budget: with a transcript, the file is parsed exactly twice, for two different things —
-    `status.collect` reads its usage counters through `transcript.measure_context`, and
-    `_check_capture` reads its exchanges through `read_exchanges`. Traced 2026-09-30 by counting
+    `status.collect` reads its usage counters and `_check_capture` its exchanges, both through
+    the running client's adapter (`clients.resolve`). Traced 2026-09-30 by counting
     `Path.read_text` against the transcript across a whole `run(transcript_path=...)`, in both of
     the states that differ: two parses for a transcript with `usage` records and two for one
     without. There is no third parse in the degenerate uuid branch — that branch works from the
@@ -155,6 +156,13 @@ def run(
     a design document that lives outside this repository, which a reader holding only the repo
     cannot open.
 
+    A supplied `metrics` must have been measured with this same `client`. Nothing here can check
+    that, and no caller in tree gets it wrong, but the mismatch is this task's own failure class:
+    `pressure` reports the figure `status.collect` produced, and `lts doctor --json` now stamps the
+    whole report with the client — so `run(metrics=<another client's>, client="x")` answers a
+    context percentage parsed by the wrong parser, under a provenance label that makes it more
+    credible rather than less.
+
     `history` is the last few `lts.journal` records — a trend check is an ordinary check that was
     given history as an input, not a separate mechanism. It stays a plain list of dicts; the reason
     is with the checks that read it, in `healthchecks.all_checks`.
@@ -163,6 +171,11 @@ def run(
     `_check_capture_live` reads — without it that check has no previous prompt to compare against and
     skips. `ids` restricts the run to those check ids, and it restricts it *before* they are called,
     which is the whole point: the figures are in `healthchecks.PER_TURN_IDS`' comment.
+
+    `client` is which client this report is about: it selects the per-client state the checks
+    read and the parser the transcript is read with. `healthchecks.all_checks` says which checks
+    that reaches. It defaults to the client that existed before there were two, so a caller with
+    no client of its own keeps the behaviour it has today.
 
     An unconfigured root short-circuits: without a project there is nothing to check, and saying
     `ok` about a check that never ran is the exact failure this module exists to prevent.
@@ -173,14 +186,14 @@ def run(
         # path too: a report naming checks the caller excluded is a report about a run that did not
         # happen.
         wanted = None if ids is None else set(ids)
-        return healthchecks.all_checks(cfg, ids=ids, now=now) + [
+        return healthchecks.all_checks(cfg, ids=ids, now=now, client=client) + [
             Check(check_id, "skip", "no lts project here") for check_id in _IDS[1:]
             if wanted is None or check_id in wanted
         ]
     if metrics is None:
-        metrics = status.collect(cfg, transcript_path=transcript_path)
+        metrics = status.collect(cfg, transcript_path=transcript_path, client=client)
     return healthchecks.all_checks(cfg, transcript_path=transcript_path, metrics=metrics,
-                                   history=history, turn=turn, ids=ids, now=now)
+                                   history=history, turn=turn, ids=ids, now=now, client=client)
 
 
 def record(
@@ -190,6 +203,7 @@ def record(
     *,
     metrics: dict | None = None,
     now: datetime | None = None,
+    client: str = clients.DEFAULT,
 ) -> dict:
     """One journal record per run.
 
@@ -199,9 +213,18 @@ def record(
     hook passes `health_demand`, `sleep_demand`, `anchor` (`ANCHOR_BLOCK`) and `digest`, one per
     block it emitted, and it is the only caller. A name outside that vocabulary is recorded and
     never read.
+
+    `client` names the client the record describes and selects the capture mark it quotes. It is
+    not the only client-specific thing here: `checks` carries the levels the caller measured, and
+    three of them — `marks`, `capture` and `capture_live` — are verdicts about *this* client's
+    state, so one project at one instant legitimately records different levels for two clients.
+    `blocks` is client-specific for the same reason: it states what *one* client's `SessionStart`
+    emitted. `at` and `event` are neutral, and `stm_entries`, `stm_bytes`, `sleep_mark`, `pending`
+    and `notes` are project-wide, so those compare across clients; `client`, `capture_mark`,
+    `checks` and `blocks` do not.
     """
     if metrics is None:
-        metrics = status.collect(cfg) if cfg.configured else {}
+        metrics = status.collect(cfg, client=client) if cfg.configured else {}
     stm_info = (metrics or {}).get("stm") or {}
     pending_info = (metrics or {}).get("pending") or {}
     vault = paths.vault_root(cfg)
@@ -212,7 +235,12 @@ def record(
         "checks": {check.id: check.level for check in checks},
         "stm_entries": stm_info.get("lines", 0),
         "stm_bytes": stm_info.get("bytes", 0),
-        "capture_mark": watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp"),
+        # Which client this run describes. Two clients write two journals, and a record that did
+        # not say which one it came from would be unreadable the moment they were ever merged —
+        # by a support dump, a backup restore, or an operator cat-ing both files together.
+        "client": client,
+        "capture_mark": watermark.read_mark(
+            paths.capture_mark_file(cfg, client)).get("timestamp"),
         "sleep_mark": watermark.read_mark(paths.sleep_mark_file(cfg)).get("timestamp"),
         "pending": pending_info.get("snapshots", 0),
         "notes": len(list(vault.rglob("*.md"))) if vault.is_dir() else 0,

@@ -164,3 +164,27 @@ def test_collect_records_how_the_figure_was_obtained(tmp_path: Path):
     junk.write_text("x" * 48, encoding="utf-8")
     m = status.collect(load_config(tmp_path), transcript_path=junk)
     assert m["pressure"]["source"] == "estimate"
+
+
+def test_collect_measures_the_context_with_the_running_clients_parser(tmp_path: Path, monkeypatch):
+    """The context figure comes from the running client's parser.
+
+    `collect` is where the figure every surface quotes is produced — `lts status`, the per-turn
+    notification and `healthchecks._check_pressure` all read this one dict. Measured with the
+    wrong client's parser it would be a confidently stated wrong number, which is the failure
+    class `_check_pressure` exists for.
+    """
+    from tests.helpers import PROBE_TOKENS, register_probe_client
+
+    make_project(tmp_path, "[sleep]\ncontext_window = 1000\n")
+    cfg = load_config(tmp_path)
+    probe = register_probe_client(monkeypatch)
+    t = tmp_path / "t.jsonl"
+    t.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant",
+        "usage": {"input_tokens": 850, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 0}}}), encoding="utf-8")
+
+    assert status.collect(cfg, transcript_path=t, client=probe)["pressure"]["tokens"] \
+        == PROBE_TOKENS
+    # The same file read by the default client: 850, which is what the adapter displaced.
+    assert status.collect(cfg, transcript_path=t)["pressure"]["tokens"] == 850

@@ -24,5 +24,8 @@ class ClaudeCode:
     def measure_context(self, path: Path) -> tuple[int, str]:
         return transcript.measure_context(Path(path))
 
+    def newest_exchange_after(self, path: Path, stamp: str | None) -> bool:
+        return transcript.newest_exchange_after(Path(path), stamp)
+
 
 ADAPTER = ClaudeCode()

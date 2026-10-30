@@ -34,6 +34,10 @@ from lts import watermark
 # So the threshold is set above the steady state `_KEEP` implies, which is what makes it a ceiling:
 # 200 x 469 B = 91.6 KiB of steady state under a 128 KiB threshold leaves 36.4 KiB of headroom,
 # i.e. ~79 appends between trims. The file never exceeds `_MAX_BYTES`, and the trim is rare again.
+# The record has grown twice since that measurement — two more checks, and the `client` field the
+# per-client journals need — so it was measured again, 2026-10-30, the same way: **484 B**, for
+# 94.5 KiB of steady state, 33.5 KiB of headroom and ~70 appends between trims. The headroom
+# shrinks with the record, which is the thing to watch here; it is still an occasional trim.
 # The alternative was `_KEEP` ~= 130 to fit 64 KiB, which would have silently shortened the history
 # this log exists to hold.
 _MAX_BYTES = 128 * 1024

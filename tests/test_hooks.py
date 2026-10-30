@@ -10,7 +10,7 @@ import pytest
 
 from lts import clients, hooklog, paths, sync, turnstate
 from lts.config import load_config
-from tests.helpers import make_project
+from tests.helpers import make_project, register_alias_client
 
 
 def _load(name: str, path: Path):
@@ -1418,8 +1418,7 @@ def second_client(monkeypatch):
     mark file a client reads and writes, not how a transcript is parsed. Naming it `codex` would
     be a test making an assertion about code nobody has written yet.
     """
-    monkeypatch.setitem(clients._REGISTRY, "second", clients.resolve("claude_code"))
-    return "second"
+    return register_alias_client(monkeypatch)
 
 
 def test_pre_compact_puts_the_snapshot_mark_in_the_running_client_directory(
@@ -1659,3 +1658,80 @@ def test_user_prompt_submit_keeps_mark_and_turn_state_in_the_running_clients_dir
     assert state["capture_mark"] == "2026-10-30T10:00:00.000Z"
     assert not paths.turn_state_file(cfg).exists()
     assert not paths.client_state_dir(cfg).exists()
+
+
+def test_session_start_journals_the_running_clients_own_health(tmp_path: Path, second_client):
+    """The record names its client and its checks are that client's, not the default client's.
+
+    Both halves of one call site. The shared sleep mark stands an hour ahead of Claude Code's
+    capture mark, which `marks` reports as a `fail`; the second client has no capture mark, so it
+    has nothing to compare. A record saying `second` while carrying the other client's verdict is
+    the state this pins against — the trend checks read these records as one client's history.
+    """
+    from lts import watermark
+    session_start = _load("session_start", HOOKS / "session_start.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg, second_client)
+    # Well in the past: the hook takes `now` from the clock, and a mark dated today would be
+    # reported as a mark in the future for part of the day instead of being compared at all.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-01-15T12:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": "2026-01-15T11:00:00.000Z"})
+
+    session_start.build_context({"cwd": str(root), "session_id": "s", "source": "startup"},
+                                client=second_client)
+
+    records = [json.loads(line) for line
+               in paths.health_journal_file(cfg, second_client).read_text(
+                   encoding="utf-8").splitlines() if line.strip()]
+    assert records[-1]["client"] == second_client
+    assert records[-1]["capture_mark"] is None
+    assert records[-1]["checks"]["marks"] == "skip", records[-1]["checks"]
+
+
+def test_user_prompt_submit_measures_context_with_the_running_clients_parser(
+        tmp_path: Path, monkeypatch):
+    """The figure the user is shown is measured by the running client's parser.
+
+    The notification is built from `status.collect`'s metrics, which is a second transcript read
+    beside `build_context`'s own — so the client has to reach both or the two surfaces disagree
+    about one measurement.
+    """
+    from tests.helpers import PROBE_TOKENS, register_probe_client
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    root = _quiet_project(tmp_path, "[sleep]\ncontext_window = 5000\n")
+    probe = register_probe_client(monkeypatch)
+
+    out = ups.run({"cwd": str(root), "transcript_path": str(_one_exchange(tmp_path)),
+                   "session_id": "s1"}, client=probe)
+
+    assert f"{PROBE_TOKENS:,}/5,000 tokens" in out["systemMessage"], out
+
+
+def test_user_prompt_submit_judges_the_running_clients_marks(tmp_path: Path, second_client):
+    """The per-turn checks are run against the running client's state, not the default client's.
+
+    `status.collect` is not the only thing the per-turn hook hands the client to: `health.run`
+    takes it as well, and `marks` is in `health.PER_TURN_IDS`. The shared sleep mark below is
+    level with the second client's capture mark and an hour ahead of Claude Code's, so the two
+    clients cannot produce the same verdict — one is told memory may be incomplete and the other
+    is not.
+    """
+    from lts import clients, watermark
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    root = _quiet_project(tmp_path, "[sleep]\ncontext_window = 1000000\n")
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg, second_client)
+    # Well in the past: a mark dated today reads as a mark in the future for part of the day.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-01-15T12:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": "2026-01-15T11:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg, second_client),
+                         {"timestamp": "2026-01-15T12:00:00.000Z"})
+    event = {"cwd": str(root), "transcript_path": str(_one_exchange(tmp_path)),
+             "session_id": "s1"}
+
+    quiet = ups.run(dict(event), client=second_client)
+    loud = ups.run(dict(event), client=clients.DEFAULT)
+
+    assert "marks" not in quiet.get("systemMessage", ""), quiet
+    assert "marks" in loud["systemMessage"], loud

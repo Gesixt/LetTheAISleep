@@ -127,7 +127,7 @@ def build_blocks(event: dict, *, root: Path | None = None,
         # whose per-entry cost measured ~4x that, so ~1.6 ms extrapolated at 250 notes. Not worth
         # fixing: the duplicate walk is ~0.05% of the 3-5 s session-load budget of ТЗ §6, and
         # removing it would mean threading a check's internal note count into the journal record.
-        metrics = status.collect(cfg)
+        metrics = status.collect(cfg, client=client)
         # Before the journal is read, not after: `journal.tail` is the next line, and this is where
         # a project upgraded from the pre-split layout adopts its flat `health.jsonl`. Adopting
         # afterwards would leave the first session after the upgrade computing its trend checks
@@ -137,12 +137,12 @@ def build_blocks(event: dict, *, root: Path | None = None,
         if cfg.configured:
             paths.ensure_sidecar(cfg, client)
         journal_file = paths.health_journal_file(cfg, client)
-        # `health.run` and `health.record` are not given the client yet: they take no such
-        # parameter, so the capture mark they read is still the default client's — `record`'s
-        # `capture_mark` field directly, and `checks` through the three `healthchecks` that read
-        # that mark. Every other field of a record is project-wide by design. Threading the client
-        # into both is Task 5's; until then this journal is per client and those two fields are not.
-        checks = health.run(cfg, metrics=metrics,
+        # The client reaches the checks and the record, not only the journal's path: `marks`,
+        # `capture` and `capture_live` read this client's capture mark, and the record both names
+        # the client and quotes that mark. A journal that was per client while its records
+        # described the default client's marks would make the trend checks read one client's
+        # history out of another client's figures.
+        checks = health.run(cfg, metrics=metrics, client=client,
                             history=journal.tail(journal_file, health.TREND_WINDOW))
         failure = health.demand(checks)
         if failure:
@@ -153,7 +153,8 @@ def build_blocks(event: dict, *, root: Path | None = None,
         # actually emitted, which is the only input `_check_anchor_delivery` has. `journal.append`
         # swallows every exception, so a broken journal costs the record and never the blocks.
         emitted = [name for name, body in blocks if body]
-        journal.append(journal_file, health.record(cfg, checks, emitted, metrics=metrics))
+        journal.append(journal_file,
+                       health.record(cfg, checks, emitted, metrics=metrics, client=client))
 
         # `{}` as the previous state, deliberately — not an oversight and not a missing read of
         # `turn-state.json`: a new session states what is outstanding even if the previous session's
