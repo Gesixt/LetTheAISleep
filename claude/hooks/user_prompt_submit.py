@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import health, memorymap, notify, paths, status, transcript, turnstate, watermark
+from lts import clients, health, memorymap, notify, paths, status, transcript, turnstate, watermark
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -63,7 +63,8 @@ def _context_line(tokens: int, window: int, source: str = transcript.USAGE) -> s
             f"({round(tokens / window * 100)}%){estimated}")
 
 
-def build_context(event: dict, *, root: Path | None = None) -> str:
+def build_context(event: dict, *, root: Path | None = None,
+                  client: str = clients.DEFAULT) -> str:
     """The memory map, then the sleep-pressure nudge — whichever of the two has anything to say.
 
     The map goes first because it is context for answering the prompt that follows; the nudge is
@@ -72,7 +73,11 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     the model that a vault of notes exists.
     """
     cfg = load_config(root or event.get("cwd"))
-    tokens, source = transcript.measure_context(Path(event.get("transcript_path", "")))
+    # Resolved here and not in `main()`: an unknown client must raise where `main()`'s `except`
+    # can turn it into a logged line and a well-formed `{}`, never into an exception the harness
+    # sees coming out of a hook. See `clients.resolve` for why it refuses rather than falls back.
+    adapter = clients.resolve(client)
+    tokens, source = adapter.measure_context(Path(event.get("transcript_path", "")))
     level = transcript.pressure_level(
         tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
     )
@@ -84,7 +89,7 @@ def build_context(event: dict, *, root: Path | None = None) -> str:
     return "\n\n".join(b for b in blocks if b)
 
 
-def _notification(cfg, transcript_path: Path, session_id: str | None) -> str:
+def _notification(cfg, transcript_path: Path, session_id: str | None, client: str) -> str:
     """The line the user is shown, if any — and the turn state advanced on the way.
 
     Wrapped by its caller, not by itself, so that a failure here costs this line and nothing else.
@@ -105,9 +110,9 @@ def _notification(cfg, transcript_path: Path, session_id: str | None) -> str:
     # `run` already calls this function only under the same test — and it states what
     # `ensure_sidecar` requires: it raises rather than create a sidecar off a project root.
     if cfg.configured:
-        paths.ensure_sidecar(cfg)
-    mark = watermark.read_mark(paths.capture_mark_file(cfg)).get("timestamp")
-    previous = turnstate.read(paths.turn_state_file(cfg))
+        paths.ensure_sidecar(cfg, client)
+    mark = watermark.read_mark(paths.capture_mark_file(cfg, client)).get("timestamp")
+    previous = turnstate.read(paths.turn_state_file(cfg, client))
     state = turnstate.advance(previous, capture_mark=mark, session_id=session_id)
     # `status.collect` with the transcript, rather than the figures `build_context` already has
     # patched into a copy of its result: measured 2026-10-01 on this machine, after the tail parse,
@@ -124,11 +129,11 @@ def _notification(cfg, transcript_path: Path, session_id: str | None) -> str:
                         transcript_path=transcript_path)
     text, shown = notify.message(checks, metrics, state.get("shown") or {})
     state["shown"] = shown
-    turnstate.write(paths.turn_state_file(cfg), state)
+    turnstate.write(paths.turn_state_file(cfg, client), state)
     return text
 
 
-def run(event: dict, *, root: Path | None = None) -> dict:
+def run(event: dict, *, root: Path | None = None, client: str = clients.DEFAULT) -> dict:
     """The model's half and the user's half, each unable to take the other down.
 
     `additionalContext` reaches the model and `systemMessage` reaches the user — observed, not
@@ -136,14 +141,20 @@ def run(event: dict, *, root: Path | None = None) -> dict:
     `main()` turns any exception into `{}`: the map and the measured context line have been this
     hook's whole output since before the notification existed, and the code that reports a broken
     memory must not be able to withhold them.
+
+    One way remains, and it is deliberate: an unknown `--client`, which `build_context`'s
+    `clients.resolve` refuses rather than silently reading the transcript with the wrong parser.
+    That costs this hook's whole output on every turn it stays wired that way, and says so in
+    `/tmp/lts-hook-errors.log` — loud and recoverable, against a wrong parse that would look
+    healthy.
     """
-    text = build_context(event, root=root)
+    text = build_context(event, root=root, client=client)
     note = ""
     try:
         cfg = load_config(root or event.get("cwd"))
         if cfg.configured:
             note = _notification(cfg, Path(event.get("transcript_path", "")),
-                                 event.get("session_id"))
+                                 event.get("session_id"), client)
     except Exception:
         log_error(__file__)
     out: dict = {}
@@ -158,9 +169,10 @@ def run(event: dict, *, root: Path | None = None) -> dict:
 
 
 def main() -> None:
+    client = clients.from_argv(sys.argv[1:])
     try:
         event = json.load(sys.stdin)
-        result = run(event)
+        result = run(event, client=client)
     except Exception:
         log_error(__file__)
         result = {}

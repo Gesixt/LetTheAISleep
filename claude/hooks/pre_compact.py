@@ -26,7 +26,11 @@ def run(event: dict, *, root: Path | None = None, now: datetime | None = None,
     if not cfg.configured:
         log_note("pre_compact.py", f"no lts project at or above {cfg.project_root}; no snapshot")
         return {}
-    paths.ensure_sidecar(cfg)
+    # Resolved here and not in `main()`: an unknown client must raise where `main()`'s `except`
+    # can turn it into a logged line and a well-formed `{}`, never into an exception the harness
+    # sees coming out of a hook. See `clients.resolve` for why it refuses rather than falls back.
+    adapter = clients.resolve(client)
+    paths.ensure_sidecar(cfg, client)
     transcript_path = Path(event.get("transcript_path", ""))
     mark_file = paths.sleep_mark_file(cfg)
 
@@ -61,9 +65,9 @@ def run(event: dict, *, root: Path | None = None, now: datetime | None = None,
         watermark.read_mark(snapshot_file), watermark.read_mark(mark_file)
     )
     # Parsed once and kept: `new` is the tail to snapshot, `exchanges` is what the new mark is
-    # measured against. `watermark.read_exchanges` becomes the `clients` adapter's `read_exchanges`
-    # on this line, and that is the only place in this hook the adapter touches.
-    exchanges = watermark.read_exchanges(transcript_path)
+    # measured against. The parse is the running client's own, and this line is the only place in
+    # this hook the adapter touches — Task 3 shaped the rest of it so that stayed true.
+    exchanges = adapter.read_exchanges(transcript_path)
     new = watermark.exchanges_after(exchanges, frontier)
     if not new:
         log_note("pre_compact.py", "no material since the last sleep or snapshot; no snapshot")
@@ -82,9 +86,10 @@ def run(event: dict, *, root: Path | None = None, now: datetime | None = None,
 
 
 def main() -> None:
+    client = clients.from_argv(sys.argv[1:])
     try:
         event = json.load(sys.stdin)
-        result = run(event)
+        result = run(event, client=client)
     except Exception:
         log_error(__file__)
         result = {}

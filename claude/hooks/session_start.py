@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import anchor, digest, health, journal, notify, paths, pending, status, stm
+from lts import anchor, clients, digest, health, journal, notify, paths, pending, status, stm
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -28,7 +28,8 @@ _UNCONFIGURED_MSG = (
 )
 
 
-def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
+def build_blocks(event: dict, *, root: Path | None = None,
+                 client: str = clients.DEFAULT) -> tuple[str, str]:
     """`(context, system_message)` — what the model is given, and what the user is shown.
 
     One function because the user's line is derived from the same `checks` and `metrics` this hook
@@ -50,6 +51,12 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
         # ran. "Memory is not configured here" is also none of the three subjects spec §6.1 lists,
         # so inventing a fourth one here would be a design decision taken in a hook.
         return _UNCONFIGURED_MSG.format(root=cfg.project_root), ""
+    # Resolved here and not in `main()`, like the other three hooks: an unknown client must raise
+    # where `main()`'s `except` can turn it into a logged line and a well-formed `{}`, never into
+    # an exception the harness sees. This hook parses no transcript, so the adapter itself is not
+    # used — what the call buys is the refusal: a typo'd `--client` would otherwise journal health
+    # into a directory of its own and leave the trend checks with an empty history for good.
+    clients.resolve(client)
     snapshots = pending.list_snapshots(paths.pending_dir(cfg))
     stm_text = stm.read(paths.stm_file(cfg))
     stm_entries = len([ln for ln in stm_text.splitlines() if ln.strip()])
@@ -128,8 +135,13 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
         # past `build_blocks`' early return for an unconfigured project — and it states what
         # `ensure_sidecar` requires: it raises rather than create a sidecar off a project root.
         if cfg.configured:
-            paths.ensure_sidecar(cfg)
-        journal_file = paths.health_journal_file(cfg)
+            paths.ensure_sidecar(cfg, client)
+        journal_file = paths.health_journal_file(cfg, client)
+        # `health.run` and `health.record` are not given the client yet: they take no such
+        # parameter, so the capture mark they read is still the default client's — `record`'s
+        # `capture_mark` field directly, and `checks` through the three `healthchecks` that read
+        # that mark. Every other field of a record is project-wide by design. Threading the client
+        # into both is Task 5's; until then this journal is per client and those two fields are not.
         checks = health.run(cfg, metrics=metrics,
                             history=journal.tail(journal_file, health.TREND_WINDOW))
         failure = health.demand(checks)
@@ -159,13 +171,14 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
     return "\n\n".join(body for _name, body in blocks if body), system_message
 
 
-def build_context(event: dict, *, root: Path | None = None) -> str:
+def build_context(event: dict, *, root: Path | None = None,
+                  client: str = clients.DEFAULT) -> str:
     """The model's half of `build_blocks`, kept as the name every test already calls."""
-    return build_blocks(event, root=root)[0]
+    return build_blocks(event, root=root, client=client)[0]
 
 
-def run(event: dict, *, root: Path | None = None) -> dict:
-    context, system_message = build_blocks(event, root=root)
+def run(event: dict, *, root: Path | None = None, client: str = clients.DEFAULT) -> dict:
+    context, system_message = build_blocks(event, root=root, client=client)
     out: dict = {}
     if system_message:
         out["systemMessage"] = system_message
@@ -178,9 +191,10 @@ def run(event: dict, *, root: Path | None = None) -> dict:
 
 
 def main() -> None:
+    client = clients.from_argv(sys.argv[1:])
     try:
         event = json.load(sys.stdin)
-        result = run(event)
+        result = run(event, client=client)
     except Exception:
         log_error(__file__)
         result = {}
