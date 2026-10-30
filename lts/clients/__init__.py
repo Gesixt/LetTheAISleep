@@ -2,19 +2,25 @@
 
 Everything else in `lts` is vendor-neutral already: the sidecar is ours, the vault is Basic
 Memory's, and no module in this package calls MCP at all. The transcript is the exception — it is
-written by the client, in the client's own schema, and five things depend on reading it correctly:
-STM capture, the compaction backstop, the capture mark, the context figure, and the `capture` and
-`capture_live` health checks.
+written by the client, in the client's own schema. What depends on reading it correctly, named
+rather than counted because a count in prose is what rots: STM capture, the compaction backstop,
+the context figure, and the `capture` and `capture_live` health checks. The capture mark is not
+another of them — `stop.py` derives it from the same parse as the capture it just wrote.
 
 Codex's own documentation states that its transcript format "isn't a stable interface for hooks and
 may change over time". A dependency that broad on a format its vendor disclaims belongs behind one
-interface with its own tests, not spread across four call sites.
+interface with its own tests rather than at each of those call sites.
 
-**The running client is declared, never sniffed.** The hook wiring passes `--client <id>`. Deciding
-from the shape of a payload which parser to use would be a guess on the hard side of the soft/hard
-split, and the hard side does not guess: a wrong guess does not fail, it captures plausible-looking
-nonsense into long-term memory. An absent flag resolves to `claude_code`, which is what keeps the
-five already-wired projects working between a `git pull` of the clone and their next `lts update`.
+**The running client is declared, never sniffed.** A hook reads `--client <id>` off its own command
+line. Deciding from the shape of a payload which parser to use would be a guess on the hard side of
+the soft/hard split, and the hard side does not guess: a wrong guess does not fail, it captures
+plausible-looking nonsense into long-term memory.
+
+Nothing writes the flag yet: `claude_code` is the only registered adapter, so the wiring that
+`lts.sync.render_hook_settings` and `install.py` emit carries no `--client` at all, and every
+installed project resolves to the default. That default is what lets the split reach an
+already-wired project the moment its clone is pulled, with nothing to re-wire; a second client
+arrives as an adapter plus wiring that declares its own id.
 """
 
 from __future__ import annotations
