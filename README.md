@@ -25,12 +25,35 @@ everything worth keeping into linked long-term notes **without losing a single n
   `UserPromptSubmit` states the measured context occupancy on every turn and adds escalating
   "time to sleep" pressure as it fills.
 
-> **The sleep mark.** A Claude Code transcript is one append-only file that `--resume` keeps
-> extending, so it holds the whole history of a project, not the current chapter. `lts stm clear`
-> (step 6 of `/sleep`) records how far consolidation reached — `<root>/.ai_memory/sleep-mark.json`.
-> Everything behind the mark is in long-term notes and is never snapshotted again, so a `PreCompact`
-> that finds nothing new writes no snapshot, and `SessionStart` only demands a sleep that is really
-> owed. The same mark keeps the sleep's own narration out of the buffer it just emptied.
+> **The sleep mark, and the snapshot mark.** A Claude Code transcript is one append-only file that
+> `--resume` keeps extending, so it holds the whole history of a project, not the current chapter.
+> Two marks say how far through it memory has got, and they are two **different claims**:
+>
+> - the **sleep mark** — `<root>/.ai_memory/sleep-mark.json` — claims that **notes exist**:
+>   everything behind it is in long-term notes. Only a sleep writes it (`lts stm clear`, step 6 of
+>   `/sleep`, arms the flag that the next `Stop` — or `PreCompact`, if an auto-compact beats it —
+>   turns into the mark). It is shared by every client, because a note is the project's, not a
+>   transcript's;
+> - the **snapshot mark** — `<root>/.ai_memory/clients/<client>/snapshot-mark.json` — claims only
+>   that a **pending snapshot** holds the material, and no note does — until that snapshot is
+>   consolidated or dropped (`lts pending clear`), after which the mark says only that the material
+>   was once flushed. `PreCompact` writes it. It is per client because it names a position *inside
+>   one transcript*, and resolved against another client's transcript that position means nothing.
+>
+> `PreCompact` snapshots the tail that neither claim covers, i.e. whatever follows the later of the
+> two marks — so a compact that finds nothing new writes no snapshot, nothing already consolidated
+> is dumped twice, and `SessionStart` only demands a sleep that is really owed. The sleep mark also
+> keeps the sleep's own narration out of the buffer it just emptied.
+>
+> Until 2026-10-30 one file carried both claims, and `PreCompact`'s ordinary path wrote the
+> *snapshot* claim into it (this project's own mark, measured that day, was
+> `{"uuid": "4825afa5-…", "timestamp": "2026-10-19T06:09:51.626Z", "count": 509}` — the `uuid` is
+> proof a compaction wrote it, since a sleep writes a timestamp alone). So an ordinary `/compact`
+> advanced the consolidation frontier with nothing consolidated, and `sleep_evidence` — the check
+> that asks what backs the frontier — reported that nothing did, which is true in the letter and
+> indistinguishable from the 2026-10-16 incident below, where nothing at all held the material.
+> Split apart, that check reads a claim only consolidation can make: "a snapshot holds it" and
+> "nothing holds it" stop being the same report.
 >
 > The mark a hook places at the end of a turn is an **instant**, not a message id: Claude Code
 > can write the turn's last message to the transcript *after* the hook has read it, so a mark
@@ -54,7 +77,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 > and every check stayed green; in the second, 2.6 hours past every note in a 267-note vault. The
 > first span was recovered three days later only because the buffer happened not to be cleared
 > again — `PreCompact`'s backstop was off for it, since that hook snapshots only what lies *after*
-> the sleep mark. So the latch now
+> the frontier the two marks set between them. So the latch now
 > carries **when it was armed**, and a hook honours it only within `watermark.SLEEP_FLAG_MAX_AGE`
 > (5 minutes; the six sleeps on record consumed it in 8.3–16.9 s). Anything else — no stamp, an
 > unreadable one, one from the future, one past the bound — is a latch nobody consumed, and the hook

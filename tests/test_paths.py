@@ -2,7 +2,7 @@ import pytest
 
 from pathlib import Path
 from lts.config import NotAnLtsProject, load_config
-from lts import paths, turnstate
+from lts import paths, turnstate, watermark
 from tests.helpers import make_project
 
 
@@ -165,3 +165,17 @@ def test_a_flat_file_that_reappears_after_the_target_was_deleted_is_refused(tmp_
     paths.ensure_sidecar(cfg)
 
     assert not paths.capture_mark_file(cfg).exists()
+
+
+def test_adoption_starts_the_snapshot_mark_where_the_old_sleep_mark_stood(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    root = paths.sidecar_root(cfg)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sleep-mark.json").write_text(
+        '{"uuid": "u9", "timestamp": "2026-10-19T06:09:51.626Z"}', encoding="utf-8")
+
+    paths.ensure_sidecar(cfg)
+
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg))["uuid"] == "u9"
+    # Untouched: clearing it would manufacture a "nothing is consolidated" demand.
+    assert watermark.read_mark(paths.sleep_mark_file(cfg))["uuid"] == "u9"

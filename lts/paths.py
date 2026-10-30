@@ -39,7 +39,12 @@ def anchor_file(cfg: Config) -> Path:
 
 
 def sleep_mark_file(cfg: Config) -> Path:
-    """How far consolidation has reached in the transcript (see `lts.watermark`)."""
+    """How far consolidation has reached — a claim that notes exist (see `lts.watermark`).
+
+    Written only by a sleep: the armed branches of `Stop` and `PreCompact`. What `PreCompact`
+    flushes into a pending snapshot goes to `snapshot_mark_file` instead, which is a different
+    claim and, unlike this one, is per client.
+    """
     return sidecar_root(cfg) / "sleep-mark.json"
 
 
@@ -60,7 +65,7 @@ def pending_dir(cfg: Config) -> Path:
 def client_state_dir(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
     """State that belongs to one client's transcript rather than to the project.
 
-    Three things are about a transcript, so two clients wired to one project cannot share them:
+    Four things are about a transcript, so two clients wired to one project cannot share them:
 
     - the **capture mark** names an exchange by uuid *inside one transcript*. Resolved against
       another client's transcript the uuid never matches, and `watermark.exchanges_after` falls
@@ -68,6 +73,8 @@ def client_state_dir(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
       position — every older exchange is dropped, permanently, with every health check green. That
       is the signature of the 2026-10-16 incident, and a shared mark would reintroduce it by
       construction rather than by accident;
+    - the **snapshot mark** names a position the same way, and the same fall-through would let one
+      client's compaction declare the other's unsnapshotted chapters already flushed;
     - the **turn state** counts prompts and misses within one client's turn sequence;
     - the **health journal** is read by the trend checks as a single history, and two interleaved
       clients make that history describe neither of them.
@@ -158,6 +165,25 @@ def _adopt_flat_state(cfg: Config, client: str = DEFAULT_CLIENT) -> bool:
                 legacy.replace(target)
             except OSError:
                 moved = False
+    # The old sleep mark was the frontier PreCompact worked from, so it is this client's starting
+    # snapshot mark. This does **not** change day one: the sleep mark is deliberately left in
+    # place, and `watermark.later_of({}, sleep)` is the same frontier as `later_of(copy, sleep)`,
+    # so the hook behaves identically with or without the copy. What it buys is a snapshot mark
+    # that exists from day one rather than an absent file that happens to resolve the same way —
+    # a position for any later reader of this mark, and a record of where the split left each
+    # upgraded project.
+    #
+    # The sleep mark itself is left exactly as it is: clearing its claim would make
+    # `sleep_evidence` announce that nothing is consolidated across five live projects, which is a
+    # manufactured demand, and a false demand is what trains demands away. It becomes time-only by
+    # itself at the next real sleep.
+    sleep_mark = sidecar_root(cfg) / "sleep-mark.json"
+    snapshot = state / "snapshot-mark.json"
+    if sleep_mark.exists() and not snapshot.exists():
+        try:
+            snapshot.write_text(sleep_mark.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError:
+            pass
     return moved
 
 

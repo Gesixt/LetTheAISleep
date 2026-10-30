@@ -5,11 +5,19 @@ so "the transcript" is the whole history of a project, not the current chapter �
 file can span months. Without a mark, every PreCompact snapshot re-dumps everything that was
 already consolidated, and the next SessionStart reports a sleep that is not actually owed.
 
-Two marks use this module, both stored as `{"uuid", "timestamp", "count"}`:
+Three marks use this module. Two name a position, `{"uuid", "timestamp", "count"}`:
 
-* the **capture mark** — the last exchange the Stop hook put into the STM buffer;
-* the **sleep mark** — the last exchange that is already consolidated into long-term notes
-  or captured in a pending snapshot.
+* the **capture mark** — the last exchange the Stop hook put into the STM buffer (and, on the turn
+  a sleep finishes, an instant instead: that turn is discarded rather than captured);
+* the **snapshot mark** — the last exchange a pending snapshot holds, which no note does.
+
+The third, the **sleep mark**, is the instant consolidation into long-term notes reached, and
+carries that timestamp alone: both of its writers place it at the end of a turn (see `mark_at`).
+
+The sleep and snapshot marks were one file until 2026-10-30, and that file therefore carried two
+different claims: `PreCompact` wrote "a snapshot holds this", in the positional shape, into the
+field `sleep_evidence` reads as "notes exist". Kept apart, the tail nothing holds yet starts at
+`later_of` the two.
 
 Resolution is deliberately layered: `uuid` is exact, `timestamp` survives a transcript that
 was rewritten under us, and `count` is the last resort for transcripts that carry neither.
@@ -44,9 +52,13 @@ from lts.transcript import read_exchanges
 SLEEP_FLAG_MAX_AGE = timedelta(minutes=5)
 
 
-def mark_of(transcript_path: Path) -> dict:
-    """The mark naming the last user/assistant exchange in `transcript_path` ({} if there is none)."""
-    exchanges = read_exchanges(Path(transcript_path))
+def mark_of_exchanges(exchanges: list[dict]) -> dict:
+    """The mark naming the last of `exchanges` ({} when there are none).
+
+    Split out of `mark_of` for a caller that has already parsed the transcript. `count` is the
+    length of the **whole** list and never of a tail: `exchanges_after` uses it as its last-resort
+    fallback, so a count measured against a slice would resolve silently to the wrong position.
+    """
     if not exchanges:
         return {}
     last = exchanges[-1]
@@ -55,6 +67,11 @@ def mark_of(transcript_path: Path) -> dict:
         "timestamp": last.get("timestamp"),
         "count": len(exchanges),
     }
+
+
+def mark_of(transcript_path: Path) -> dict:
+    """The mark naming the last user/assistant exchange in `transcript_path` ({} if there is none)."""
+    return mark_of_exchanges(read_exchanges(Path(transcript_path)))
 
 
 def mark_at(when: datetime | None = None) -> dict:
@@ -100,6 +117,31 @@ def exchanges_after(exchanges: list[dict], mark: dict) -> list[dict]:
     # A count that overruns means this is a different (or truncated) transcript, not one we
     # have already read to the end — start from the beginning rather than swallowing it whole.
     return exchanges[count:] if count <= len(exchanges) else exchanges
+
+
+def later_of(a: dict, b: dict) -> dict:
+    """Whichever of two marks stands further along; an empty mark is the beginning of time.
+
+    `pre_compact.py` needs this because the tail it owes a snapshot starts at whichever is later of
+    *the last sleep* and *the last snapshot*: a sleep means nothing behind it needs snapshotting,
+    and so does a snapshot. The comparison did not exist while one file carried both claims.
+
+    Comparison is lexicographic on the stored string, which is chronological only because every
+    producer writes one shape — UTC, milliseconds, `Z`, as `mark_at` writes it. Every client
+    adapter is required to normalise to that shape (`lts.clients`); a second shape would reorder
+    marks silently rather than raising.
+
+    A mark with no readable timestamp loses to one that has it. "No position" is the beginning of
+    time, not the end of it — the opposite choice would let an unreadable file declare everything
+    behind it already handled, which is the direction that forgets.
+    """
+    ta = (a or {}).get("timestamp")
+    tb = (b or {}).get("timestamp")
+    if not isinstance(ta, str):
+        return b or {}
+    if not isinstance(tb, str):
+        return a or {}
+    return a if ta >= tb else b
 
 
 def read_mark(path: Path) -> dict:

@@ -1323,3 +1323,107 @@ def test_user_prompt_submit_adopts_the_capture_mark_before_it_reads_it(tmp_path:
     assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == mark
     assert not (root / "stm" / "capture-mark.json").exists()
     assert turnstate.read(paths.turn_state_file(cfg))["capture_mark"] == "2026-10-30T10:00:00.000Z"
+
+
+def _one_exchange(tmp_path: Path, name: str = "t.jsonl") -> Path:
+    return _transcript(tmp_path / name, [
+        _msg("user", "question", uuid="u1", ts="2026-10-30T10:00:00.000Z"),
+        _msg("assistant", "answer", uuid="a1", ts="2026-10-30T10:00:01.000Z"),
+    ])
+
+
+def test_pre_compact_moves_the_snapshot_mark_and_leaves_the_sleep_mark_alone(tmp_path: Path):
+    # The sleep mark is a claim that notes exist. PreCompact writes no notes, so it may not make
+    # that claim — all it has done is move material into a pending snapshot.
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    # A real sleep mark, in the shape a sleep writes and behind the transcript, so that "did not
+    # move" is a statement about a mark that was there rather than about an empty file.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-29T08:00:00.000Z"})
+    before = watermark.read_mark(paths.sleep_mark_file(cfg))
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == before
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg)).get("uuid") == "a1"
+    assert _snapshots(root)
+
+
+def test_the_snapshot_mark_counts_the_whole_transcript_not_the_tail_it_wrote(tmp_path: Path):
+    """`count` measures the whole file, never the tail that went into the snapshot.
+
+    `exchanges_after` reaches `count` only when neither the uuid nor the timestamp resolves, so a
+    count taken from the tail carries the right uuid and the right timestamp and is invisible until
+    exactly that transcript turns up — and then it resolves to a position earlier than the one the
+    mark names, and the material in between is snapshotted twice.
+    """
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    # Between the two exchanges: the tail written out is one exchange, the transcript holds two.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-30T10:00:00.500Z"})
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+
+    assert _snapshots(root)[0].read_text(encoding="utf-8") == "[assistant] answer"
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg))["count"] == 2
+
+
+def test_pre_compact_snapshots_only_what_neither_a_sleep_nor_a_snapshot_holds(tmp_path: Path):
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+    first = len(_snapshots(root))
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s2"})
+
+    assert len(_snapshots(root)) == first
+
+
+def test_a_sleep_ahead_of_the_snapshot_mark_still_bounds_the_tail(tmp_path: Path):
+    # A sleep consolidates everything behind it, including material an older snapshot mark has
+    # not reached. `later_of` is what makes the later of the two win.
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    watermark.write_mark(paths.snapshot_mark_file(cfg), {"timestamp": "2020-01-01T00:00:00.000Z"})
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2099-01-01T00:00:00.000Z"})
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+
+    assert not _snapshots(root)
+
+
+def test_pre_compact_puts_the_snapshot_mark_in_the_running_client_directory(tmp_path: Path):
+    """The `client` argument reaches `paths.snapshot_mark_file` instead of being quietly dropped.
+
+    A snapshot mark names a position inside one transcript, so two clients wired to one project must
+    not share it (see `paths.client_state_dir`). Task 4 supplies the real value; this is the
+    assertion that the parameter is wired to the file the hook writes, and nothing else here would
+    notice if it were ignored — the default client's path is what an ignored argument produces.
+    """
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"},
+                    client="other_client")
+
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg, "other_client")).get("uuid") == "a1"
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg)) == {}
