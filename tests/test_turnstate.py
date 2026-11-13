@@ -17,7 +17,8 @@ def test_the_state_lives_in_the_sidecar_and_is_not_the_health_journal(tmp_path: 
     """
     cfg = load_config(make_project(tmp_path))
     state_file = paths.turn_state_file(cfg)
-    assert state_file.parent == paths.sidecar_root(cfg)
+    assert paths.sidecar_root(cfg) in state_file.parents
+    assert state_file.parent == paths.client_state_dir(cfg)
     assert state_file.name == "turn-state.json"
     assert state_file != paths.health_journal_file(cfg)
 
@@ -29,12 +30,12 @@ def test_a_prompt_with_no_previous_state_is_not_a_miss():
     `capture_live` failure the moment the state file is created or deleted, which is the
     false-demand class this subsystem keeps correcting.
 
-    Note what this is *not*: the file is `sidecar_root(cfg) / "turn-state.json"` — per project, with
-    no session dimension and nothing that removes it (checked 2026-10-01 against `lts.paths` and
-    every writer of the sidecar) — so it outlives a session. "No previous state" therefore means the
-    first prompt ever on this project, not the first prompt of each session. The count inside it is a
-    separate question, answered by the session-id tests at the end of this file: the state survives,
-    the count restarts.
+    Note what this is *not*: the file is `paths.turn_state_file(cfg)` — one per project and client,
+    with no session dimension and nothing that removes it (checked 2026-10-01 against `lts.paths`
+    and every writer of the sidecar) — so it outlives a session. "No previous state" therefore
+    means this client's first prompt ever on this project, not the first prompt of each session.
+    The count inside it is a separate question, answered by the session-id tests at the end of this
+    file: the state survives, the count restarts.
     """
     state = turnstate.advance({}, capture_mark="2026-10-01T06:00:00.000Z", at="2026-10-01T06:00:01.000Z")
     assert state["misses"] == 0
@@ -168,10 +169,10 @@ def test_a_state_that_cannot_be_serialised_costs_the_state_and_never_raises(tmp_
 
 # --- the count must not be inherited across sessions --------------------------------------------
 #
-# `paths.turn_state_file(cfg)` is per project with no session dimension and nothing removes it, so
-# the count outlives a session: a session whose last turn the user interrupted leaves `misses = 1`
-# behind, and the first prompt of the next session would inherit it and could reach
-# `_CAPTURE_MISS_TOLERANCE` at once. That demand would be premature rather than true — the
+# `paths.turn_state_file(cfg)` is per project and client with no session dimension and nothing
+# removes it, so the count outlives a session: a session whose last turn the user interrupted
+# leaves `misses = 1` behind, and the first prompt of the next session would inherit it and could
+# reach `_CAPTURE_MISS_TOLERANCE` at once. That demand would be premature rather than true — the
 # interrupted turn's exchanges are still in the transcript, and the next working `Stop` captures
 # them, because `watermark.entries_after` starts from the mark and not from "this turn".
 #

@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lts import anchor, doctor, naming, paths, sync, transcript, watermark
+from lts import anchor, clients, doctor, naming, paths, sync, transcript, watermark
 from lts.config import Config, is_lts_config
 
 _QUOTED = re.compile(r'"([^"]+)"')
@@ -117,6 +117,7 @@ def all_checks(
     turn: dict | None = None,
     ids: Sequence[str] | None = None,
     now: datetime | None = None,
+    client: str = clients.DEFAULT,
 ) -> list[Check]:
     """Every check this module can make about `cfg`, in the order the report states them.
 
@@ -142,6 +143,14 @@ def all_checks(
     here now, and this module must not import `journal` — the journal is best-effort by design and
     a health check that could break on it would be a new way for memory to die silently.
 
+    `client` is which client's state this report describes. Three checks here are about one
+    client rather than about the project: `marks`, `capture` and `capture_live` read that client's
+    capture mark, and the last two also parse its transcript — through `clients.resolve`, because
+    the transcript's schema belongs to the client that wrote it. `pressure` is a fourth at one
+    remove: it reads the figure `status.collect` measured, which is where the adapter applies for
+    it. `sleep_evidence` is deliberately not among them: the sleep mark is shared, and it is the
+    only mark that check reads. The rest measure the project, which both clients share.
+
     A configured project is assumed. Without one, the config verdict is the only thing that can be
     established — there is nothing for the other ten to measure — so that is all this returns, and
     `lts.health` says what the rest of the report reads like in that case.
@@ -161,14 +170,14 @@ def all_checks(
         ("sidecars", lambda: _check_sidecars(cfg)),
         ("hooks", lambda: _check_hooks(cfg)),
         ("vault", lambda: _check_vault(cfg)),
-        ("marks", lambda: _check_marks(cfg, now)),
+        ("marks", lambda: _check_marks(cfg, now, client)),
         ("sleep_evidence", lambda: _check_sleep_evidence(cfg)),
-        ("capture", lambda: _check_capture(cfg, transcript_path, now)),
+        ("capture", lambda: _check_capture(cfg, transcript_path, now, client)),
         ("pressure", lambda: _check_pressure(metrics)),
         ("anchor_fresh", lambda: _check_anchor_fresh(cfg)),
         ("anchor_delivery", lambda: _check_anchor_delivery(cfg, history)),
         ("capture_progress", lambda: _check_capture_progress(history)),
-        ("capture_live", lambda: _check_capture_live(cfg, turn, transcript_path)),
+        ("capture_live", lambda: _check_capture_live(cfg, turn, transcript_path, client)),
     ]
     wanted = None if ids is None else set(ids)
     checks = [config_check] if wanted is None or "config" in wanted else []
@@ -509,21 +518,70 @@ def _resolves_by_uuid(exchanges: list[dict], uuid: str) -> bool:
     return any(ex.get("uuid") == uuid for ex in exchanges)
 
 
-def _check_marks(cfg: Config, now: datetime) -> Check:
-    """The two marks must tell a consistent story about what has been read and consolidated.
+# What to tell an operator about each mark that stands ahead of the clock. Separate texts because
+# the remedy is not the same: the `Stop` hook rewrites the capture and sleep marks from the clock
+# on its next run, while `PreCompact` writes the snapshot mark *only when it finds something new*
+# — and with that mark dated in the future it never does, because the mark is the frontier it
+# measures "new" against. So that one has to be removed by hand once the clock is right.
+_MARK_CLOCK_FIX = {
+    "capture": "check the system clock; the next Stop hook will then correct it",
+    "sleep": "check the system clock; the next Stop hook will then correct it",
+    "snapshot": "check the system clock, then delete the snapshot mark file — PreCompact "
+                "snapshots only what follows this mark and writes no mark when it finds nothing "
+                "new, so running it again does not correct the date. The next compaction then "
+                "re-snapshots the tail",
+}
+
+
+def _future_mark(name: str, when: datetime | None, now: datetime) -> Check | None:
+    """The `fail` for a mark standing ahead of the clock, or None when it does not.
+
+    A mark that did not parse arrives here as `None` and is not reported: there is no instant to
+    compare. For the capture and sleep marks those states have their own verdicts above; for the
+    snapshot mark they are not reported at all, because no claim this check makes rests on it.
+    """
+    if when is None or when <= now + _SKEW:
+        return None
+    return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
+                 _MARK_CLOCK_FIX[name])
+
+
+def _check_marks(cfg: Config, now: datetime, client: str = clients.DEFAULT) -> Check:
+    """The capture and sleep marks must tell a consistent story about reading and consolidation.
 
     Both marks are classified before either is used. "Marks consistent" is a claim about a
     comparison, and with one mark unreadable the comparison short-circuited on `None` while this
     check still returned it — about a mark it had never read. A corrupt sleep mark is the single
     state in which "consolidation claims material the capture never read" *cannot* be ruled out,
     so it is the last state that may be reported as the healthy one.
+
+    The capture mark is `client`'s; the sleep mark is shared. So the comparison is "has
+    consolidation claimed material *this* client never read", and another client's capture mark
+    standing well ahead cannot answer it.
+
+    The snapshot mark takes part in no comparison here, and one test applies to it: it may not
+    stand ahead of the clock. `PreCompact` writes it in the positional shape, where a uuid is
+    normal and a `None` timestamp is a legitimate value, so the sleep mark's time-only expectation
+    says nothing about it — while a mark dated after `now` is a fault of any mark, and this one is
+    the frontier the next `PreCompact` measures "new material" against.
     """
-    capture_file = paths.capture_mark_file(cfg)
+    capture_file = paths.capture_mark_file(cfg, client)
     sleep_file = paths.sleep_mark_file(cfg)
     capture_state, capture, capture_mark, capture_stamp = _classify_mark(capture_file)
     sleep_state, sleep, sleep_mark, sleep_stamp = _classify_mark(sleep_file)
+    # `client`'s own, like the capture mark and for the same reason: it names a position inside
+    # one transcript.
+    _snapshot_state, snapshot, _snapshot_mark, _snapshot_stamp = _classify_mark(
+        paths.snapshot_mark_file(cfg, client)
+    )
     if capture_state == _MARK_MISSING and sleep_state == _MARK_MISSING:
-        return Check("marks", "skip", "no marks yet — nothing has been captured or consolidated")
+        # Nothing to compare — but a snapshot mark can stand here alone (a compaction before this
+        # client's first `Stop` ever ran), and a clock fault of its own is not excused by the two
+        # marks that are absent.
+        return _future_mark("snapshot", snapshot, now) or Check(
+            "marks", "skip",
+            "no capture or sleep mark yet — nothing has been captured or consolidated",
+        )
 
     both = (
         ("capture", capture_state, capture_stamp, capture_mark, capture_file),
@@ -552,12 +610,12 @@ def _check_marks(cfg: Config, now: datetime) -> Check:
                 f"delete the {name} mark file, then run /sleep to re-consolidate this material",
             )
     # The clock next, and before any `skip`: a mark ahead of `now` is a fault of the mark that
-    # parsed, so the *other* mark being positional cannot excuse reporting it. A positional skip
-    # used to be returned first, and a sleep mark hours in the future then went unreported.
-    for name, when in (("capture", capture), ("sleep", sleep)):
-        if when is not None and when > now + _SKEW:
-            return Check("marks", "fail", f"the {name} mark is in the future: {when.isoformat()}",
-                         "check the system clock; the next Stop hook will then correct it")
+    # parsed, so another mark being positional cannot excuse reporting it. A positional skip used
+    # to be returned first, and a sleep mark hours in the future then went unreported.
+    for name, when in (("capture", capture), ("sleep", sleep), ("snapshot", snapshot)):
+        future = _future_mark(name, when, now)
+        if future:
+            return future
 
     # A mark carrying a uuid still resolves: `entries_after` tries the uuid branch first and never
     # looks at the timestamp on a match, so this is a legitimate `mark_of` shape, not corruption.
@@ -685,7 +743,8 @@ def _duration(gap: timedelta) -> str:
     return f"{seconds / 86400:.1f} days"
 
 
-def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> Check:
+def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime,
+                   client: str = clients.DEFAULT) -> Check:
     """Is the transcript running away from the capture mark?
 
     Exactly one exchange behind is the measured normal — the Stop hook reads the transcript before
@@ -697,6 +756,10 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
     own: `entries_after` returns the whole transcript when the mark is empty, and an empty list
     when the mark's timestamp does not parse. Both would otherwise arrive here as a plain count
     and be reported as a healthy lag.
+
+    Both halves belong to `client`: its capture mark, and its parser for the transcript. Read with
+    another client's parser the backlog is not a lag at all — it is a count of exchanges that
+    parser happened to recognise, stated as a verdict about a hook it knows nothing about.
     """
     if transcript_path is None:
         return Check("capture", "skip",
@@ -707,7 +770,7 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
 
     # Read once, and before the mark is classified: every verdict below compares the transcript
     # against the mark, and a file that yielded nothing to compare cannot produce any of them.
-    exchanges = transcript.read_exchanges(path)
+    exchanges = clients.resolve(client).read_exchanges(path)
     if not exchanges:
         # The old `ok` read an empty backlog as "you are caught up" and explained it with the
         # flush lag — a specific benign claim about a file that held no exchange at all. An empty
@@ -721,7 +784,7 @@ def _check_capture(cfg: Config, transcript_path: Path | None, now: datetime) -> 
             "for this session",
         )
 
-    mark_file = paths.capture_mark_file(cfg)
+    mark_file = paths.capture_mark_file(cfg, client)
     state, marked, mark, stamp = _classify_mark(mark_file)
     if state == _MARK_MISSING:
         # Not `fail`: a brand-new project legitimately has no mark and a transcript full of
@@ -1153,7 +1216,8 @@ def _check_capture_progress(history: list[dict] | None) -> Check:
                  "check /tmp/lts-hook-errors.log, and the hooks check above")
 
 
-def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | None) -> Check:
+def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | None,
+                        client: str = clients.DEFAULT) -> Check:
     """Was the `Stop` hook given work between the last two prompts, and did it fail to do it?
 
     The only detector of a dead `Stop` that works **mid-session**. `_check_capture_progress` reads the
@@ -1210,7 +1274,7 @@ def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | 
             "capture",
             "run `lts doctor --transcript <path>`, or read the per-turn report, which always has one",
         )
-    state, _when, mark, raw = _classify_mark(paths.capture_mark_file(cfg))
+    state, _when, mark, raw = _classify_mark(paths.capture_mark_file(cfg, client))
     if state in (_MARK_NO_STAMP, _MARK_BAD_STAMP):
         # The third state in which a working `Stop` hook leaves the mark looking unmoved, found
         # 2026-10-01 reading `stop.py` for the two above. `mark_of` writes `timestamp: None` for an
@@ -1228,7 +1292,11 @@ def _check_capture_live(cfg: Config, turn: dict | None, transcript_path: Path | 
             "this still resolves by uuid, so the Stop hook may be capturing correctly",
             "see the marks check above, which is where this mark's own state is reported",
         )
-    if not transcript.newest_exchange_after(transcript_path, raw):
+    # Through the adapter: "is anything newer than the mark" is a question about one client's
+    # transcript, in that client's schema. Answered by the wrong parser it produces either a
+    # `fail` demanding attention for a healthy hook or an `ok` about a `Stop` hook that has
+    # stopped — and this check is the only mid-session detector of the second.
+    if not clients.resolve(client).newest_exchange_after(transcript_path, raw):
         return Check(
             "capture_live", "ok",
             f"the capture mark has not moved in {misses} consecutive prompts (as of {at}), and "

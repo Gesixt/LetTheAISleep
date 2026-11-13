@@ -6,7 +6,7 @@ from pathlib import Path
 from lts import anchor as anchor_mod
 from lts import health, healthchecks, paths, sync, watermark
 from lts.config import load_config
-from tests.helpers import make_project
+from tests.helpers import make_project, register_alias_client, register_probe_client
 
 
 def _cfg(root: Path, extra: str = ""):
@@ -444,10 +444,16 @@ def test_render_shows_a_fix_only_where_something_is_wrong(tmp_path: Path):
     assert "Fix: run /sleep" in out
 
 
+_MARK_FILES = {
+    "capture": paths.capture_mark_file,
+    "sleep": paths.sleep_mark_file,
+    "snapshot": paths.snapshot_mark_file,
+}
+
+
 def _mark(cfg, which: str, when: datetime) -> None:
-    target = paths.capture_mark_file(cfg) if which == "capture" else paths.sleep_mark_file(cfg)
     paths.ensure_sidecar(cfg)
-    watermark.write_mark(target, watermark.mark_at(when))
+    watermark.write_mark(_MARK_FILES[which](cfg), watermark.mark_at(when))
 
 
 def _transcript(path: Path, stamps: list[str]) -> Path:
@@ -489,6 +495,51 @@ def test_a_mark_in_the_future_fails(tmp_path: Path):
     check = _by_id(health.run(cfg, now=_T0), "marks")
     assert check.level == "fail"
     assert "future" in check.message
+
+
+def test_a_snapshot_mark_in_the_future_fails_like_the_other_two(tmp_path: Path):
+    """The clock test covers all three marks, not the two that predate the split.
+
+    `PreCompact` writes this mark on every ordinary compaction, so a clock that is wrong puts it
+    in the future exactly as it does the other two — and from there it is the frontier the next
+    `PreCompact` snapshots from, which would exclude everything up to a time that has not
+    happened.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "snapshot", _T0 + timedelta(hours=1))
+    check = _by_id(health.run(cfg, now=_T0), "marks")
+    assert check.level == "fail", check
+    assert "future" in check.message and "snapshot" in check.message
+
+
+def test_a_snapshot_mark_in_the_future_is_reported_even_on_its_own(tmp_path: Path):
+    """No capture and no sleep mark is the "nothing to compare" skip, and a compaction can still
+    have written a snapshot mark before this client's first `Stop` ever ran. The clock is a fault
+    of that mark alone, so it is not excused by the two marks that are absent."""
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "snapshot", _T0 + timedelta(hours=1))
+    check = _by_id(health.run(cfg, now=_T0), "marks")
+    assert check.level == "fail", check
+    assert "future" in check.message and "snapshot" in check.message
+
+
+def test_a_positional_snapshot_mark_is_not_a_fault(tmp_path: Path):
+    """Only the clock test reaches the snapshot mark.
+
+    `mark_of_exchanges` writes it as uuid + timestamp + count by design, and a `None` timestamp is
+    a legitimate value there (an exchange that carried no stamp). The sleep mark's time-only
+    expectation does not apply to it, so neither shape may turn the comparison of the other two
+    marks into a skip or a demand.
+    """
+    cfg = _healthy(tmp_path)
+    _mark(cfg, "capture", _T0)
+    _mark(cfg, "sleep", _T0 - timedelta(minutes=5))
+    watermark.write_mark(paths.snapshot_mark_file(cfg),
+                         {"uuid": "u9", "timestamp": None, "count": 7})
+    check = _by_id(health.run(cfg, now=_T0 + timedelta(minutes=1)), "marks")
+    assert check.level == "ok", check
+    assert "consistent" in check.message
 
 
 def test_no_marks_at_all_is_a_skip_not_a_pass(tmp_path: Path):
@@ -1900,9 +1951,10 @@ def test_a_capture_mark_with_no_orderable_stamp_skips_rather_than_demanding(tmp_
         assert check.level == "fail", (label, check)
 
 
-def _one(cfg, check_id: str):
+def _one(cfg, check_id: str, **kwargs):
     """The one check, through the real registry rather than a private call."""
-    found = [c for c in healthchecks.all_checks(cfg, ids={check_id}) if c.id == check_id]
+    found = [c for c in healthchecks.all_checks(cfg, ids={check_id}, **kwargs)
+             if c.id == check_id]
     assert len(found) == 1, f"{check_id} is not in the registry"
     return found[0]
 
@@ -1974,3 +2026,142 @@ def test_the_docs_state_the_number_of_checks_this_build_actually_has():
         for wrong in stale:
             assert f"{wrong} checks" not in text and f"{wrong} health checks" not in text, (
                 f"{doc.name} still says {wrong}, but there are {len(health._IDS)}")
+
+
+# --- the report says which client it describes ------------------------------------------------
+
+
+def test_the_journal_record_names_the_client_it_describes(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    paths.ensure_sidecar(cfg, "second")
+    record = health.record(cfg, [], [], client="second")
+    assert record["client"] == "second"
+
+
+def test_the_journal_record_quotes_this_clients_capture_mark(tmp_path: Path):
+    """The recorded `capture_mark` is the one belonging to the client the record names.
+
+    `client` alone would be a label: a record that said `second` while quoting Claude Code's
+    position is worse than one that said nothing, because `capture_progress` reads this field
+    across five records and would call a frozen mark healthy from another client's progress.
+    """
+    cfg = _cfg(tmp_path)
+    paths.ensure_sidecar(cfg, "second")
+    watermark.write_mark(paths.capture_mark_file(cfg, "second"),
+                         {"timestamp": "2026-10-30T11:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg, "claude_code"),
+                         {"timestamp": "2026-10-30T23:00:00.000Z"})
+    assert health.record(cfg, [], [], client="second")["capture_mark"] == \
+        "2026-10-30T11:00:00.000Z"
+
+
+def test_marks_compares_the_shared_sleep_mark_against_this_clients_capture_mark(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    paths.ensure_sidecar(cfg, "second")
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-30T12:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg, "second"),
+                         {"timestamp": "2026-10-30T11:00:00.000Z"})
+    # Claude Code's own capture mark is ahead of the sleep mark and must not make this report
+    # `ok`. Ahead of the sleep mark but still behind `now`, deliberately: a mark in the future is
+    # its own `fail` with its own message, so a mark dated 23:00 would send a check that read the
+    # wrong file down a different branch and let this test pass for the wrong reason.
+    watermark.write_mark(paths.capture_mark_file(cfg, "claude_code"),
+                         {"timestamp": "2026-10-30T12:30:00.000Z"})
+
+    # `now` stated, not taken from the clock: both marks above are timestamped 2026-10-30, so a
+    # real `now` earlier in that day reports them as marks in the future and never reaches the
+    # comparison this test is about.
+    check = _one(cfg, "marks", client="second",
+                 now=datetime(2026, 10, 30, 13, 0, tzinfo=timezone.utc))
+
+    assert check.level == "fail"
+    assert "ahead of the capture mark" in check.message
+
+
+def test_capture_reads_the_transcript_with_the_running_clients_parser(
+        tmp_path: Path, monkeypatch):
+    """The backlog is measured by the running client's parser, not by Claude Code's.
+
+    This is the one place a second client's *measurement* could go wrong silently. The file below
+    holds two exchanges that Claude Code's parser reads; the probe client's reads none, so the two
+    clients cannot produce the same verdict about it — and a check that ignored its `client` would
+    answer with the default parser's.
+    """
+    cfg = _healthy(tmp_path)
+    probe = register_probe_client(monkeypatch)
+    tr = _transcript(cfg.project_root / "t.jsonl",
+                     ["2026-09-29T09:00:00.000Z", "2026-09-29T11:00:00.000Z"])
+    paths.ensure_sidecar(cfg, probe)
+    mark = watermark.mark_at(_T0 - timedelta(hours=4))
+    watermark.write_mark(paths.capture_mark_file(cfg, probe), mark)
+    watermark.write_mark(paths.capture_mark_file(cfg), mark)
+
+    probed = _one(cfg, "capture", client=probe, transcript_path=tr, now=_T0)
+    assert probed.level == "skip"
+    assert "yielded no exchanges" in probed.message
+    # The same file, the same mark, the default client: a measurement, which is the contrast.
+    assert "yielded no exchanges" not in _one(cfg, "capture", transcript_path=tr, now=_T0).message
+
+
+def test_capture_live_orders_the_transcript_with_the_running_clients_parser(
+        tmp_path: Path, monkeypatch):
+    """"Is anything newer than the mark" is the running client's question about its own file.
+
+    Answered with the wrong parser it is the project's oldest failure class twice over: a `fail`
+    demanding attention for a healthy hook, or an `ok` about a `Stop` hook that has stopped.
+    """
+    cfg = _healthy(tmp_path)
+    probe = register_probe_client(monkeypatch)
+    tr = _transcript(cfg.project_root / "t.jsonl",
+                     ["2026-09-29T11:00:00.000Z", "2026-09-29T11:30:00.000Z"])
+    paths.ensure_sidecar(cfg, probe)
+    mark = watermark.mark_at(_T0 - timedelta(hours=2))
+    watermark.write_mark(paths.capture_mark_file(cfg, probe), mark)
+    watermark.write_mark(paths.capture_mark_file(cfg), mark)
+    turn = {"misses": 2, "at": "2026-10-01T06:00:00.000Z"}
+
+    probed = _one(cfg, "capture_live", client=probe, transcript_path=tr, turn=turn, now=_T0)
+    assert probed.level == "ok"
+    assert "nothing in the transcript is newer than it" in probed.message
+    # Claude Code's parser does see both exchanges above the mark, so the same state reads `fail`.
+    assert _one(cfg, "capture_live", transcript_path=tr, turn=turn, now=_T0).level == "fail"
+
+
+def test_capture_measures_against_this_clients_own_capture_mark(tmp_path: Path, monkeypatch):
+    """The mark the backlog is measured against is the one belonging to the reported client.
+
+    Same parser on both sides — `register_alias_client` is Claude Code's — so the only thing
+    that can differ is which mark file was read. The alias client has none, and a mark it never
+    wrote cannot be used to say its `Stop` hook is behind.
+    """
+    cfg = _healthy(tmp_path)
+    alias = register_alias_client(monkeypatch)
+    tr = _transcript(cfg.project_root / "t.jsonl",
+                     ["2026-09-29T09:00:00.000Z", "2026-09-29T11:00:00.000Z"])
+    watermark.write_mark(paths.capture_mark_file(cfg), watermark.mark_at(_T0 - timedelta(hours=4)))
+
+    check = _one(cfg, "capture", client=alias, transcript_path=tr, now=_T0)
+    assert check.level == "skip"
+    assert "no capture mark yet" in check.message
+    # The mark that exists belongs to the default client, where it does produce a verdict.
+    assert _one(cfg, "capture", transcript_path=tr, now=_T0).level == "fail"
+
+
+def test_capture_live_compares_this_clients_own_capture_mark(tmp_path: Path, monkeypatch):
+    """Whether the `Stop` hook is behind is asked of the mark the reported client writes.
+
+    The default client's mark here is newer than every exchange in the file, so for that client
+    there was nothing to capture. The alias client has no mark at all, which is the state this
+    check calls evidence: `stop.py` rewrites a mark it cannot read, so one still missing a prompt
+    later means the hook is not running.
+    """
+    cfg = _healthy(tmp_path)
+    alias = register_alias_client(monkeypatch)
+    tr = _transcript(cfg.project_root / "t.jsonl",
+                     ["2026-09-29T09:00:00.000Z", "2026-09-29T11:00:00.000Z"])
+    watermark.write_mark(paths.capture_mark_file(cfg), watermark.mark_at(_T0))
+    turn = {"misses": 2, "at": "2026-10-01T06:00:00.000Z"}
+
+    assert _one(cfg, "capture_live", client=alias, transcript_path=tr,
+                turn=turn, now=_T0).level == "fail"
+    assert _one(cfg, "capture_live", transcript_path=tr, turn=turn, now=_T0).level == "ok"

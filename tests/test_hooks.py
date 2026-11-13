@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -5,9 +6,11 @@ import sys
 from pathlib import Path
 import importlib.util
 
-from lts import hooklog, paths, sync, turnstate
+import pytest
+
+from lts import clients, hooklog, paths, sync, turnstate
 from lts.config import load_config
-from tests.helpers import make_project
+from tests.helpers import flat_state_file, make_project, register_alias_client
 
 
 def _load(name: str, path: Path):
@@ -256,7 +259,7 @@ def test_stop_migrates_the_legacy_capture_offset(tmp_path: Path):
     from lts.config import load_config
     cfg = load_config(tmp_path)
     paths.ensure_sidecar(cfg)
-    (paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset").write_text("2", encoding="utf-8")
+    paths.legacy_capture_offset_file(cfg).write_text("2", encoding="utf-8")
     transcript = _transcript(tmp_path / "t.jsonl", [
         _msg("user", "already captured", "u1", "2026-08-26T10:00:00Z"),
         _msg("assistant", "also already captured", "u2", "2026-08-26T10:01:00Z"),
@@ -268,7 +271,36 @@ def test_stop_migrates_the_legacy_capture_offset(tmp_path: Path):
     buf = stm.read(paths.stm_file(cfg))
     assert "genuinely new" in buf
     assert "already captured" not in buf
-    assert not (paths.sidecar_root(cfg) / "stm" / ".lts-capture-offset").exists()
+    assert not paths.legacy_capture_offset_file(cfg).exists()
+
+
+def test_an_upgraded_project_captures_only_the_tail(tmp_path: Path):
+    """Adoption precedes the capture-mark read, or the whole transcript replays.
+
+    On a project installed before the split the mark is one directory up. Read before adoption
+    it is simply absent, and `exchanges_after` with an empty mark returns every exchange in the
+    file — 209 MB of it on one live project, into the shared buffer.
+    """
+    from lts import stm
+    root = make_project(tmp_path)
+    cfg = load_config(root)
+    flat = flat_state_file(cfg, "capture-mark.json")
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_text(
+        json.dumps({"uuid": "u2", "timestamp": "2026-10-30T10:00:01.000Z", "count": 2}),
+        encoding="utf-8")
+    t = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "old-one", uuid="u1", ts="2026-10-30T10:00:00.000Z"),
+        _msg("assistant", "old-two", uuid="u2", ts="2026-10-30T10:00:01.000Z"),
+        _msg("user", "brand-new", uuid="u3", ts="2026-10-30T10:00:02.000Z"),
+    ])
+    stop = _load("stop", HOOKS / "stop.py")
+
+    n = stop.capture({"cwd": str(root), "transcript_path": str(t)})
+
+    assert n == 1, f"replayed {n} exchanges instead of 1"
+    buf = stm.read(paths.stm_file(cfg))
+    assert "old-one" not in buf and "brand-new" in buf
 
 
 def test_session_start_injects_anchor_when_clean(tmp_path: Path):
@@ -1220,3 +1252,515 @@ def test_session_start_speaks_again_over_a_fingerprint_the_per_turn_hook_stored(
                     {"at": "2026-10-01T06:00:00.000Z", "misses": 0, "shown": {"sleep": "1/0"}})
     out = ss.run({"cwd": str(tmp_path)})
     assert "1 STM entry" in out.get("systemMessage", ""), out
+
+
+# --- the upgrade from the pre-split flat sidecar -------------------------------------------------
+#
+# These two are the only thing holding the `paths.ensure_sidecar(cfg)` calls in `session_start` and
+# `user_prompt_submit`. Every other hook test here pre-creates the sidecar in its own setup, which
+# writes the adoption marker before the hook runs, so none of them can see whether the hook calls
+# `ensure_sidecar` at all — the whole suite passed with both calls deleted.
+
+
+def _pre_upgrade_journal(count: int) -> list[dict]:
+    """`count` records shaped as `health.record` writes them, each with its own capture mark.
+
+    Distinct marks are the point: `_check_capture_progress` reads `capture_mark` and `stm_entries`
+    across the window and answers `ok` when the mark moved. That makes "this run was given a
+    history" visible in the record the run itself writes.
+    """
+    return [{
+        "at": f"2026-10-{i + 1:02d}T00:00:00.000Z",
+        "event": "session_start",
+        "blocks": ["anchor"],
+        "checks": {"capture_progress": "ok"},
+        "stm_entries": i,
+        "stm_bytes": 100 * i,
+        "capture_mark": f"2026-10-{i + 1:02d}T00:00:00.000Z",
+        "sleep_mark": None,
+        "pending": 0,
+        "notes": 1,
+    } for i in range(count)]
+
+
+def test_session_start_adopts_the_flat_sidecar_before_it_reads_the_journal(tmp_path: Path):
+    """A project upgraded from the pre-split layout, driven through the real hook.
+
+    Three separate claims, because no one assertion reaches all of them:
+
+    - **adopt before append.** `paths._adopt_flat_state` refuses to move a legacy file onto a target
+      that already exists, so an adoption that ran *after* this hook's own `journal.append` would
+      have found `health.jsonl` already in the client directory and left the pre-upgrade records
+      stranded at the flat path. The flat file being gone *and* the old records still being the
+      journal's first lines can therefore only both hold if adoption came first. `len(lines) ==
+      TREND_WINDOW + 1` carries the same argument's other half: `SessionStart` appends exactly one
+      record per run, which is what makes "first lines" a statement about ordering at all.
+    - **adopt before read.** That pairing says nothing about `journal.tail`, which is a pure read —
+      `journal._records` returns `[]` for a missing path and creates nothing — so a call to
+      `ensure_sidecar` sitting between the read and the append would satisfy everything above while
+      the trend checks still computed from an empty history, which is the harm the hook's comment
+      names. The last line of the journal is this run's own record, and `health.record` stores
+      `{check.id: check.level}`: with a history, `_check_capture_progress` sees the mark move across
+      the window and answers `ok`; without one, `_trend_window` returns a `skip` saying "0 of 5 runs
+      journalled". Nothing else in this fixture can reach that level: `_check_capture_progress`
+      takes `history` and nothing else — no `cfg`, no filesystem — so it is a pure function of what
+      `journal.tail` returned, which is what makes the assertion a probe of the ordering rather
+      than a coincidence. So the level in the record this run wrote states what it was given.
+    - the mark and the turn state keep their contents, which is adoption rather than re-creation.
+    """
+    from lts import health
+    cfg = load_config(make_project(tmp_path))
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    (root / "stm" / "capture-mark.json").write_text('{"uuid": "u9"}', encoding="utf-8")
+    (root / "turn-state.json").write_text('{"misses": 2}', encoding="utf-8")
+    before = _pre_upgrade_journal(health.TREND_WINDOW)
+    (root / "health.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in before), encoding="utf-8")
+
+    ss = _load("session_start", HOOKS / "session_start.py")
+    ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == '{"uuid": "u9"}'
+    assert paths.turn_state_file(cfg).read_text(encoding="utf-8") == '{"misses": 2}'
+    assert not (root / "stm" / "capture-mark.json").exists()
+    assert not (root / "turn-state.json").exists()
+    assert not (root / "health.jsonl").exists()
+
+    lines = paths.health_journal_file(cfg).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == health.TREND_WINDOW + 1
+    assert [json.loads(line)["at"] for line in lines[:-1]] == [r["at"] for r in before]
+    assert json.loads(lines[-1])["checks"]["capture_progress"] == "ok"
+
+
+def test_user_prompt_submit_adopts_the_capture_mark_before_it_reads_it(tmp_path: Path):
+    """`_notification` reads the capture mark on its first line, so adoption has to precede it.
+
+    On an upgraded project the mark is one directory up. Read before adoption it is simply absent,
+    and the turn state would start counting misses against a mark that was sitting right there —
+    `capture_live` demanding a sleep nobody owes. Nothing else in this hook ever moves it, so the
+    stored `capture_mark` is the assertion that it was adopted *and then read*.
+    """
+    cfg = load_config(make_project(tmp_path, "[sleep]\ncontext_window = 1000\n"))
+    root = paths.sidecar_root(cfg)
+    (root / "stm").mkdir(parents=True, exist_ok=True)
+    mark = '{"uuid": "u9", "timestamp": "2026-10-30T10:00:00.000Z"}'
+    (root / "stm" / "capture-mark.json").write_text(mark, encoding="utf-8")
+    t = tmp_path / "t.jsonl"
+    _usage_transcript(t, 100)
+
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    ups.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path)
+
+    assert paths.capture_mark_file(cfg).read_text(encoding="utf-8") == mark
+    assert not (root / "stm" / "capture-mark.json").exists()
+    assert turnstate.read(paths.turn_state_file(cfg))["capture_mark"] == "2026-10-30T10:00:00.000Z"
+
+
+def _one_exchange(tmp_path: Path, name: str = "t.jsonl") -> Path:
+    return _transcript(tmp_path / name, [
+        _msg("user", "question", uuid="u1", ts="2026-10-30T10:00:00.000Z"),
+        _msg("assistant", "answer", uuid="a1", ts="2026-10-30T10:00:01.000Z"),
+    ])
+
+
+def test_pre_compact_moves_the_snapshot_mark_and_leaves_the_sleep_mark_alone(tmp_path: Path):
+    # The sleep mark is a claim that notes exist. PreCompact writes no notes, so it may not make
+    # that claim — all it has done is move material into a pending snapshot.
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    # A real sleep mark, in the shape a sleep writes and behind the transcript, so that "did not
+    # move" is a statement about a mark that was there rather than about an empty file.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-29T08:00:00.000Z"})
+    before = watermark.read_mark(paths.sleep_mark_file(cfg))
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == before
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg)).get("uuid") == "a1"
+    assert _snapshots(root)
+
+
+def test_the_snapshot_mark_counts_the_whole_transcript_not_the_tail_it_wrote(tmp_path: Path):
+    """`count` measures the whole file, never the tail that went into the snapshot.
+
+    `exchanges_after` reaches `count` only when neither the uuid nor the timestamp resolves, so a
+    count taken from the tail carries the right uuid and the right timestamp and is invisible until
+    exactly that transcript turns up — and then it resolves to a position earlier than the one the
+    mark names, and the material in between is snapshotted twice.
+    """
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    # Between the two exchanges: the tail written out is one exchange, the transcript holds two.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-30T10:00:00.500Z"})
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+
+    assert _snapshots(root)[0].read_text(encoding="utf-8") == "[assistant] answer"
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg))["count"] == 2
+
+
+def test_pre_compact_snapshots_only_what_neither_a_sleep_nor_a_snapshot_holds(tmp_path: Path):
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+    first = len(_snapshots(root))
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s2"})
+
+    assert len(_snapshots(root)) == first
+
+
+def test_a_sleep_ahead_of_the_snapshot_mark_still_bounds_the_tail(tmp_path: Path):
+    # A sleep consolidates everything behind it, including material an older snapshot mark has
+    # not reached. `later_of` is what makes the later of the two win.
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+    watermark.write_mark(paths.snapshot_mark_file(cfg), {"timestamp": "2020-01-01T00:00:00.000Z"})
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2099-01-01T00:00:00.000Z"})
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"})
+
+    assert not _snapshots(root)
+
+
+@pytest.fixture
+def second_client(monkeypatch):
+    """A second *registered* client, so isolation can be tested before Plan 2 adds a real one.
+
+    It is the Claude Code adapter under another id, deliberately: what is under test here is which
+    mark file a client reads and writes, not how a transcript is parsed. Naming it `codex` would
+    be a test making an assertion about code nobody has written yet.
+    """
+    return register_alias_client(monkeypatch)
+
+
+def test_pre_compact_puts_the_snapshot_mark_in_the_running_client_directory(
+        tmp_path: Path, second_client):
+    """The `client` argument reaches `paths.snapshot_mark_file` instead of being quietly dropped.
+
+    A snapshot mark names a position inside one transcript, so two clients wired to one project must
+    not share it (see `paths.client_state_dir`). This is the assertion that the parameter is wired to
+    the file the hook writes, and nothing else here would notice if it were ignored — the default
+    client's path is what an ignored argument produces.
+    """
+    from lts import watermark
+    pre_compact = _load("pre_compact", HOOKS / "pre_compact.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _one_exchange(tmp_path)
+
+    pre_compact.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"},
+                    client=second_client)
+
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg, second_client)).get("uuid") == "a1"
+    assert watermark.read_mark(paths.snapshot_mark_file(cfg)) == {}
+
+
+def test_a_hook_reads_its_client_off_the_command_line(monkeypatch, tmp_path: Path):
+    stop = _load("stop", HOOKS / "stop.py")
+    root = _quiet_project(tmp_path)
+    seen = {}
+
+    def fake_capture(event, **kwargs):
+        seen["client"] = kwargs.get("client")
+        return 0
+
+    monkeypatch.setattr(stop, "capture", fake_capture)
+    monkeypatch.setattr(sys, "argv", ["stop.py", "--client", "claude_code"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"cwd": str(root)})))
+
+    stop.main()
+
+    assert seen["client"] == "claude_code"
+
+
+@pytest.mark.parametrize("script, entry", [
+    ("stop.py", "capture"),
+    ("pre_compact.py", "run"),
+    ("session_start.py", "run"),
+    ("user_prompt_submit.py", "run"),
+])
+def test_every_hook_passes_the_declared_client_to_its_entry_point(
+        monkeypatch, tmp_path: Path, second_client, script, entry):
+    """All four `main()`s read `--client` and hand the value on, not just `stop.py`'s.
+
+    The value is a *registered non-default* client, which is what makes this an assertion about
+    `from_argv` at all: `--client claude_code` is indistinguishable from a `main()` that hard-codes
+    `clients.DEFAULT` without reading argv.
+    """
+    hook = _load(script.removesuffix(".py"), HOOKS / script)
+    root = _quiet_project(tmp_path)
+    seen = {}
+
+    def fake_entry(event, **kwargs):
+        seen["client"] = kwargs.get("client")
+        return {}
+
+    monkeypatch.setattr(hook, entry, fake_entry)
+    monkeypatch.setattr(sys, "argv", [script, "--client", second_client])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"cwd": str(root)})))
+
+    hook.main()
+
+    assert seen["client"] == second_client
+
+
+def test_a_hook_with_no_client_flag_behaves_exactly_as_before(tmp_path: Path):
+    # The five already-wired projects pass no flag. A `git pull` of the clone must not change
+    # their behaviour by one byte before their next `lts update`.
+    stop = _load("stop", HOOKS / "stop.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg)
+    t = _transcript(tmp_path / "t.jsonl", [
+        _msg("user", "question", uuid="u1", ts="2026-10-30T10:00:00.000Z"),
+    ])
+
+    n = stop.capture({"cwd": str(root), "transcript_path": str(t)})
+
+    assert n == 1
+    assert paths.capture_mark_file(cfg, "claude_code").exists()
+
+
+def test_a_hook_wired_with_an_unknown_client_degrades_instead_of_dying(
+        monkeypatch, tmp_path: Path, capsys):
+    # `from_argv` is forgiving so a malformed command line cannot kill a hook; `resolve` is
+    # strict so a wrong client cannot read transcripts with the wrong parser. The boundary
+    # between the two is here, and it is the one place the strictness could cost capture: the
+    # raise must land *inside* the hook's guarded region, leaving a well-formed `{}` on stdout
+    # and a line in the hook error log — never an exception the harness sees.
+    stop = _load("stop", HOOKS / "stop.py")
+    root = _quiet_project(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["stop.py", "--client", "emacs-doctor"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"cwd": str(root)})))
+
+    stop.main()
+
+    assert capsys.readouterr().out.strip() == "{}"
+
+
+@pytest.mark.parametrize("script", [
+    "stop.py", "pre_compact.py", "session_start.py", "user_prompt_submit.py",
+])
+def test_an_unknown_client_leaves_its_refusal_in_the_hook_error_log(
+        monkeypatch, tmp_path: Path, capsys, script):
+    """`UnknownClient` is raised where `main()`'s `except` can see it, and is recorded there.
+
+    The test above pins that nothing escapes `stop.py`, but `{}` on stdout is also what a hook that
+    never resolved its client at all prints, so on its own it cannot tell the two apart. The logged
+    traceback can: it exists only if `resolve` was called *inside* the guarded region. Moving the
+    call into `main()` ahead of the `try` — the shape these hooks must not have — leaves no line
+    here and lets the exception out of `main()` instead. Every hook is checked, because every hook
+    is wired by absolute path and could be given the typo.
+    """
+    hook = _load(script.removesuffix(".py"), HOOKS / script)
+    log = tmp_path / "hook-errors.log"
+    monkeypatch.setattr(hooklog, "ERROR_LOG", log)
+    root = _quiet_project(tmp_path)
+    monkeypatch.setattr(sys, "argv", [script, "--client", "emacs-doctor"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"cwd": str(root)})))
+
+    hook.main()
+
+    assert capsys.readouterr().out.strip() == "{}"
+    assert "UnknownClient" in log.read_text(encoding="utf-8")
+
+
+def test_two_clients_capturing_from_two_transcripts_lose_nothing(tmp_path: Path, second_client):
+    # Spec §3.2, and the reason the capture mark splits at all. A shared mark sends the second
+    # client's resolution down `exchanges_after`'s timestamp branch, which keeps only what is
+    # newer than the *other* client's position. Step 5 proves this test can fail.
+    stop = _load("stop", HOOKS / "stop.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg, "claude_code")
+    paths.ensure_sidecar(cfg, second_client)
+    a = _transcript(tmp_path / "a.jsonl", [
+        _msg("user", "alpha-text", uuid="a1", ts="2026-10-30T14:00:00.000Z"),
+    ])
+    b = _transcript(tmp_path / "b.jsonl", [
+        _msg("user", "bravo-text", uuid="b1", ts="2026-10-30T13:40:00.000Z"),
+    ])
+
+    stop.capture({"cwd": str(root), "transcript_path": str(a)}, client="claude_code")
+    stop.capture({"cwd": str(root), "transcript_path": str(b)}, client=second_client)
+
+    buffer = paths.stm_file(cfg).read_text(encoding="utf-8")
+    assert "alpha-text" in buffer
+    assert "bravo-text" in buffer   # older than the other client's mark, and still captured
+
+
+def test_the_capture_mark_names_a_position_in_the_clients_own_parse(
+        monkeypatch, tmp_path: Path):
+    """The mark `stop.py` stores comes from the adapter's reading of the transcript, not from a
+    second parse by Claude Code's reader.
+
+    `watermark.mark_of` re-reads the file through `lts.transcript`. For the only client that exists
+    today both readers agree, so nothing distinguishes them — but a mark derived from a parse the
+    running client never made names a uuid its next run cannot find, and `exchanges_after` then
+    falls through to its timestamp branch (`lts/watermark.py:111-114`) and **drops** every exchange
+    older than a position the running client never reached. Only a mark carrying neither uuid nor
+    timestamp reaches the count branch and replays instead, and `mark_of_exchanges` copies both off
+    the last exchange — so for a transcript that stamps its messages, dropping is the failure this
+    line guards against, not replay. The stand-in adapter below is the smallest
+    thing that can tell the two parses apart.
+    """
+    stop = _load("stop", HOOKS / "stop.py")
+
+    class OneExchange:
+        id = "stub"
+        default_context_window = 1000
+
+        def read_exchanges(self, path):
+            return [{"role": "user", "text": "stub-text", "uuid": "z9",
+                     "timestamp": "2026-10-30T15:00:00.000Z"}]
+
+        def measure_context(self, path):
+            return (0, "")
+
+    monkeypatch.setitem(clients._REGISTRY, "stub", OneExchange())
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    t = _one_exchange(tmp_path)
+
+    stop.capture({"cwd": str(root), "transcript_path": str(t)}, client="stub")
+
+    from lts import watermark
+    assert watermark.read_mark(paths.capture_mark_file(cfg, "stub"))["uuid"] == "z9"
+    assert "stub-text" in paths.stm_file(cfg).read_text(encoding="utf-8")
+
+
+def test_session_start_journals_health_into_the_running_clients_directory(
+        tmp_path: Path, second_client):
+    """The journal the trend checks read is this client's, and the sidecar adopted is this
+    client's — two clients interleaved into one history would describe neither.
+    """
+    session_start = _load("session_start", HOOKS / "session_start.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+
+    session_start.build_context({"cwd": str(root), "session_id": "s", "source": "startup"},
+                                client=second_client)
+
+    assert paths.health_journal_file(cfg, second_client).exists()
+    assert not paths.client_state_dir(cfg).exists()
+
+
+def test_user_prompt_submit_keeps_mark_and_turn_state_in_the_running_clients_directory(
+        tmp_path: Path, second_client):
+    """The per-turn hook reads the running client's capture mark and writes its turn state beside
+    it, and adopts that client's sidecar rather than the default one's.
+
+    The stored `capture_mark` is the evidence for the read: it is the timestamp planted in the
+    second client's mark file and nowhere else, so the default client's path cannot produce it.
+    """
+    from lts import watermark
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg, second_client)
+    watermark.write_mark(paths.capture_mark_file(cfg, second_client),
+                         {"uuid": "u1", "timestamp": "2026-10-30T10:00:00.000Z"})
+    t = _one_exchange(tmp_path)
+
+    ups.run({"cwd": str(root), "transcript_path": str(t), "session_id": "s1"},
+            client=second_client)
+
+    state = turnstate.read(paths.turn_state_file(cfg, second_client))
+    assert state["capture_mark"] == "2026-10-30T10:00:00.000Z"
+    assert not paths.turn_state_file(cfg).exists()
+    assert not paths.client_state_dir(cfg).exists()
+
+
+def test_session_start_journals_the_running_clients_own_health(tmp_path: Path, second_client):
+    """The record names its client and its checks are that client's, not the default client's.
+
+    Both halves of one call site. The shared sleep mark stands an hour ahead of Claude Code's
+    capture mark, which `marks` reports as a `fail`; the second client has no capture mark, so it
+    has nothing to compare. A record saying `second` while carrying the other client's verdict is
+    the state this pins against — the trend checks read these records as one client's history.
+    """
+    from lts import watermark
+    session_start = _load("session_start", HOOKS / "session_start.py")
+    root = _quiet_project(tmp_path)
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg, second_client)
+    # Well in the past: the hook takes `now` from the clock, and a mark dated today would be
+    # reported as a mark in the future for part of the day instead of being compared at all.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-01-15T12:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": "2026-01-15T11:00:00.000Z"})
+
+    session_start.build_context({"cwd": str(root), "session_id": "s", "source": "startup"},
+                                client=second_client)
+
+    records = [json.loads(line) for line
+               in paths.health_journal_file(cfg, second_client).read_text(
+                   encoding="utf-8").splitlines() if line.strip()]
+    assert records[-1]["client"] == second_client
+    assert records[-1]["capture_mark"] is None
+    assert records[-1]["checks"]["marks"] == "skip", records[-1]["checks"]
+
+
+def test_user_prompt_submit_measures_context_with_the_running_clients_parser(
+        tmp_path: Path, monkeypatch):
+    """The figure the user is shown is measured by the running client's parser.
+
+    The notification is built from `status.collect`'s metrics, which is a second transcript read
+    beside `build_context`'s own — so the client has to reach both or the two surfaces disagree
+    about one measurement.
+    """
+    from tests.helpers import PROBE_TOKENS, register_probe_client
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    root = _quiet_project(tmp_path, "[sleep]\ncontext_window = 5000\n")
+    probe = register_probe_client(monkeypatch)
+
+    out = ups.run({"cwd": str(root), "transcript_path": str(_one_exchange(tmp_path)),
+                   "session_id": "s1"}, client=probe)
+
+    assert f"{PROBE_TOKENS:,}/5,000 tokens" in out["systemMessage"], out
+
+
+def test_user_prompt_submit_judges_the_running_clients_marks(tmp_path: Path, second_client):
+    """The per-turn checks are run against the running client's state, not the default client's.
+
+    `status.collect` is not the only thing the per-turn hook hands the client to: `health.run`
+    takes it as well, and `marks` is in `health.PER_TURN_IDS`. The shared sleep mark below is
+    level with the second client's capture mark and an hour ahead of Claude Code's, so the two
+    clients cannot produce the same verdict — one is told memory may be incomplete and the other
+    is not.
+    """
+    from lts import clients, watermark
+    ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
+    root = _quiet_project(tmp_path, "[sleep]\ncontext_window = 1000000\n")
+    cfg = load_config(root)
+    paths.ensure_sidecar(cfg, second_client)
+    # Well in the past: a mark dated today reads as a mark in the future for part of the day.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-01-15T12:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg), {"timestamp": "2026-01-15T11:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg, second_client),
+                         {"timestamp": "2026-01-15T12:00:00.000Z"})
+    event = {"cwd": str(root), "transcript_path": str(_one_exchange(tmp_path)),
+             "session_id": "s1"}
+
+    quiet = ups.run(dict(event), client=second_client)
+    loud = ups.run(dict(event), client=clients.DEFAULT)
+
+    assert "marks" not in quiet.get("systemMessage", ""), quiet
+    assert "marks" in loud["systemMessage"], loud

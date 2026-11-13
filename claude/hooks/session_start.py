@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from lts import anchor, digest, health, journal, notify, paths, pending, status, stm
+from lts import anchor, clients, digest, health, journal, notify, paths, pending, status, stm
 from lts.config import load_config
 from lts.hooklog import log_error
 
@@ -28,7 +28,8 @@ _UNCONFIGURED_MSG = (
 )
 
 
-def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
+def build_blocks(event: dict, *, root: Path | None = None,
+                 client: str = clients.DEFAULT) -> tuple[str, str]:
     """`(context, system_message)` — what the model is given, and what the user is shown.
 
     One function because the user's line is derived from the same `checks` and `metrics` this hook
@@ -50,6 +51,12 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
         # ran. "Memory is not configured here" is also none of the three subjects spec §6.1 lists,
         # so inventing a fourth one here would be a design decision taken in a hook.
         return _UNCONFIGURED_MSG.format(root=cfg.project_root), ""
+    # Resolved here and not in `main()`, like the other three hooks: an unknown client must raise
+    # where `main()`'s `except` can turn it into a logged line and a well-formed `{}`, never into
+    # an exception the harness sees. This hook parses no transcript, so the adapter itself is not
+    # used — what the call buys is the refusal: a typo'd `--client` would otherwise journal health
+    # into a directory of its own and leave the trend checks with an empty history for good.
+    clients.resolve(client)
     snapshots = pending.list_snapshots(paths.pending_dir(cfg))
     stm_text = stm.read(paths.stm_file(cfg))
     stm_entries = len([ln for ln in stm_text.splitlines() if ln.strip()])
@@ -120,9 +127,22 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
         # whose per-entry cost measured ~4x that, so ~1.6 ms extrapolated at 250 notes. Not worth
         # fixing: the duplicate walk is ~0.05% of the 3-5 s session-load budget of ТЗ §6, and
         # removing it would mean threading a check's internal note count into the journal record.
-        metrics = status.collect(cfg)
-        journal_file = paths.health_journal_file(cfg)
-        checks = health.run(cfg, metrics=metrics,
+        metrics = status.collect(cfg, client=client)
+        # Before the journal is read, not after: `journal.tail` is the next line, and this is where
+        # a project upgraded from the pre-split layout adopts its flat `health.jsonl`. Adopting
+        # afterwards would leave the first session after the upgrade computing its trend checks
+        # from an empty history. The `configured` test is belt and braces — this block is already
+        # past `build_blocks`' early return for an unconfigured project — and it states what
+        # `ensure_sidecar` requires: it raises rather than create a sidecar off a project root.
+        if cfg.configured:
+            paths.ensure_sidecar(cfg, client)
+        journal_file = paths.health_journal_file(cfg, client)
+        # The client reaches the checks and the record, not only the journal's path: `marks`,
+        # `capture` and `capture_live` read this client's capture mark, and the record both names
+        # the client and quotes that mark. A journal that was per client while its records
+        # described the default client's marks would make the trend checks read one client's
+        # history out of another client's figures.
+        checks = health.run(cfg, metrics=metrics, client=client,
                             history=journal.tail(journal_file, health.TREND_WINDOW))
         failure = health.demand(checks)
         if failure:
@@ -133,7 +153,8 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
         # actually emitted, which is the only input `_check_anchor_delivery` has. `journal.append`
         # swallows every exception, so a broken journal costs the record and never the blocks.
         emitted = [name for name, body in blocks if body]
-        journal.append(journal_file, health.record(cfg, checks, emitted, metrics=metrics))
+        journal.append(journal_file,
+                       health.record(cfg, checks, emitted, metrics=metrics, client=client))
 
         # `{}` as the previous state, deliberately — not an oversight and not a missing read of
         # `turn-state.json`: a new session states what is outstanding even if the previous session's
@@ -151,13 +172,14 @@ def build_blocks(event: dict, *, root: Path | None = None) -> tuple[str, str]:
     return "\n\n".join(body for _name, body in blocks if body), system_message
 
 
-def build_context(event: dict, *, root: Path | None = None) -> str:
+def build_context(event: dict, *, root: Path | None = None,
+                  client: str = clients.DEFAULT) -> str:
     """The model's half of `build_blocks`, kept as the name every test already calls."""
-    return build_blocks(event, root=root)[0]
+    return build_blocks(event, root=root, client=client)[0]
 
 
-def run(event: dict, *, root: Path | None = None) -> dict:
-    context, system_message = build_blocks(event, root=root)
+def run(event: dict, *, root: Path | None = None, client: str = clients.DEFAULT) -> dict:
+    context, system_message = build_blocks(event, root=root, client=client)
     out: dict = {}
     if system_message:
         out["systemMessage"] = system_message
@@ -170,9 +192,10 @@ def run(event: dict, *, root: Path | None = None) -> dict:
 
 
 def main() -> None:
+    client = clients.from_argv(sys.argv[1:])
     try:
         event = json.load(sys.stdin)
-        result = run(event)
+        result = run(event, client=client)
     except Exception:
         log_error(__file__)
         result = {}

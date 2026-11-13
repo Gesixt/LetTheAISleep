@@ -10,11 +10,16 @@ Best-effort throughout, like `lts.journal` and `lts.hooklog`: a read returns `{}
 raising, and a write that fails costs the state and nothing else. State that could break the hook
 carrying it would be a new way for memory to die silently.
 
-The file is `paths.turn_state_file(cfg)` — one per project, with no session dimension — so it
-outlives a session, and "no previous state" means the first prompt ever recorded for the project
-rather than the first prompt of each session. The *count* inside it does not outlive a session: it
-carries the session it was counted in and `advance` restarts it when that changes, for the reason
-given there.
+The file is `paths.turn_state_file(cfg)` — one per project *and client*, with no session
+dimension — so it outlives a session, and "no previous state" means this client's first prompt ever
+recorded for the project rather than the first prompt of each session. The *count* inside it does not
+outlive a session: it carries the session it was counted in and `advance` restarts it when that
+changes, for the reason given there.
+
+The client half of that is not scoping for its own sake. What this file counts is prompts whose
+capture mark did not move, and both halves of that comparison live inside one client's transcript,
+so a count fed by two clients' prompts would reach `healthchecks._CAPTURE_MISS_TOLERANCE` while
+each client's own `Stop` hook was keeping up — a demand nobody can act on.
 """
 
 from __future__ import annotations
@@ -65,12 +70,13 @@ def advance(previous: dict, *, capture_mark: str | None, at: str | None = None,
     A `misses` that is not a non-negative `int` is treated as absent rather than as arithmetic: this
     file is best-effort and may have been half-written or hand-edited.
 
-    **The count does not cross a session.** This file is per project — `paths.turn_state_file` has no
-    session dimension and nothing in the tree removes it — so without this a session whose last turn
-    the user interrupted would leave `misses = 1` on disk and the first prompt of the next session
-    would inherit it, reaching `healthchecks._CAPTURE_MISS_TOLERANCE` at once. That demand would be
-    premature rather than true: the interrupted turn's exchanges are still in the transcript and the
-    next working `Stop` captures them, because `watermark.entries_after` starts from the mark and not
+    **The count does not cross a session.** This file is per project and client —
+    `paths.turn_state_file` has no session dimension and nothing in the tree removes it — so without
+    this a session whose last turn the user interrupted would leave `misses = 1` on disk and the
+    first prompt of the next session would inherit it, reaching
+    `healthchecks._CAPTURE_MISS_TOLERANCE` at once. That demand would be premature rather than true:
+    the interrupted turn's exchanges are still in the transcript and the next working `Stop`
+    captures them, because `watermark.entries_after` starts from the mark and not
     from "this turn". So a `session_id` that differs from the stored one starts the count at 0.
 
     `session_id` is "a stable identifier for this session", and the caller chooses it. The per-turn

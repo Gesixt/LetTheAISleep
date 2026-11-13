@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from lts import (anchor, digest, health, journal, memorymap, naming, paths,
+from lts import (anchor, clients, digest, health, journal, memorymap, naming, paths,
                  pending, status, stm, sync, transcript, turnstate, watermark)
 from lts.config import NotAnLtsProject, load_config, require_project
 from lts.sync import NotASource
@@ -92,6 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
              "omits it: one parse of a large transcript measured ~1.5 s, and the two these "
              "checks need would consume most of the session-load budget on every run)",
     )
+    p_doctor.add_argument("--client", default=None,
+                          help=f"which client's state to report on (default: {clients.DEFAULT}; "
+                               f"known: {', '.join(clients.known())})")
     _add_root(p_doctor)
 
     p_digest = sub.add_parser("digest")
@@ -193,6 +196,18 @@ def _run(args) -> int:
                 print(snap)
         elif args.op == "clear":
             pending.clear_all(d)
+            # The snapshots were the whole backing of every snapshot mark that pointed into them,
+            # so deleting them is what falsifies that claim. A mark left standing makes the next
+            # `PreCompact` take it as its frontier and exclude material that no snapshot and no
+            # note holds — and the only other reader of it, the `marks` health check, tests
+            # nothing but its clock, so that happens with every check green. Resetting it costs
+            # at worst one re-snapshot of the tail, which is noise, and
+            # noise is the side this project errs on. In the ordinary sleep it costs nothing:
+            # `later_of({}, sleep)` and `later_of(copy, sleep)` pick the same frontier once the
+            # sleep mark has advanced. The pending directory is shared, so every client's mark
+            # goes, not only the one this command happens to be about — it is about none of them.
+            for client in paths.client_ids_on_disk(cfg):
+                paths.snapshot_mark_file(cfg, client).unlink(missing_ok=True)
     elif args.cmd == "pressure":
         # Must match what the hook reports. This used to measure `len(file) // 4` against a
         # hardcoded 200,000-token window: a transcript is append-only across `--resume`, so its
@@ -221,20 +236,30 @@ def _run(args) -> int:
         # `capture_progress` are the two checks with no filesystem evidence to work from, so
         # without history they skip — and they skipped on every human-run `doctor`, in the one
         # command whose job is to report health.
+        #
+        # Resolved rather than passed through: a typo'd client name would otherwise report on an
+        # empty state directory and exit 0, which is a clean bill about a client that is not there.
+        # The adapter's own `id`, not the string typed, so everything below — the journal
+        # path, the turn state, the checks — is keyed on one canonical name for this client.
+        client = clients.resolve(args.client).id
         checks = health.run(
             cfg,
             transcript_path=Path(args.transcript) if args.transcript else None,
-            history=journal.tail(paths.health_journal_file(cfg), health.TREND_WINDOW)
+            history=journal.tail(paths.health_journal_file(cfg, client), health.TREND_WINDOW)
             if cfg.configured else None,
             # `capture_live` compares two prompts, and `doctor` has no prompt of its own: the last
             # state the per-turn hook wrote is the only evidence available here, which is why the
             # check dates what it says.
-            turn=turnstate.read(paths.turn_state_file(cfg)) if cfg.configured else None,
+            turn=turnstate.read(paths.turn_state_file(cfg, client)) if cfg.configured else None,
+            client=client,
         )
         if args.json:
             print(json.dumps(
                 {
                     "worst": health.worst(checks),
+                    # Which client this report describes: the per-client checks in it measured
+                    # that client's state, and a consumer cannot tell which from the levels.
+                    "client": client,
                     "checks": [
                         # No `default=` encoder: `Check`'s four fields are `str | None` by
                         # construction, so a field that is not one should raise here rather than
@@ -246,6 +271,12 @@ def _run(args) -> int:
                 ensure_ascii=False, indent=2,
             ))
         else:
+            # Always, including the default. Printing it only for a non-default client went
+            # silent in the one state where it is needed: `/memory-status` runs `lts doctor`
+            # bare, so under a second client it reports on `claude_code` and said nothing about
+            # whose state it had measured. One line on a project that already knows its client is
+            # the cheaper half of that trade.
+            print(f"Reporting on client {client}")
             print(health.render(checks))
         return 1 if health.worst(checks) == "fail" else 0
     elif args.cmd == "digest":
@@ -282,7 +313,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return _run(args)
-    except (NotAnLtsProject, NotASource) as exc:
+    # `clients.UnknownClient` is a `ValueError`, and it is here rather than beside the
+    # resolve call because every one of these is the same thing: an argument naming something
+    # that is not there, which is exit 2 and a line on stderr.
+    except (NotAnLtsProject, NotASource, clients.UnknownClient) as exc:
         print(f"lts: {exc}", file=sys.stderr)
         return 2
 

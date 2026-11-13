@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lts import anchor, paths, pending, stm, transcript
+from lts import anchor, clients, paths, pending, stm, transcript
 from lts.slug import slugify_project
 from lts.config import Config
 
 
-def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
+def collect(cfg: Config, *, transcript_path: Path | None = None,
+            client: str = clients.DEFAULT) -> dict:
+    """Every memory figure this project states about itself, measured once.
+
+    `client` picks the parser the transcript is read with. It is the whole figure's provenance:
+    every surface that quotes a context percentage — `lts status`, the per-turn notification, and
+    `healthchecks._check_pressure` — reads this one dict, so a transcript parsed by the wrong
+    client's parser is a wrong number stated confidently on all three at once. An unknown id
+    raises (`clients.resolve`) rather than falling back to the default parser.
+    """
     stm_text = stm.read(paths.stm_file(cfg))
     stm_lines = len([ln for ln in stm_text.splitlines() if ln.strip()])
     stm_bytes = len(stm_text.encode("utf-8"))
@@ -22,7 +31,9 @@ def collect(cfg: Config, *, transcript_path: Path | None = None) -> dict:
     if transcript_path is not None:
         # `measure_context`, not `context_tokens`: `source` is what lets `_check_pressure` refuse
         # to green a figure that was estimated from a file holding no usage record at all.
-        tokens, source = transcript.measure_context(Path(transcript_path))
+        # Through the adapter, because the transcript's schema is the client's and nothing else
+        # here is: `lts.transcript` is Claude Code's parser, reached via `clients.resolve`.
+        tokens, source = clients.resolve(client).measure_context(Path(transcript_path))
         window = cfg.context_window
         pressure = {
             "tokens": tokens,

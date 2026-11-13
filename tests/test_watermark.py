@@ -207,3 +207,25 @@ def test_entries_after_an_instant_excludes_a_message_not_yet_flushed(tmp_path: P
     ])
     later = watermark.entries_after(t, watermark.mark_at(hook_ran_at))
     assert [e["uuid"] for e in later] == ["u3"]
+
+
+def test_the_later_of_two_marks_is_the_one_further_along():
+    early = {"timestamp": "2026-10-30T10:00:00.000Z"}
+    late = {"timestamp": "2026-10-30T11:00:00.000Z"}
+    assert watermark.later_of(early, late) is late
+    assert watermark.later_of(late, early) is late
+
+
+def test_an_absent_mark_is_the_beginning_of_time_not_the_end():
+    # The dangerous mistake: treating "no mark" as "nothing to do". A project that has never
+    # slept has an empty sleep mark, and everything in the transcript is owed a snapshot.
+    some = {"timestamp": "2026-10-30T10:00:00.000Z"}
+    assert watermark.later_of({}, some) is some
+    assert watermark.later_of(some, {}) is some
+    assert watermark.later_of({}, {}) == {}
+
+
+def test_a_mark_whose_timestamp_cannot_be_read_loses():
+    some = {"timestamp": "2026-10-30T10:00:00.000Z"}
+    assert watermark.later_of({"uuid": "u1"}, some) is some
+    assert watermark.later_of({"timestamp": 1761820800}, some) is some

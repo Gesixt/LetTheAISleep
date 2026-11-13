@@ -25,12 +25,94 @@ everything worth keeping into linked long-term notes **without losing a single n
   `UserPromptSubmit` states the measured context occupancy on every turn and adds escalating
   "time to sleep" pressure as it fills.
 
-> **The sleep mark.** A Claude Code transcript is one append-only file that `--resume` keeps
-> extending, so it holds the whole history of a project, not the current chapter. `lts stm clear`
-> (step 6 of `/sleep`) records how far consolidation reached — `<root>/.ai_memory/sleep-mark.json`.
-> Everything behind the mark is in long-term notes and is never snapshotted again, so a `PreCompact`
-> that finds nothing new writes no snapshot, and `SessionStart` only demands a sleep that is really
-> owed. The same mark keeps the sleep's own narration out of the buffer it just emptied.
+> **The sidecar, and which half of it belongs to one client.** `<root>/.ai_memory/` holds
+> everything memory knows that is not a note. One rule splits it: **anything that names a position
+> inside a transcript belongs to the client that wrote that transcript; anything that is the
+> project's memory is shared.** The rule has exactly one exception in the code, and it is a relic:
+> the pre-watermark `stm/.lts-capture-offset`, a bare exchange count at a shared path, which the
+> `Stop` hook honours once and deletes on first read.
+>
+> | under `<root>/.ai_memory/` | whose | why |
+> |---|---|---|
+> | `stm/buffer.md` | shared | the buffer a sleep consolidates — sharing it is the point of wiring two clients to one project |
+> | `anchor.json` | shared | the last sleep chose those notes for the project, not for a transcript |
+> | `sleep-mark.json` | shared | it claims that notes exist, and a note is the project's |
+> | `stm/.lts-sleep-armed` | shared, and **not soundly so** | one sleep, one latch: the next hook to run is what turns it into the sleep mark. With two clients wired that hook may be the *other* one's `Stop`, which then discards its own turn and advances its capture mark past it — so that turn reaches neither the buffer nor a note, and nothing will capture it later. Unreachable while one client is wired, which is why it is recorded rather than fixed: a per-client latch and an armed branch that captures its tail first are both design decisions. See `paths.client_state_dir` |
+> | `pending_consolidation/` | shared | material no note holds yet is owed to the project; snapshots are keyed by session id, so they cannot collide |
+> | `clients/<client>/capture-mark.json` | one client | it names an exchange by `uuid` *inside one transcript* |
+> | `clients/<client>/snapshot-mark.json` | one client | the same kind of position, named the same way |
+> | `clients/<client>/turn-state.json` | one client | it counts prompts and misses within one client's turn sequence |
+> | `clients/<client>/health.jsonl` | one client | the trend checks read it as a single history, and two interleaved clients make that history describe neither of them |
+> | `clients/<client>/.adopted` | one client | the marker that adoption of the pre-split flat files has had its one chance here — only `claude_code` has any such files to adopt (see the one-way door, below) |
+>
+> The capture mark is why the rule is stated that strongly: sharing it would not break loudly. A
+> `uuid` out of one client's transcript never matches in the other's, so `watermark.exchanges_after`
+> falls through to its timestamp branch, which returns only what is newer than the *other* client's
+> position — every exchange older than that is dropped, permanently, with every health check green.
+> That is the signature of the 2026-10-16 incident below, and a shared mark would reintroduce it by
+> construction rather than by accident. The snapshot mark falls through the same way, which would
+> let one client's compaction declare the other's unsnapshotted chapters already flushed.
+
+> **The client seam.** The transcript is the one thing here that a vendor owns: the sidecar is ours,
+> the vault is Basic Memory's, and no module in `lts` calls MCP at all. So "how does this client's
+> transcript read" lives behind a single interface, `lts/clients/`, and what goes through it is
+> named rather than counted: STM capture, the `PreCompact` backstop, the context figure, and the
+> `capture` and `capture_live` health checks. (The capture mark is not a separate reader — the
+> `Stop` hook derives it from the same parse as the capture.) Codex's own documentation says its
+> transcript format "isn't a stable interface for hooks and may change over time"; a dependency
+> that broad on a format its
+> vendor disclaims belongs behind one interface with its own tests rather than at each of those
+> call sites.
+>
+> **The running client is declared, never sniffed.** Each hook reads `--client <id>` off its own
+> command line, and an id no adapter answers to is **refused** rather than resolved to the default:
+> the failure mode of the wrong parser is not an exception but silence — it returns no exchanges, or
+> the wrong ones, and capture carries on looking healthy. Deciding the parser from the shape of a
+> payload would be the same guess with better manners. The refusal costs that hook its turn — it
+> lands in `/tmp/lts-hook-errors.log` and the hook still prints well-formed `{}` — rather than
+> reaching the harness as a crash. The flag is read by hand and not with `argparse`, which answers
+> an argument it dislikes with a usage block on stderr and exit 2; in a hook that means capture
+> stops silently.
+>
+> An absent flag resolves to `claude_code`. One adapter is registered today, so the wiring
+> `install.py` and `lts update` write passes no flag at all and every installed project resolves to
+> that default — the per-client split reaches an already-wired project the moment its clone is
+> pulled, with nothing to re-wire. A second client arrives as an adapter plus wiring that declares
+> its own id; `lts doctor --client <id>` already reports on one client at a time.
+
+> **The sleep mark, and the snapshot mark.** A Claude Code transcript is one append-only file that
+> `--resume` keeps extending, so it holds the whole history of a project, not the current chapter.
+> Two marks say how far through it memory has got, and they are two **different claims**:
+>
+> - the **sleep mark** — `<root>/.ai_memory/sleep-mark.json` — claims that **notes exist**:
+>   everything behind it is in long-term notes. Only a sleep writes it (`lts stm clear`, step 6 of
+>   `/sleep`, arms the flag that the next `Stop` — or `PreCompact`, if an auto-compact beats it —
+>   turns into the mark). It is shared by every client, because a note is the project's, not a
+>   transcript's;
+> - the **snapshot mark** — `<root>/.ai_memory/clients/<client>/snapshot-mark.json` — claims only
+>   that a **pending snapshot** holds the material, and no note does. `PreCompact` writes it, and
+>   `lts pending clear` resets it: deleting the snapshots is the one thing that falsifies the
+>   claim, and the pending directory is shared, so every client's copy of the mark goes.
+>   `PreCompact` is the only reader that *works from* this mark — `marks` tests nothing about it
+>   but its clock — so a copy left standing over deleted snapshots would quietly become the
+>   frontier the next compaction excludes material behind. It is per client because it names a
+>   position *inside one transcript*, and resolved against another client's transcript that
+>   position means nothing.
+>
+> `PreCompact` snapshots the tail that neither claim covers, i.e. whatever follows the later of the
+> two marks — so a compact that finds nothing new writes no snapshot, nothing already consolidated
+> is dumped twice, and `SessionStart` only demands a sleep that is really owed. The sleep mark also
+> keeps the sleep's own narration out of the buffer it just emptied.
+>
+> Until 2026-10-30 one file carried both claims, and `PreCompact`'s ordinary path wrote the
+> *snapshot* claim into it (this project's own mark, measured that day, was
+> `{"uuid": "4825afa5-…", "timestamp": "2026-10-19T06:09:51.626Z", "count": 509}` — the `uuid` is
+> proof a compaction wrote it, since a sleep writes a timestamp alone). So an ordinary `/compact`
+> advanced the consolidation frontier with nothing consolidated, and `sleep_evidence` — the check
+> that asks what backs the frontier — reported that nothing did, which is true in the letter and
+> indistinguishable from the 2026-10-16 incident below, where nothing at all held the material.
+> Split apart, that check reads a claim only consolidation can make: "a snapshot holds it" and
+> "nothing holds it" stop being the same report.
 >
 > The mark a hook places at the end of a turn is an **instant**, not a message id: Claude Code
 > can write the turn's last message to the transcript *after* the hook has read it, so a mark
@@ -54,7 +136,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 > and every check stayed green; in the second, 2.6 hours past every note in a 267-note vault. The
 > first span was recovered three days later only because the buffer happened not to be cleared
 > again — `PreCompact`'s backstop was off for it, since that hook snapshots only what lies *after*
-> the sleep mark. So the latch now
+> the frontier the two marks set between them. So the latch now
 > carries **when it was armed**, and a hook honours it only within `watermark.SLEEP_FLAG_MAX_AGE`
 > (5 minutes; the six sleeps on record consumed it in 8.3–16.9 s). Anything else — no stamp, an
 > unreadable one, one from the future, one past the bound — is a latch nobody consumed, and the hook
@@ -282,6 +364,34 @@ project with `--target`, and get the report as data with `--json`.
 the command is safe to run at any moment, including mid-session. Skills the project added of its
 own are left alone; only the ones the clone ships are overwritten.
 
+> **The per-client split is a one-way door.** On a project installed before 2026-10-30, the first
+> hook of any kind to run out of the pulled clone — in practice `UserPromptSubmit`, on the first
+> prompt of the session — or any `lts` command that touches the sidecar (`lts stm clear`, `lts
+> anchor write`) **moves** three files into `.ai_memory/clients/claude_code/` —
+> `stm/capture-mark.json`, `turn-state.json` and `health.jsonl` — and writes a `.adopted` marker
+> beside them, so it is attempted once rather than on every hook. The move is best-effort: a file
+> that fails to move withholds the marker, so the next run tries again instead of recording a
+> migration that did not happen.
+>
+> There is no downgrade. A clone checked out back to a pre-split commit looks for those three files
+> at their flat paths, where they no longer are. It therefore reads an **empty** capture mark, which
+> means "nothing captured yet" — and `watermark.exchanges_after` replays the whole transcript, which
+> is append-only across `--resume` and can span months, into the shared STM buffer. That follows
+> from moving the files rather than copying them, not from a defect in how they are moved; it is
+> worth writing down because these projects take code by checking out the clone, so an ordinary
+> `git checkout` reaches it.
+>
+> The replay is the lesser harm. Pre-split code also writes `PreCompact`'s *snapshot* claim back
+> into `sleep-mark.json`, so an ordinary `/compact` again advances the consolidation frontier with
+> nothing consolidated — the bug commit `4381505` on this branch fixed, and the one whose
+> `sleep_evidence` report cannot be told apart from material nobody holds at all.
+>
+> So roll the clone **forward**, not back. If you must downgrade anyway, do it by hand first: move
+> `clients/claude_code/capture-mark.json` back to `stm/capture-mark.json`, and `turn-state.json` and
+> `health.jsonl` back to the sidecar root. Delete the `.adopted` marker with them — otherwise a
+> later roll-forward finds the migration already recorded and leaves the flat files orphaned, which
+> is the same replay by a longer route.
+
 ## Troubleshooting (install gotchas)
 
 - **`uv: command not found`** — `uv` is optional. Either install it (`sudo snap install astral-uv`)
@@ -352,7 +462,7 @@ own are left alone; only the ones the clone ships are overwritten.
 | `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
 | `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
 | `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts doctor [--json] [--transcript PATH]` | Twelve health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--json` prints `{"worst": <level>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **twelve** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
+| `lts doctor [--json] [--transcript PATH] [--client ID]` | Twelve health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--client` says whose state to report on, default `claude_code`: `marks`, `capture` and `capture_live` read one client's capture mark — `marks` its snapshot mark as well — and `capture` and `capture_live` also parse its transcript, with that client's parser, and an unknown id is refused at exit 2 rather than reported on as an empty state directory. `--json` prints `{"worst": <level>, "client": <id>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **twelve** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
 | `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
 | `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
 | `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |

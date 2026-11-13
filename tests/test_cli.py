@@ -105,6 +105,42 @@ def test_pending_list_and_clear(tmp_path: Path, capsys):
     assert capsys.readouterr().out.strip() == "no"
 
 
+def test_pending_clear_resets_every_clients_snapshot_mark(tmp_path: Path, capsys):
+    """Dropping the snapshots falsifies the mark that says a snapshot holds the material.
+
+    Left standing it is a claim nothing backs, and no check reads it: the next `PreCompact` takes
+    `later_of(snapshot mark, sleep mark)` as its frontier, excludes everything behind it and logs
+    "no material since the last sleep or snapshot" about material that no snapshot and no note
+    holds. The reachable way in is a `/sleep` whose `lts stm clear` found no note and so never
+    armed the latch, leaving the sleep mark where it was while the snapshots went. Resetting the
+    mark costs at worst one re-snapshot of the tail, and this project prefers noise to a moved
+    frontier.
+
+    The pending directory is shared by every client, so every client's mark has to go.
+    """
+    from lts import clients, paths, watermark
+    from lts.config import load_config
+    make_project(tmp_path)
+    cfg = load_config(tmp_path)
+    paths.ensure_sidecar(cfg)
+    paths.ensure_sidecar(cfg, "second")
+    positional = {"uuid": "u9", "timestamp": "2026-10-30T10:00:00.000Z", "count": 9}
+    for client in (clients.DEFAULT, "second"):
+        watermark.write_mark(paths.snapshot_mark_file(cfg, client), positional)
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-10-29T09:00:00.000Z"})
+    main(["pending", "dump", "--root", str(tmp_path), "--session", "s", "--text", "raw"])
+    capsys.readouterr()
+
+    main(["pending", "clear", "--root", str(tmp_path)])
+
+    for client in (clients.DEFAULT, "second"):
+        assert watermark.read_mark(paths.snapshot_mark_file(cfg, client)) == {}, client
+    # The sleep mark carries the other claim — notes exist — and clearing snapshots says nothing
+    # about notes. Resetting it here would announce that nothing is consolidated.
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == \
+        {"timestamp": "2026-10-29T09:00:00.000Z"}
+
+
 def test_anchor_write_then_render(tmp_path: Path, capsys):
     make_project(tmp_path)
     main([
@@ -694,3 +730,80 @@ def test_doctor_without_a_transcript_states_the_miss_count_and_no_verdict(tmp_pa
     assert checks["capture_live"]["level"] == "skip", checks["capture_live"]
     assert "2026-10-01T06:00:00.000Z" in checks["capture_live"]["message"]
     assert "transcript" in checks["capture_live"]["message"]
+
+
+def test_doctor_reports_on_the_client_it_was_asked_about(tmp_path: Path, capsys):
+    root = make_project(tmp_path)
+    assert main(["doctor", "--root", str(root), "--client", "claude_code"]) in (0, 1)
+    assert "Memory health" in capsys.readouterr().out
+
+
+def test_doctor_refuses_a_client_it_does_not_know(tmp_path: Path, capsys):
+    # `lts doctor` resolves rather than passes through, so a typo cannot produce a clean bill
+    # about an empty state directory belonging to a client that is not there.
+    root = make_project(tmp_path)
+    assert main(["doctor", "--root", str(root), "--client", "nope"]) == 2
+    assert "unknown client" in capsys.readouterr().err
+
+
+def test_doctor_checks_the_named_clients_marks_and_not_the_default_clients(
+        tmp_path: Path, capsys, monkeypatch):
+    """`--client` reaches the checks, not only the argument parser.
+
+    The two marks planted here are inconsistent *for Claude Code* — the shared sleep mark stands
+    an hour ahead of its capture mark, which `marks` calls a `fail`. The second client has no
+    capture mark at all, so the same shared sleep mark leaves it nothing to compare. The two
+    verdicts therefore cannot be confused, which is what makes this an assertion about where the
+    flag went. An alias rather than a probe adapter: `marks` reads no transcript, so the parser is
+    not what is under test here.
+    """
+    from lts import clients, paths, watermark
+    from lts.config import load_config
+    from tests.helpers import register_alias_client
+
+    root = make_project(tmp_path)
+    cfg = load_config(root)
+    second = register_alias_client(monkeypatch)
+    paths.ensure_sidecar(cfg, second)
+    # Well in the past: `doctor` takes `now` from the clock, and a mark dated today would be
+    # reported as a mark in the future for part of the day instead of being compared at all.
+    watermark.write_mark(paths.sleep_mark_file(cfg), {"timestamp": "2026-01-15T12:00:00.000Z"})
+    watermark.write_mark(paths.capture_mark_file(cfg, clients.DEFAULT),
+                         {"timestamp": "2026-01-15T11:00:00.000Z"})
+
+    main(["doctor", "--root", str(root), "--client", second, "--json"])
+    asked = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}["marks"]
+    main(["doctor", "--root", str(root), "--json"])
+    default = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}["marks"]
+
+    assert asked["level"] == "skip", asked
+    assert "no capture mark file" in asked["message"]
+    assert default["level"] == "fail", default
+    assert "ahead of the capture mark" in default["message"]
+
+
+def test_doctor_says_which_client_it_reported_on(tmp_path: Path, capsys, monkeypatch):
+    """Every report names the client it covered, on both surfaces and with no flag given.
+
+    Resolving `--client` means a typo cannot produce a report at all. A *valid* flag dropped on the
+    way to the checks would still produce one, and nothing printed would distinguish it from the
+    default client's report — so the client is named. Including when it is the default, which is
+    the state that needs it most: `/memory-status` runs `lts doctor` bare, and under a second
+    client that is a report about `claude_code` with nothing saying so.
+    """
+    from lts import clients
+    from tests.helpers import register_alias_client
+
+    root = make_project(tmp_path)
+    second = register_alias_client(monkeypatch)
+
+    main(["doctor", "--root", str(root), "--client", second])
+    assert f"client {second}" in capsys.readouterr().out
+    main(["doctor", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert "Memory health" in out and f"client {clients.DEFAULT}" in out
+
+    main(["doctor", "--root", str(root), "--client", second, "--json"])
+    assert json.loads(capsys.readouterr().out)["client"] == second
+    main(["doctor", "--root", str(root), "--json"])
+    assert json.loads(capsys.readouterr().out)["client"] == clients.DEFAULT
