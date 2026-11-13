@@ -32,3 +32,7 @@ venv/
 
 # OS
 .DS_Store
+# Codex per-project installation artifacts
+.codex/
+.agents/
+AGENTS.md

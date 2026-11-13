@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from lts import naming, paths, sync
+from lts import naming, paths, sync, clients
 from lts.config import load_config
 from lts.naming import InvalidAuthor
 from lts.slug import slugify_project
@@ -121,6 +121,23 @@ def basic_memory_available() -> bool:
     return shutil.which("basic-memory") is not None
 
 
+
+def set_enabled_clients(text: str, selected: list[str]) -> str:
+    """Update only clients.enabled, preserving unrelated settings and comments."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == "[clients]"), None)
+    entry = "enabled = " + json.dumps(selected)
+    if start is None:
+        return text.rstrip() + "\n\n[clients]\n" + entry + "\n"
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+    for i in range(start + 1, end):
+        if re.match(r"\s*enabled\s*=", lines[i]):
+            lines[i] = entry
+            break
+    else:
+        lines.insert(end, entry)
+    return "\n".join(lines) + "\n"
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install Let The AI Sleep into a project.")
     parser.add_argument(
@@ -143,7 +160,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Vault directory (default: <target>/.ai_vault). Never created or modified by install.",
     )
+    parser.add_argument("--client", default=None,
+                        help="Comma-separated clients: claude_code,codex. Existing selection is preserved by default.")
     args = parser.parse_args(argv)
+    selected = None
+    if args.client is not None:
+        try:
+            selected = list(dict.fromkeys(clients.resolve(c.strip()).id for c in args.client.split(",")))
+        except clients.UnknownClient as exc:
+            print(f"install: {exc}", file=sys.stderr)
+            return 2
 
     # The SOURCE is this cloned repo (where the hook scripts and skills live);
     # the TARGET is the project that gets memory wired into it. The target directory
@@ -172,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         text = set_vault_key(text, "path", str(Path(args.vault_path).expanduser()))
     if author:
         text = set_vault_key(text, "author", author)
+    if selected is not None:
+        text = set_enabled_clients(text, selected)
     cfg_file.write_text(text, encoding="utf-8")
     print(f"config.toml project set to '{project}'")
     if author:
@@ -179,7 +207,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. sidecar in the target project (config.toml now exists, so this root resolves)
     cfg = load_config(target_root)
-    paths.ensure_sidecar(cfg)
+    for client in cfg.enabled_clients:
+        paths.ensure_sidecar(cfg, client)
     print(f"sidecar ready at {paths.sidecar_root(cfg)}")
 
     # 2b. the vault is never created or modified here — it is cloned by the developer
@@ -194,6 +223,11 @@ def main(argv: list[str] | None = None) -> int:
     #    memory block. `lts update` refreshes exactly these later, from the same code.
     print(sync.render(sync.sync(source_root, cfg)))
 
+    if "codex" in cfg.enabled_clients:
+        print("Codex: connect Basic Memory with `codex mcp add basic-memory -- basic-memory mcp`.\n"
+              "Restart/resume Codex in the target project and review the hooks with /hooks.\n"
+              "Use $sleep, $recall and $memory-status. Trust is not granted by this installer.")
+
     # 5. Basic Memory next steps (project name already written to config.toml)
     if not basic_memory_available():
         print("\n[!] basic-memory not found. Install it:\n    uv tool install basic-memory")
@@ -202,8 +236,10 @@ def main(argv: list[str] | None = None) -> int:
         f"  cd {target_root}\n"
         f"  basic-memory project add {project} <vault-path>\n"
         f"  basic-memory reindex --embeddings -p {project}   # build vector index (writes don't auto-embed)\n"
-        "  claude mcp add basic-memory -- basic-memory mcp\n"
-        "Then restart Claude Code in this project and try a /sleep at the end of a session.\n"
+        + ("  claude mcp add basic-memory -- basic-memory mcp\n"
+           "Then restart Claude Code and try /sleep at the end of a session.\n"
+           if "claude_code" in cfg.enabled_clients else "")
+        +
         "Tip: add .claude/settings.json, .ai_memory/ and config.toml to the project's .gitignore.\n"
         "Note: config.toml marks the project root — moving it detaches memory. Check with `lts doctor`."
     )

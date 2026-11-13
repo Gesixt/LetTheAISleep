@@ -39,7 +39,7 @@ def test_the_claude_code_adapter_reads_exactly_what_the_parser_reads(tmp_path: P
 
 
 def test_known_lists_every_registered_client():
-    assert clients.known() == ("claude_code",)
+    assert clients.known() == ("claude_code", "codex")
 
 
 def test_the_client_is_read_off_the_command_line_in_both_spellings():

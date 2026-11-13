@@ -1,18 +1,23 @@
 # Let The AI Sleep
 
-Hybrid memory for Claude Code: a short-term **STM working buffer**, a hook-enforced
+Hybrid memory for **Claude Code and Codex**: a short-term **STM working buffer**, a hook-enforced
 **"sleep"** consolidation cycle, and a **session anchor** — built as a thin layer on top of
 [Basic Memory](https://github.com/basicmachines-co/basic-memory) (which provides the Markdown
 vault, CRUD, local hybrid full-text + vector search, and the knowledge graph).
 
-The goal: Claude's context never silently fills up, and when it does, a `/sleep` consolidates
+The goal: the assistant's context never silently fills up, and when it does, a sleep consolidates
 everything worth keeping into linked long-term notes **without losing a single number or name**.
+
+Start with [Install](#install): choose Claude Code, Codex, or both for a shared project memory.
+See [Codex setup and verification](docs/codex.md) for transcript support and known limitations.
+Skill names below use Claude's `/sleep`, `/recall`, `/memory-status`; in Codex use
+`$sleep`, `$recall`, `$memory-status`. Both clients use `/compact` for context compaction.
 
 ## How it works (three memory tiers)
 
 | Tier | What | Where | Lives |
 |------|------|-------|-------|
-| **Context** | the live conversation | Claude's window | until `/compact` |
+| **Context** | the live conversation | the client's context window | until `/compact` |
 | **STM** | a working buffer of facts/decisions as they happen | `<root>/.ai_memory/stm/buffer.md` | until the next sleep |
 | **LTM** | the linked knowledge graph | Basic Memory Markdown vault | permanent |
 
@@ -20,7 +25,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 - **`/sleep`** reads the STM buffer, writes/links long-term notes (zero loss), rebuilds embeddings, then clears STM.
 - **`/recall`** retrieves by graph priority (anchor links first) + semantic search, loading only what's relevant.
 - **`/memory-status`** shows a dashboard of both tiers and flags when to sleep or reindex.
-- **Hooks** (run by Claude Code automatically): `PreCompact` snapshots un-consolidated material as
+- **Hooks** (run by the selected client automatically once activated): `PreCompact` snapshots un-consolidated material as
   a backstop, `SessionStart` injects the anchor or forces an unfinished sleep to complete,
   `UserPromptSubmit` states the measured context occupancy on every turn and adds escalating
   "time to sleep" pressure as it fills.
@@ -37,7 +42,8 @@ everything worth keeping into linked long-term notes **without losing a single n
 > | `stm/buffer.md` | shared | the buffer a sleep consolidates — sharing it is the point of wiring two clients to one project |
 > | `anchor.json` | shared | the last sleep chose those notes for the project, not for a transcript |
 > | `sleep-mark.json` | shared | it claims that notes exist, and a note is the project's |
-> | `stm/.lts-sleep-armed` | shared, and **not soundly so** | one sleep, one latch: the next hook to run is what turns it into the sleep mark. With two clients wired that hook may be the *other* one's `Stop`, which then discards its own turn and advances its capture mark past it — so that turn reaches neither the buffer nor a note, and nothing will capture it later. Unreachable while one client is wired, which is why it is recorded rather than fixed: a per-client latch and an armed branch that captures its tail first are both design decisions. See `paths.client_state_dir` |
+> | `stm/.lts-sleep-armed` | Claude only | legacy location retained for existing installations; Codex uses `clients/codex/.lts-sleep-armed` |
+> | `clients/<client>/consolidation-mark.json` | one client | records the last sleep in this stream; another client may still have unflushed messages older than the shared sleep mark |
 > | `pending_consolidation/` | shared | material no note holds yet is owed to the project; snapshots are keyed by session id, so they cannot collide |
 > | `clients/<client>/capture-mark.json` | one client | it names an exchange by `uuid` *inside one transcript* |
 > | `clients/<client>/snapshot-mark.json` | one client | the same kind of position, named the same way |
@@ -74,11 +80,10 @@ everything worth keeping into linked long-term notes **without losing a single n
 > an argument it dislikes with a usage block on stderr and exit 2; in a hook that means capture
 > stops silently.
 >
-> An absent flag resolves to `claude_code`. One adapter is registered today, so the wiring
-> `install.py` and `lts update` write passes no flag at all and every installed project resolves to
-> that default — the per-client split reaches an already-wired project the moment its clone is
-> pulled, with nothing to re-wire. A second client arrives as an adapter plus wiring that declares
-> its own id; `lts doctor --client <id>` already reports on one client at a time.
+> The registered adapters are `claude_code` and `codex`. Existing Claude hook commands without
+> a flag retain their default; Codex entry points default to Codex and generated wiring explicitly
+> passes `--client codex`. The installer selects integrations through `[clients] enabled` in
+> `config.toml`. CLI diagnostics default to `claude_code`; use `--client codex` for Codex.
 
 > **The sleep mark, and the snapshot mark.** A Claude Code transcript is one append-only file that
 > `--resume` keeps extending, so it holds the whole history of a project, not the current chapter.
@@ -98,6 +103,11 @@ everything worth keeping into linked long-term notes **without losing a single n
 >   frontier the next compaction excludes material behind. It is per client because it names a
 >   position *inside one transcript*, and resolved against another client's transcript that
 >   position means nothing.
+>
+> For Codex and projects with both clients enabled, the sleep frontier is the client's own
+> `consolidation-mark.json`, written alongside the shared sleep mark. Another client's sleep
+> must not exclude unflushed dialogue from this stream. Claude-only projects retain the shared
+> sleep frontier for compatibility.
 >
 > `PreCompact` snapshots the tail that neither claim covers, i.e. whatever follows the later of the
 > two marks — so a compact that finds nothing new writes no snapshot, nothing already consolidated
@@ -175,7 +185,7 @@ everything worth keeping into linked long-term notes **without losing a single n
 >
 > A **fourth** failure mode turned up while this was being built, and it *is* a liveness failure: a
 > `Stop` hook that dies mid-session, where nothing notices until the next `/compact` because the only
-> record of what happened is written at `SessionStart`. So `lts doctor` runs twelve checks in four
+> record of what happened is written at `SessionStart`. So `lts doctor` runs twelve checks (thirteen for Codex, including hook trust) in four
 > kinds: **inventory** (is each part present — including that each of the
 > four hooks `lts` owns is wired and its script still exists on disk, since projects point at
 > `~/tools` by absolute path; a hook you wired yourself is outside what that check looks at),
@@ -265,7 +275,8 @@ everything worth keeping into linked long-term notes **without losing a single n
 ## Requirements
 
 - Python 3.11+
-- Claude Code CLI
+- Claude Code CLI, Codex CLI, or both. The Codex adapter was tested against
+  `codex-cli 0.169.0` rollouts; see [Codex compatibility](docs/codex.md).
 - [Basic Memory](https://github.com/basicmachines-co/basic-memory) (AGPL-3.0), used as a separate
   process over MCP. Install with `uv tool install basic-memory`
   (or `pip install --user basic-memory`; on Debian/Ubuntu add `--break-system-packages`).
@@ -290,16 +301,33 @@ uv tool install --editable .
 lts --help          # verify the command is found
 ```
 
-Then, **for each project** you want memory in, attach it (this writes `config.toml`, the
-`.ai_memory/` sidecar, `.claude/` hooks+skills, and a memory-instructions block in the project's
-`CLAUDE.md` so Claude captures memory proactively):
+Then, **for each project**, choose the client integration. This writes `config.toml`, the
+`.ai_memory/` sidecar and the selected client's hooks, skills and memory instructions:
 
 ```bash
-# 2. attach memory to a target project and set its Basic Memory project name
-python ~/tools/LetTheAISleep/install.py --target /path/to/your/project --project <project-name>
-#   e.g.  python ~/tools/LetTheAISleep/install.py --target ~/code/myproject --project myproject
-#   (omit --target to use the current directory; omit --project to be prompted)
+# 2. run ONE of these, using your own target path and project name
+
+# Codex only
+python3 ~/tools/LetTheAISleep/install.py --target ~/code/myproject --project myproject --client codex
+
+# Claude Code only
+python3 ~/tools/LetTheAISleep/install.py --target ~/code/myproject --project myproject --client claude_code
+
+# Both clients, sharing the same vault, STM buffer and session anchor
+python3 ~/tools/LetTheAISleep/install.py --target ~/code/myproject --project myproject --client claude_code,codex
 ```
+
+Omitting `--client` preserves an existing selection; a new installation defaults to Claude Code.
+Omit `--target` to use the current directory, or `--project` to be prompted.
+
+| Client | Hook wiring | Skills | Memory instructions |
+|---|---|---|---|
+| Claude Code | `.claude/settings.json` | `.claude/skills/` | marked block in `CLAUDE.md` |
+| Codex | `.codex/hooks.json` | `.agents/skills/` | marked block in `AGENTS.md` |
+
+Existing instructions outside the marked blocks and unrelated hook handlers are preserved.
+Codex skills invoke the source clone's `run_lts.py` by absolute path; they do not require `lts`
+on PATH. Keep the clone in its installed location for both clients.
 
 `install.py` prints the remaining manual steps — run them **from the target project**:
 
@@ -312,17 +340,37 @@ basic-memory project add <project-name> <vault-path>
 basic-memory reindex --embeddings -p <project-name>
 #   e.g.  basic-memory reindex --embeddings -p myproject
 
-# 4. REGISTER the Basic Memory MCP server with Claude Code (required — the skills call its tools)
+# 4. register Basic Memory MCP with each selected client (unless already connected)
+# Codex:
+codex mcp add basic-memory -- basic-memory mcp
+
+# Claude Code:
 claude mcp add basic-memory -- basic-memory mcp
 #   (or, via the official plugin:)
 #   claude plugin marketplace add basicmachines-co/basic-memory
 #   claude plugin install basic-memory@basicmachines-co
 
-# 5. restart Claude Code in the target project so it loads the MCP server, hooks and skills
+# 5. restart/resume your client in the target project to load MCP, hooks and skills
 ```
 
-`install.py` also reminds you to add `.claude/settings.json`, `.ai_memory/` and `config.toml`
-to the **target project's** `.gitignore` (they contain machine-specific absolute paths).
+**Codex activation:** review the four LTS hooks with `/hooks`, including after changes to hook
+commands. Installation does not grant trust. After a real conversation turn, check capture:
+
+```bash
+cd ~/code/myproject
+lts stm read
+lts doctor --client codex
+```
+
+The buffer should contain the exchange. `hooks: ok` checks wiring only; `hook_trust: skip`
+means persisted trust could not be verified. For transcript-aware checks and the source-script
+alternative to `lts`, see [Verify activation](docs/codex.md#verify-activation).
+Use `$sleep`, `$recall`, and `$memory-status` in Codex. Request `$sleep` explicitly at a chapter
+boundary, then run `/compact` after consolidation finishes.
+
+Add `.ai_memory/`, `config.toml` and the selected client's generated hook/skill files to the
+**target project's** `.gitignore` if they should stay local: those files include local state or
+machine-specific absolute paths. Review instruction-file changes before sharing them.
 
 > `config.toml` **is** the project root marker — the hooks and the `lts` CLI locate `.ai_memory/`
 > by walking up until they find one with a `[vault]` section. Keep it at the root; if it is moved
@@ -342,11 +390,12 @@ An install leaves two kinds of thing behind, and they age differently.
 
 The **hook scripts and the `lts` CLI stay in the clone** and are only referenced from a project,
 so they update with a `git pull` there — every project follows at once. The **skills, the hook
-wiring in `.claude/settings.json`, and the memory block in `CLAUDE.md` are copies**, and a copy
+wiring (`.claude/settings.json` or `.codex/hooks.json`), and the memory block in
+`CLAUDE.md` or `AGENTS.md` are copies**, and a copy
 goes stale in silence: a project can keep running last month's `/sleep` long after the clone
 moved on.
 
-`lts update` refreshes exactly those copies. Re-running `install.py` is never needed:
+`lts update` refreshes those copies for all enabled clients:
 
 ```bash
 git -C <path-to-clone> pull       # the code: hooks + the lts CLI, shared by every project
@@ -354,6 +403,10 @@ cd <your-project>
 lts update --check                # what is stale? writes nothing, exits 1 if anything is
 lts update                        # refresh this project's copies
 ```
+
+To add Codex to a Claude project, run the installer with `--client claude_code,codex`, keeping
+the same `--target` and `--project`, then connect Codex's Basic Memory MCP and review `/hooks`
+as described above. `lts update` alone does not enable another client.
 
 It prints which clone it is copying **from** — the answer is whichever clone this `lts` is
 running out of, not whichever one you are standing in, which matters as soon as a machine holds
@@ -406,11 +459,11 @@ own are left alone; only the ones the clone ships are overwritten.
 - **`Error: path argument is required in local mode`** (from `basic-memory project add`) — pass the
   vault path as the second argument: `basic-memory project add <project-name> <vault-path>`.
 - **Hooks stop firing after you move or delete the clone** — a target project's
-  `.claude/settings.json` points at the **source clone's absolute path**. Keep the clone in a stable
+  `.claude/settings.json` or `.codex/hooks.json` points at the **source clone's absolute path**. Keep the clone in a stable
   place (e.g. `~/tools/LetTheAISleep`); if you move it, re-run `install.py --target <project>`.
 - **Pulled a new version but a project still uses old skills/hooks** — re-run
   `python install.py --target <project> --project <name>` to refresh that project's copied
-  `.claude/skills` and hook paths.
+  `.claude/skills` or `.agents/skills` and hook paths.
 - **Notes land in the wrong vault** — the skills pass `[vault] project` from `config.toml` to Basic
   Memory; make sure that name matches the one you used in `basic-memory project add`.
 - **A `.ai_memory/` appeared in a subdirectory** — `config.toml` is what marks the project root, so
@@ -439,32 +492,38 @@ own are left alone; only the ones the clone ships are overwritten.
   states `Context window: <used>/<window> tokens (<pct>%)` on every turn, and the nudges no longer
   quote bands of their own. Two meters exist and must not be conflated: the **context window**
   (what `/compact` resets) and the **STM buffer** (what `/sleep` clears).
-- **Wrong "context filling" warnings** — context pressure is measured against
+- **Wrong "context filling" warnings in Claude Code** — context pressure is measured against
   `[sleep] context_window` in `config.toml` (default `1000000`, for Opus's 1M window). If you run a
   smaller-window model, set your own value, e.g. `context_window = 200000` for Sonnet — otherwise
-  warnings fire too late (window too large) or too early (too small).
+  warnings fire too late (window too large) or too early (too small). Codex instead reads
+  `model_context_window` from its rollout; a missing window produces an unknown level.
+- **Codex has hooks on disk but no STM capture** — review `/hooks`, restart/resume in the
+  target project, and check a real exchange with `lts stm read`. Use `lts doctor --client codex
+  --transcript /path/to/rollout.jsonl` to check the actual transcript. See
+  [Codex activation](docs/codex.md#verify-activation); `hook_trust: skip` is not a pass.
 
 ## Usage
 
 **Daily flow**
+
 1. Work normally. Every exchange is captured to the STM buffer automatically by the `Stop` hook — like human short-term memory, you don't decide what to remember.
 2. As context fills, the `UserPromptSubmit` hook nudges you (~60%) and then insists (~80%) to sleep.
-3. Run **`/sleep`** at a natural break (or when nudged). It consolidates STM → linked long-term notes,
+3. Run **`/sleep`** (Codex: **`$sleep`**) at a natural break (or when nudged). It consolidates STM → linked long-term notes,
    rebuilds embeddings, clears STM, and you can `/compact`.
 4. Next session, the `SessionStart` hook injects the **anchor** (a tiny table of contents). Ask a
-   question and Claude uses **`/recall`** to pull only the relevant notes.
+   question and the assistant uses **`/recall`** (Codex: **`$recall`**) to pull relevant notes.
 
 **Commands & skills**
 
 | Surface | Purpose |
 |---------|---------|
-| `/sleep` | Consolidate the session into long-term memory without loss, then clear STM. |
-| `/recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
-| `/memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
-| `lts status [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
-| `lts doctor [--json] [--transcript PATH] [--client ID]` | Twelve health checks: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--client` says whose state to report on, default `claude_code`: `marks`, `capture` and `capture_live` read one client's capture mark — `marks` its snapshot mark as well — and `capture` and `capture_live` also parse its transcript, with that client's parser, and an unknown id is refused at exit 2 rather than reported on as an empty state directory. `--json` prints `{"worst": <level>, "client": <id>, "checks": [{"id", "level", "message", "fix"}, ...]}`, **twelve** objects, one per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
-| `lts stm append/read/clear` | Inspect or manage the per-project STM buffer directly. |
-| `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md` block) from the clone, without re-installing. |
+| `/sleep` / `$sleep` | Consolidate the session into long-term memory without loss, then clear STM. |
+| `/recall [question]` / `$recall [question]` | Retrieve relevant memory (anchor/graph links prioritized over pure semantic hits). Pass a topic or question, or call it bare. |
+| `/memory-status` / `$memory-status` | Dashboard: STM buffer, sleep debt, context pressure, LTM note/link counts, embedding freshness. |
+| `lts status [--client ID] [--transcript P] [--json]` | The STM/sidecar metrics directly (used by `/memory-status`). |
+| `lts doctor [--json] [--transcript PATH] [--client ID]` | Twelve health checks for Claude Code; thirteen for Codex, including `hook_trust`: inventory, invariants, trend and liveness. Exits non-zero on a failure. `--transcript` enables the two that cannot answer without one — `capture`, which parses the whole file, and `pressure`, which reads only its end — and lets `capture_live` reach a verdict instead of a `skip`; hooks omit it. `--client` says whose state to report on, default `claude_code`: `marks`, `capture` and `capture_live` read one client's capture mark — `marks` its snapshot mark as well — and `capture` and `capture_live` also parse its transcript, with that client's parser, and an unknown id is refused at exit 2 rather than reported on as an empty state directory. `--json` prints `{"worst": <level>, "client": <id>, "checks": [{"id", "level", "message", "fix"}, ...]}`, one object per check in report order, `level` one of `ok`/`warn`/`skip`/`fail` and `fix` possibly `null`. |
+| `lts stm append/read/clear` | Inspect or manage the shared project STM buffer. For a Codex sleep, use `lts stm clear --client codex` so the sleep flag belongs to Codex. |
+| `lts update [--check] [--source P] [--target P]` | Refresh this project's copies (skills, hook wiring, `CLAUDE.md`/`AGENTS.md` block) from the clone, without re-installing. |
 | `lts memory-map` | The note titles the `UserPromptSubmit` hook injects on every turn. |
 | `basic-memory project info <project>` | LTM counts (Entities/Relations/Isolated) and embedding status. |
 
@@ -476,16 +535,20 @@ own are left alone; only the ones the clone ships are overwritten.
 /recall                                                 # bare: load the anchor + last session as context
 ```
 
-You can also just ask the question in plain language — the `CLAUDE.md` memory instructions tell
-Claude to recall first — but an explicit `/recall` guarantees the retrieval runs.
+In Codex, replace `/recall` with `$recall` in these examples. You can also ask in plain
+language: the `CLAUDE.md` or `AGENTS.md` instructions tell the assistant to recall first.
+Use the skill explicitly when you want it to retrieve memory.
 
 **Checking memory load**
 
 ```bash
-lts status
+lts status --client codex        # Codex
+# lts status --client claude_code  # Claude Code
 ```
 shows the project, STM size, un-slept "sleep debt", context pressure, and anchor freshness. `/memory-status`
-combines this with Basic Memory's LTM stats and tells you if you should `/sleep` or reindex.
+combines this with Basic Memory's LTM stats and tells you if you should sleep or reindex.
+In Codex, invoke `$memory-status`; use `--transcript /path/to/rollout.jsonl` with the CLI
+when you also need measured context pressure.
 
 ## Team mode
 

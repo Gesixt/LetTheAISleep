@@ -168,7 +168,7 @@ def all_checks(
     # which is the whole reason a subset exists.
     registry: list[tuple[str, Callable[[], Check]]] = [
         ("sidecars", lambda: _check_sidecars(cfg)),
-        ("hooks", lambda: _check_hooks(cfg)),
+        ("hooks", lambda: _check_codex_hooks(cfg) if client == "codex" else _check_hooks(cfg)),
         ("vault", lambda: _check_vault(cfg)),
         ("marks", lambda: _check_marks(cfg, now, client)),
         ("sleep_evidence", lambda: _check_sleep_evidence(cfg)),
@@ -179,6 +179,10 @@ def all_checks(
         ("capture_progress", lambda: _check_capture_progress(history)),
         ("capture_live", lambda: _check_capture_live(cfg, turn, transcript_path, client)),
     ]
+    if client == "codex":
+        registry.append(("hook_trust", lambda: Check(
+            "hook_trust", "skip", "Codex hook trust has not been verified; wiring on disk is not proof of execution",
+            "review hooks with /hooks in Codex, then verify capture with a real turn")))
     wanted = None if ids is None else set(ids)
     checks = [config_check] if wanted is None or "config" in wanted else []
     checks += [_answered(check_id, thunk) for check_id, thunk in registry
@@ -299,6 +303,31 @@ def _script_path(command: str) -> Path | None:
             return Path(token)
     return None
 
+
+
+def _check_codex_hooks(cfg: Config) -> Check:
+    settings = sync.wiring_file(cfg.project_root, "codex")
+    try:
+        data = json.loads(settings.read_text())
+        events = data["hooks"]
+        missing = []
+        for event, filename in sync.HOOK_EVENTS.items():
+            found = False
+            for group in events.get(event, []):
+                for handler in group.get("hooks", []):
+                    command = handler.get("command", "")
+                    script = _script_path(command)
+                    if (handler.get("type") == "command" and script and script.name == filename
+                            and script.is_file() and clients.from_argv(_tokens(command)) == "codex"):
+                        found = True
+            if not found:
+                missing.append(event)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return Check("hooks", "fail", f"codex wiring unreadable: {settings}: {exc}", "run lts update")
+    if missing:
+        return Check("hooks", "fail", "codex hooks missing or wrong client: " + ", ".join(missing),
+                     "run lts update, then review /hooks in Codex")
+    return Check("hooks", "ok", "codex: all four events wired and scripts present; trust checked separately")
 
 def _check_hooks(cfg: Config) -> Check:
     settings = cfg.project_root / ".claude" / "settings.json"
@@ -566,7 +595,8 @@ def _check_marks(cfg: Config, now: datetime, client: str = clients.DEFAULT) -> C
     the frontier the next `PreCompact` measures "new material" against.
     """
     capture_file = paths.capture_mark_file(cfg, client)
-    sleep_file = paths.sleep_mark_file(cfg)
+    sleep_file = (paths.consolidation_mark_file(cfg, client)
+                  if client == "codex" or len(cfg.enabled_clients) > 1 else paths.sleep_mark_file(cfg))
     capture_state, capture, capture_mark, capture_stamp = _classify_mark(capture_file)
     sleep_state, sleep, sleep_mark, sleep_stamp = _classify_mark(sleep_file)
     # `client`'s own, like the capture mark and for the same reason: it names a position inside
@@ -947,6 +977,8 @@ def _check_pressure(metrics: dict | None) -> Check:
             f"window={measured.get('window')!r}",
             "this is `status.collect` output — the measurement itself is broken",
         )
+    if measured.get("window_unknown"):
+        return Check("pressure", "skip", "Codex has not reported its model context window")
     if window <= 0:
         return Check("pressure", "fail", f"the context window is {window}",
                      "set `[context] window` in config.toml")
