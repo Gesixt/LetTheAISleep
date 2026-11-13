@@ -12,6 +12,7 @@ DEFAULTS = {
     "pressure_warn": 0.60,
     "pressure_force": 0.80,
     "context_window": 1_000_000,   # model context window; override in config.toml (e.g. 200_000 for Sonnet)
+    "enabled_clients": ("claude_code",),
     "map_budget": 1500,            # chars of memory map injected per turn; 0 disables it
 }
 
@@ -40,6 +41,7 @@ class Config:
     pressure_force: float
     context_window: int
     map_budget: int           # characters; the map degrades to fit, and 0 turns it off
+    enabled_clients: tuple[str, ...] = ("claude_code",)
 
 
 def is_lts_config(path: Path) -> bool:
@@ -87,6 +89,11 @@ def load_config(start: Path | None = None) -> Config:
     cfg_file = root / "config.toml"
     if configured:
         data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+        enabled = data.get("clients", {}).get("enabled", ["claude_code"])
+        from lts import clients
+        if not isinstance(enabled, list) or not enabled or not all(isinstance(c, str) and c for c in enabled):
+            raise ValueError("clients.enabled must be a non-empty array")
+        values["enabled_clients"] = tuple(dict.fromkeys(clients.resolve(c).id for c in enabled))
         vault = data.get("vault", {})
         sleep = data.get("sleep", {})
         memory = data.get("memory", {})

@@ -34,12 +34,13 @@ def collect(cfg: Config, *, transcript_path: Path | None = None,
         # Through the adapter, because the transcript's schema is the client's and nothing else
         # here is: `lts.transcript` is Claude Code's parser, reached via `clients.resolve`.
         tokens, source = clients.resolve(client).measure_context(Path(transcript_path))
-        window = cfg.context_window
+        window = clients.context_window(cfg, client, Path(transcript_path))
         pressure = {
             "tokens": tokens,
             "window": window,
             "ratio": round(tokens / window, 3) if window else 0.0,
-            "level": transcript.pressure_level(
+            "window_unknown": client == "codex" and window <= 0,
+            "level": "unknown" if client == "codex" and window <= 0 else transcript.pressure_level(
                 tokens, window, cfg.pressure_warn, cfg.pressure_force
             ),
             "source": source,
@@ -109,6 +110,8 @@ def _context_figure(pr: dict) -> str:
     is never real, so the numbers are stated and no percentage is computed — the same rule
     `UserPromptSubmit._context_line` follows, kept identical on purpose.
     """
+    if pr.get("window_unknown"):
+        return "unknown — Codex has not reported its model context window"
     tokens, window = pr["tokens"], pr["window"]
     if window <= 0:
         return f"{tokens} tok, no context window configured — set `[context] window` in config.toml"

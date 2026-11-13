@@ -16,9 +16,10 @@ from __future__ import annotations
 import filecmp
 import json
 import shutil
+import shlex
 from pathlib import Path
 
-from lts import vaultgit
+from lts import vaultgit, clients
 from lts.config import Config, require_project
 
 HOOK_EVENTS = {
@@ -52,14 +53,15 @@ def source_root(explicit: Path | str | None = None) -> Path:
     return root
 
 
-def render_hook_settings(repo_root: Path) -> dict:
-    hooks_dir = Path(repo_root) / "claude" / "hooks"
+def render_hook_settings(repo_root: Path, client: str = clients.DEFAULT) -> dict:
+    clients.resolve(client)
+    hooks_dir = Path(repo_root) / ("codex" if client == "codex" else "claude") / "hooks"
     hooks: dict = {}
     for event, script in HOOK_EVENTS.items():
         hooks[event] = [
             {
                 "hooks": [
-                    {"type": "command", "command": f'python3 "{hooks_dir / script}"'}
+                    {"type": "command", "command": (f"python3 {shlex.quote(str(hooks_dir / script))} --client codex" if client == "codex" else f'python3 "{hooks_dir / script}"')}
                 ]
             }
         ]
@@ -103,9 +105,9 @@ Basic Memory automatically.
 {_MEM_END}"""
 
 
-def upsert_memory_instructions(existing_text: str) -> str:
+def upsert_memory_instructions(existing_text: str, *, block: str | None = None) -> str:
     """Insert or refresh the memory-instructions block (between markers) without duplicating it."""
-    block = memory_instruction_block()
+    block = block or memory_instruction_block()
     if _MEM_START in existing_text and _MEM_END in existing_text:
         start = existing_text.index(_MEM_START)
         end = existing_text.index(_MEM_END) + len(_MEM_END)
@@ -142,7 +144,7 @@ def _source_git(source: Path) -> dict | None:
     }
 
 
-def sync(source: Path, cfg: Config, *, check: bool = False) -> dict:
+def _sync_one(source: Path, cfg: Config, client: str, *, check: bool = False) -> dict:
     """Bring the target project's copies back in step with `source`.
 
     With `check=True` nothing is written and the report says what would change.
@@ -150,35 +152,35 @@ def sync(source: Path, cfg: Config, *, check: bool = False) -> dict:
     require_project(cfg)
     source = Path(source)
     target = cfg.project_root
-    claude_dir = target / ".claude"
+    claude_dir = target / (".codex" if client == "codex" else ".claude")
     artifacts: list[dict] = []
 
     # 1. hook wiring — the commands point back at the source clone, so a moved or replaced
     #    clone is repaired here rather than failing silently at the next turn.
-    settings_file = claude_dir / "settings.json"
+    settings_file = wiring_file(target, client)
     existing = json.loads(settings_file.read_text(encoding="utf-8")) if settings_file.exists() else {}
-    merged = merge_settings(existing, render_hook_settings(source))
+    merged = merge_client_settings(existing, render_hook_settings(source, client)) if client == "codex" else merge_settings(existing, render_hook_settings(source, client))
     artifacts.append({
         "name": "hooks", "path": str(settings_file), "stale": merged != existing,
     })
 
     # 2. skills — one entry per skill the source ships, so the report says which one moved.
     skills_src = source / "claude" / "skills"
-    skills_dst = claude_dir / "skills"
+    skills_dst = target / ".agents" / "skills" if client == "codex" else claude_dir / "skills"
     skills = sorted(p for p in skills_src.iterdir() if p.is_dir()) if skills_src.is_dir() else []
     for skill in skills:
         artifacts.append({
             "name": f"skills/{skill.name}",
             "path": str(skills_dst / skill.name),
-            "stale": _tree_differs(skill, skills_dst / skill.name),
+            "stale": skill_differs(skill, skills_dst / skill.name, source, client),
         })
 
     # 3. the memory block in CLAUDE.md, between its markers; the rest of the file is the user's.
-    claude_md = target / "CLAUDE.md"
+    claude_md = target / ("AGENTS.md" if client == "codex" else "CLAUDE.md")
     md_before = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
-    md_after = upsert_memory_instructions(md_before)
+    md_after = upsert_memory_instructions(md_before, block=codex_text(memory_instruction_block(), source) if client == "codex" else None)
     artifacts.append({
-        "name": "CLAUDE.md", "path": str(claude_md), "stale": md_after != md_before,
+        "name": claude_md.name, "path": str(claude_md), "stale": md_after != md_before,
     })
 
     if not check:
@@ -187,7 +189,13 @@ def sync(source: Path, cfg: Config, *, check: bool = False) -> dict:
         if skills:
             skills_dst.mkdir(parents=True, exist_ok=True)
             for skill in skills:
-                shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
+                if client == "codex":
+                    for relative, content in skill_files(skill, source, client).items():
+                        dest = skills_dst / skill.name / relative
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(content)
+                else:
+                    shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
         claude_md.write_text(md_after, encoding="utf-8")
 
     return {
@@ -199,6 +207,71 @@ def sync(source: Path, cfg: Config, *, check: bool = False) -> dict:
         "source_git": _source_git(source),
     }
 
+
+
+def wiring_file(root: Path, client: str) -> Path:
+    return root / (".codex/hooks.json" if client == "codex" else ".claude/settings.json")
+
+
+def merge_client_settings(existing: dict, desired: dict) -> dict:
+    """Replace our commands while retaining other handlers, including on the same event."""
+    result = dict(existing)
+    events = dict(existing.get("hooks", {}))
+    for event, groups in desired["hooks"].items():
+        kept = []
+        for group in events.get(event, []):
+            handlers = [h for h in group.get("hooks", [])
+                        if not ("/codex/hooks/" in h.get("command", "")
+                                and any(name in h["command"] for name in HOOK_EVENTS.values()))]
+            if handlers:
+                kept.append(dict(group, hooks=handlers))
+        events[event] = kept + groups
+    result["hooks"] = events
+    return result
+
+
+def codex_text(text: str, source: Path) -> str:
+    text = text.replace('.claude/settings.json', '.codex/hooks.json').replace('CLAUDE.md', 'AGENTS.md')
+    text = text.replace('twelve health checks', 'thirteen health checks (including hook trust)')
+    text = text.replace('the twelve checks', 'the health checks')
+    for skill in ("sleep", "recall", "memory-status"):
+        text = text.replace("/" + skill, "$" + skill)
+    for command in ("doctor", "status", "pressure", "stm clear"):
+        text = text.replace("lts " + command, "lts " + command + " --client codex")
+    text = text.replace("Then run `/compact` to clear context.",
+                        "Ask the user to run `/compact` when ready; do not claim it ran from a shell.")
+    # Pin the CLI to the same clone as the hooks, even when an older lts is on PATH.
+    return text.replace("lts ", "python3 " + shlex.quote(str(source / "run_lts.py")) + " ")
+
+
+def skill_files(skill: Path, source: Path, client: str) -> dict:
+    files = {p.relative_to(skill): p.read_bytes() for p in skill.rglob("*") if p.is_file()}
+    if client == "codex":
+        files[Path("SKILL.md")] = codex_text(files[Path("SKILL.md")].decode(), source).encode()
+        if skill.name == "memory-status":
+            files[Path("SKILL.md")] += (
+                b"\nCodex activation: `hook_trust: skip` is not a pass. Ask the user to inspect `/hooks` "
+                b"and verify capture after a real turn before calling automatic memory operational.\n"
+            )
+        if skill.name == "sleep":
+            files[Path("agents/openai.yaml")] = b"policy:\n  allow_implicit_invocation: false\n"
+    return files
+
+
+def skill_differs(skill: Path, dest: Path, source: Path, client: str) -> bool:
+    return any(not (dest / name).is_file() or (dest / name).read_bytes() != content
+               for name, content in skill_files(skill, source, client).items())
+
+
+def sync(source: Path, cfg: Config, *, check: bool = False) -> dict:
+    reports = [_sync_one(source, cfg, client, check=check) for client in cfg.enabled_clients]
+    report = reports[0]
+    report["clients"] = list(cfg.enabled_clients)
+    report["artifacts"] = [dict(a, client=client) for client, r in zip(cfg.enabled_clients, reports)
+                           for a in r["artifacts"]]
+    report["stale"] = any(a["stale"] for a in report["artifacts"])
+    report["hook_trust"] = "Review new or changed Codex hooks with /hooks before relying on capture." if "codex" in cfg.enabled_clients else None
+    return report
 
 def render(report: dict) -> str:
     verb = "would update" if report["check"] else "updated"
@@ -219,7 +292,10 @@ def render(report: dict) -> str:
                 f"    git -C {report['source']} pull"
             )
     for a in report["artifacts"]:
-        lines.append(f"  {verb if a['stale'] else 'up to date':>12}  {a['name']}")
+        client = f"{a['client']}: " if len(report.get("clients", [])) > 1 else ""
+        lines.append(f"  {verb if a['stale'] else 'up to date':>12}  {client}{a['name']}")
     if not report["stale"]:
         lines.append("Everything is in step with the source clone.")
+    if report.get("hook_trust"):
+        lines.append(report["hook_trust"])
     return "\n".join(lines)

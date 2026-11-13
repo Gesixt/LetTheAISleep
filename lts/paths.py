@@ -53,8 +53,10 @@ def legacy_capture_offset_file(cfg: Config) -> Path:
     return sidecar_root(cfg) / "stm" / ".lts-capture-offset"
 
 
-def sleep_flag_file(cfg: Config) -> Path:
+def sleep_flag_file(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
     """Set by `lts stm clear`: a sleep just finished, mid-turn. Cleared by the next hook."""
+    if client != DEFAULT_CLIENT:
+        return client_state_dir(cfg, client) / ".lts-sleep-armed"
     return sidecar_root(cfg) / "stm" / ".lts-sleep-armed"
 
 
@@ -99,20 +101,11 @@ def client_state_dir(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
     - the **health journal** is read by the trend checks as a single history, and two interleaved
       clients make that history describe neither of them.
 
-    The buffer, the anchor, the sleep mark, the sleep latch and the pending snapshots stay shared:
-    they are the project's memory, and sharing them is the point of wiring both clients to one
-    project. Snapshots are already keyed by session id, so they cannot collide.
-
-    **The sleep latch is the one of those whose sharing is not sound for two clients.** It is
-    recorded here and deliberately not fixed. `/sleep` in client B arms it; if a turn ends in
-    client A within `watermark.SLEEP_FLAG_MAX_AGE`, A's `Stop` takes the armed branch — it writes
-    A's capture mark to `mark_at(now)`, writes the shared sleep mark, disarms and returns without
-    capturing its own turn. A's turn is discarded *and* A's mark jumps past it, so nothing captures
-    it later and B's notes never held it. The `PreCompact` armed branch has the mirror shape.
-    Nothing emits `--client` yet, so there is exactly one client and the state is unreachable
-    today; it becomes reachable with the first wiring that declares a second. The resolutions — a
-    per-client latch, or an armed branch that captures its own tail before disarming — are design
-    decisions, not something this split settled.
+    The buffer, anchor, project sleep mark and pending snapshots stay shared.
+    Each client's sleep latch and consolidation frontier belong to its own stream:
+    a sleep in one client cannot discard another client's unflushed turn. Claude's
+    latch keeps its original path for compatibility; Codex's is under its state directory.
+    Multiple concurrent sessions of the same client still share state.
     """
     return clients_root(cfg) / client
 
@@ -239,3 +232,8 @@ def ensure_sidecar(cfg: Config, client: str = DEFAULT_CLIENT) -> None:
                 marker.touch()
             except OSError:
                 pass  # best-effort, like the move itself; the next run retries
+
+
+def consolidation_mark_file(cfg: Config, client: str = DEFAULT_CLIENT) -> Path:
+    """Client-local sleep frontier: another client's sleep cannot cover an unflushed turn."""
+    return client_state_dir(cfg, client) / "consolidation-mark.json"

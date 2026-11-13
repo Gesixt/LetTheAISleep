@@ -11,3 +11,7 @@ context_window = 1000000      # model context window (default fits Opus 1M; set 
 
 [memory]
 map_budget = 1500             # chars of "memory map" (note titles) injected on every turn; 0 = off
+
+# Existing projects default to Claude Code. Install can set this with --client.
+# [clients]
+# enabled = ["claude_code", "codex"]

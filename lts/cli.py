@@ -52,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     for op in ("append", "read", "clear"):
         sp = stm_sub.add_parser(op)
         _add_root(sp)
+        if op == "clear":
+            sp.add_argument("--client", default=clients.DEFAULT)
         if op == "append":
             sp.add_argument("--text", required=True)
 
@@ -78,11 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_pressure = sub.add_parser("pressure")
     _add_root(p_pressure)
     p_pressure.add_argument("--transcript", required=True)
+    p_pressure.add_argument("--client", default=clients.DEFAULT)
 
     p_status = sub.add_parser("status")
     _add_root(p_status)
     p_status.add_argument("--transcript", default=None)
     p_status.add_argument("--json", action="store_true")
+    p_status.add_argument("--client", default=clients.DEFAULT)
 
     p_doctor = sub.add_parser("doctor")
     p_doctor.add_argument("--json", action="store_true")
@@ -149,6 +153,7 @@ def _run(args) -> int:
         elif args.op == "read":
             print(stm.read(f), end="")
         elif args.op == "clear":
+            client = clients.resolve(args.client).id
             stm.clear(f)
             # Step 6 of /sleep runs mid-turn: tell the hooks that everything up to now is
             # consolidated, or the Stop hook refills the buffer with the sleep's own
@@ -159,11 +164,11 @@ def _run(args) -> int:
             # instruction the model can reorder or skip, while this half is hard. Emptying the
             # buffer stays unconditional — a developer discarding a buffer on purpose gets that —
             # but it no longer declares the span behind it consolidated.
-            paths.ensure_sidecar(cfg)
+            paths.ensure_sidecar(cfg, client)
             if watermark.note_written_since(
                 paths.vault_root(cfg), watermark.read_mark(paths.sleep_mark_file(cfg))
             ):
-                watermark.arm(paths.sleep_flag_file(cfg))
+                watermark.arm(paths.sleep_flag_file(cfg, client))
             else:
                 print("buffer cleared, but no note in the vault is newer than the sleep mark — "
                       "not marking this span consolidated. If a sleep is in progress, write the "
@@ -219,14 +224,16 @@ def _run(args) -> int:
         # assistant message — and there the size estimate is all there is, so the fallback stays.
         # What it must not do is read like a measurement: the level leads the line, and the line
         # says when the figure behind it was estimated. Same wording as `lts status`.
-        tokens, source = transcript.measure_context(Path(args.transcript))
+        tokens, source = clients.resolve(args.client).measure_context(Path(args.transcript))
         level = transcript.pressure_level(
-            tokens, cfg.context_window, cfg.pressure_warn, cfg.pressure_force
+            tokens, clients.context_window(cfg, args.client, Path(args.transcript)), cfg.pressure_warn, cfg.pressure_force
         )
+        if args.client == "codex" and not clients.context_window(cfg, args.client, Path(args.transcript)):
+            level = "unknown"
         print(f"{level}{status.provenance_note(source)}")
     elif args.cmd == "status":
         tp = Path(args.transcript) if args.transcript else None
-        metrics = status.collect(cfg, transcript_path=tp)
+        metrics = status.collect(cfg, transcript_path=tp, client=clients.resolve(args.client).id)
         if args.json:
             print(json.dumps(metrics, ensure_ascii=False, indent=2))
         else:

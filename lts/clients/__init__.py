@@ -16,11 +16,8 @@ line. Deciding from the shape of a payload which parser to use would be a guess 
 the soft/hard split, and the hard side does not guess: a wrong guess does not fail, it captures
 plausible-looking nonsense into long-term memory.
 
-Nothing writes the flag yet: `claude_code` is the only registered adapter, so the wiring that
-`lts.sync.render_hook_settings` and `install.py` emit carries no `--client` at all, and every
-installed project resolves to the default. That default is what lets the split reach an
-already-wired project the moment its clone is pulled, with nothing to re-wire; a second client
-arrives as an adapter plus wiring that declares its own id.
+Codex wiring declares --client codex. Existing Claude wiring may omit the flag;
+that compatibility default keeps already-installed projects working.
 """
 
 from __future__ import annotations
@@ -28,7 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from lts.clients import claude_code as _claude_code
+from lts.clients import claude_code as _claude_code, codex as _codex
 
 DEFAULT = "claude_code"
 
@@ -94,7 +91,7 @@ class Client(Protocol):
     def newest_exchange_after(self, path: Path, stamp: str | None) -> bool: ...
 
 
-_REGISTRY: dict[str, Client] = {_claude_code.ADAPTER.id: _claude_code.ADAPTER}
+_REGISTRY: dict[str, Client] = {_claude_code.ADAPTER.id: _claude_code.ADAPTER, _codex.ADAPTER.id: _codex.ADAPTER}
 
 
 def known() -> tuple[str, ...]:
@@ -141,3 +138,11 @@ def from_argv(argv: list[str]) -> str:
         if arg.startswith("--client=") and arg.split("=", 1)[1]:
             return arg.split("=", 1)[1]
     return DEFAULT
+
+
+def context_window(cfg, client: str, path: Path) -> int:
+    """Codex reports its actual model window; Claude keeps the existing config override."""
+    adapter = resolve(client)
+    if client == "codex":
+        return adapter.context_window(path)
+    return cfg.context_window
