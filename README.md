@@ -111,8 +111,8 @@ Skill names below use Claude's `/sleep`, `/recall`, `/memory-status`; in Codex u
 >
 > `PreCompact` snapshots the tail that neither claim covers, i.e. whatever follows the later of the
 > two marks — so a compact that finds nothing new writes no snapshot, nothing already consolidated
-> is dumped twice, and `SessionStart` only demands a sleep that is really owed. The sleep mark also
-> keeps the sleep's own narration out of the buffer it just emptied.
+> is dumped twice, and `SessionStart` only demands a sleep that is really owed. Material written
+> after the consolidation boundary is eligible even when it belongs to the same turn.
 >
 > Until 2026-10-30 one file carried both claims, and `PreCompact`'s ordinary path wrote the
 > *snapshot* claim into it (this project's own mark, measured that day, was
@@ -124,13 +124,16 @@ Skill names below use Claude's `/sleep`, `/recall`, `/memory-status`; in Codex u
 > Split apart, that check reads a claim only consolidation can make: "a snapshot holds it" and
 > "nothing holds it" stop being the same report.
 >
-> The mark a hook places at the end of a turn is an **instant**, not a message id: Claude Code
-> can write the turn's last message to the transcript *after* the hook has read it, so a mark
-> naming the last message in the file lands one short — and that message (the sleep's own
-> closing summary) leaked into the next snapshot. A timestamp covers it, because a message is
-> stamped when it is produced. Claude Code's own bookkeeping records — the four `user` entries
-> a `/compact` writes, and the compaction summary — are filtered out of the transcript
-> entirely, so they reach neither the STM buffer nor a snapshot.
+> **Sleep ends at the clear, not at the end of the turn.** The flag records the instant
+> `lts stm clear` ran. `Stop` and `PreCompact` use that exact timestamp for consolidation and
+> capture/snapshot any later material normally. Previously they moved the boundary to their own
+> execution time and skipped the turn. On 2026-11-16 in Portal, a model slept at 09:07, continued
+> with a code review and finished at 09:10; the old rule silently skipped the new review.
+>
+> A late-flushed closing reply also remains eligible: it can contain real work. This means a small
+> amount of sleep narration may appear in STM or a snapshot; the hook cannot safely classify it
+> as disposable. Ordinary capture and snapshot marks still name only the last message actually
+> read, so later flushes cannot be skipped. Claude Code's compaction bookkeeping is filtered out.
 >
 > **The mark is not moved by `lts stm clear` itself.** The command sets a flag, and the next hook to
 > run — `Stop`, or `PreCompact` if an auto-compact beats it — is what writes the mark. That flag is a

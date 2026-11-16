@@ -105,11 +105,12 @@ Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each,
 - Clear the STM buffer **only after** the writes above succeeded:
   `lts stm clear`
 
-  This also places the **sleep mark** — the point in the transcript that consolidation reached.
-  Everything behind it is now off the hooks' books: the Stop hook drops this turn instead of
-  refilling the buffer you just emptied with the story of the sleep itself, and the `/compact`
-  below snapshots nothing — including the closing message you are about to write, and the
-  `/compact` command itself. Never edit `sleep-mark.json` by hand.
+  This records the consolidation boundary at the time of the clear. The next Stop or
+  PreCompact applies that fixed boundary; it does not extend it to the end of the turn.
+  Messages produced afterwards remain eligible for capture and snapshots, including the
+  closing reply and any new work. A small buffer after sleeping is therefore possible.
+  Do not clear again just to remove that tail: first consolidate any new material it holds.
+  Never edit `sleep-mark.json` by hand.
 - If you consumed pending snapshots, drop them: `lts pending clear`
 - In team mode, remind the user to commit and push the vault repository so teammates see this work.
   Do not do it for them.

@@ -113,9 +113,8 @@ def test_pre_compact_advances_the_mark_so_a_second_compact_does_not_duplicate(tm
     assert len(_snapshots(tmp_path)) == 1
 
 
-def test_stop_drops_the_sleep_turn_when_the_sleep_flag_is_armed(tmp_path: Path):
-    # `lts stm clear` runs mid-turn; without this the Stop hook immediately refills the
-    # freshly emptied buffer with the sleep's own narration.
+def test_stop_skips_material_before_the_sleep_boundary(tmp_path: Path):
+    # The notes already hold everything before `lts stm clear`.
     make_project(tmp_path)
     from lts import paths, stm, watermark
     from lts.config import load_config
@@ -577,13 +576,11 @@ def test_session_start_says_exactly_what_is_owed(tmp_path: Path):
     assert "duplicate" in text.lower()   # tells the model not to re-check for one
 
 
-def test_stop_marks_the_sleep_at_the_hook_instant_not_the_last_flushed_message(tmp_path: Path):
-    """The sleep's own closing message must not leak into the next snapshot.
+def test_sleep_does_not_hide_a_late_flushed_closing_message(tmp_path: Path):
+    """A closing message after consolidation may contain new work, so preserve it.
 
-    Observed in production 2026-08-26: Stop ran 113 ms after the closing message was
-    produced but before Claude Code had written it to the transcript, so the mark named the
-    message before it and `/compact` snapshotted the sleep's own summary (4485 B) — enough
-    for SessionStart to announce an unfinished sleep that was already done.
+    The former test required dropping it to suppress narration. Portal's 2026-11-16 review
+    showed why that rule loses real work. A late flush must remain eligible for a snapshot.
     """
     from datetime import datetime, timezone
     from lts import paths, watermark
@@ -601,6 +598,9 @@ def test_stop_marks_the_sleep_at_the_hook_instant_not_the_last_flushed_message(t
 
     stop = _load("stop", HOOKS / "stop.py")
     stop.capture({"transcript_path": str(t)}, root=tmp_path, now=hook_ran_at)
+    assert watermark.read_mark(paths.capture_mark_file(cfg)) == {
+        "timestamp": "2026-08-26T11:01:50.000Z"
+    }
 
     # …and only now does Claude Code flush the closing message it had already stamped.
     _transcript(t, [
@@ -609,15 +609,11 @@ def test_stop_marks_the_sleep_at_the_hook_instant_not_the_last_flushed_message(t
     ])
     pre = _load("pre_compact", HOOKS / "pre_compact.py")
     pre.run({"session_id": "s", "transcript_path": str(t)}, root=tmp_path)
-    assert _snapshots(tmp_path) == []
+    assert [p.read_text() for p in _snapshots(tmp_path)] == ['[assistant] Consolidated.']
 
 
 def test_pre_compact_leaves_the_sleep_flag_for_stop(tmp_path: Path):
-    """Only Stop knows the sleep turn has ended, so PreCompact must not consume the flag.
-
-    An auto-compact mid-sleep used to disarm it, and the rest of the sleep's narration then
-    went into the buffer the sleep had just emptied.
-    """
+    """Stop still needs the fixed boundary after PreCompact advances the sleep mark."""
     from datetime import datetime, timezone
     from lts import paths, stm, watermark
     from lts.config import load_config
@@ -635,7 +631,7 @@ def test_pre_compact_leaves_the_sleep_flag_for_stop(tmp_path: Path):
     assert _snapshots(tmp_path) == []
     assert watermark.is_armed(paths.sleep_flag_file(cfg))
     assert watermark.read_mark(paths.sleep_mark_file(cfg)) == {
-        "timestamp": "2026-08-26T11:01:30.000Z"
+        "timestamp": "2026-08-26T11:01:20.000Z"
     }
 
     _transcript(t, [
@@ -645,7 +641,10 @@ def test_pre_compact_leaves_the_sleep_flag_for_stop(tmp_path: Path):
     stop = _load("stop", HOOKS / "stop.py")
     stop.capture({"transcript_path": str(t)}, root=tmp_path,
                  now=datetime(2026, 8, 26, 11, 2, 3, tzinfo=timezone.utc))
-    assert stm.is_empty(paths.stm_file(cfg))
+    assert stm.read(paths.stm_file(cfg)) == '[assistant] …rest of the sleep.\n'
+    assert watermark.read_mark(paths.sleep_mark_file(cfg)) == {
+        "timestamp": "2026-08-26T11:01:20.000Z"
+    }
     assert not watermark.is_armed(paths.sleep_flag_file(cfg))
 
 

@@ -36,26 +36,17 @@ def run(event: dict, *, root: Path | None = None, now: datetime | None = None,
 
     flag = paths.sleep_flag_file(cfg, client)
     if watermark.is_armed(flag):
-        if watermark.armed_recently(flag, now):
-            # A sleep is finishing in this very turn (auto-compact can beat the Stop hook to it):
-            # everything up to here is already consolidated. The flag stays armed — only Stop
-            # knows when the turn ends, and disarming here left the rest of the sleep's own
-            # narration to be captured into the buffer the sleep had just emptied.
-            watermark.write_mark(mark_file, watermark.mark_at(now))
-            watermark.write_mark(paths.consolidation_mark_file(cfg, client), watermark.mark_at(now))
-            log_note("pre_compact.py", "sleep in progress; nothing to snapshot")
-            return {}
-        # Not a sleep in progress but a latch left on disk. The bound is enforced here because the
-        # armed branch above writes the sleep mark — a latch nobody consumed must not reach it, or
-        # the consolidation frontier moves with nothing consolidated. Falling through is the safe
-        # direction, not a free one: the normal path below writes the snapshot mark, and at worst
-        # it re-snapshots material a sleep that really did complete already holds — the trade
-        # `watermark.SLEEP_FLAG_MAX_AGE` states, noise against a moved frontier. Disarmed rather
-        # than left: the turn it belonged to is long over.
-        stale = watermark.armed_at(flag)
-        watermark.disarm(flag)
-        log_note("pre_compact.py", f"sleep flag armed at {stale or 'an unrecorded time'} is past "
-                                   f"{watermark.SLEEP_FLAG_MAX_AGE}; snapshotting as usual")
+        boundary = watermark.armed_mark(flag, now)
+        if boundary:
+            # Compact may precede Stop. Both use the SAME fixed boundary; new work after
+            # it still needs a snapshot. Leave the flag for Stop to advance capture too.
+            for target in (mark_file, paths.consolidation_mark_file(cfg, client)):
+                watermark.write_mark(target, watermark.later_of(watermark.read_mark(target), boundary))
+        else:
+            stale = watermark.armed_at(flag)
+            watermark.disarm(flag)
+            log_note("pre_compact.py", f"sleep flag armed at {stale or 'an unrecorded time'} is past "
+                                       f"{watermark.SLEEP_FLAG_MAX_AGE}; snapshotting as usual")
 
     snapshot_file = paths.snapshot_mark_file(cfg, client)
     # The tail that neither a sleep nor an earlier snapshot already holds. Two marks rather than

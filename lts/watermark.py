@@ -7,12 +7,12 @@ already consolidated, and the next SessionStart reports a sleep that is not actu
 
 Three marks use this module. Two name a position, `{"uuid", "timestamp", "count"}`:
 
-* the **capture mark** — the last exchange the Stop hook put into the STM buffer (and, on the turn
-  a sleep finishes, an instant instead: that turn is discarded rather than captured);
+* the **capture mark** — the last exchange the Stop hook put into the STM buffer, or the
+  consolidation boundary when a sleep has saved everything through that instant;
 * the **snapshot mark** — the last exchange a pending snapshot holds, which no note does.
 
 The third, the **sleep mark**, is the instant consolidation into long-term notes reached, and
-carries that timestamp alone: both of its writers place it at the end of a turn (see `mark_at`).
+carries that timestamp alone: hooks use the flag's arming time, never their execution time.
 
 The sleep and snapshot marks were one file until 2026-10-30, and that file therefore carried two
 different claims: `PreCompact` wrote "a snapshot holds this", in the positional shape, into the
@@ -22,8 +22,8 @@ field `sleep_evidence` reads as "notes exist". Kept apart, the tail nothing hold
 Resolution is deliberately layered: `uuid` is exact, `timestamp` survives a transcript that
 was rewritten under us, and `count` is the last resort for transcripts that carry neither.
 
-A mark placed at the *end of a turn* carries a timestamp only (`mark_at`), because the last
-message of the turn may not be in the file yet when the hook reads it.
+A sleep boundary carries a timestamp only (`mark_at`). Any message produced after it remains
+owed, including messages flushed to the transcript after the first hook has read it.
 """
 
 from __future__ import annotations
@@ -77,10 +77,8 @@ def mark_of(transcript_path: Path) -> dict:
 def mark_at(when: datetime | None = None) -> dict:
     """A mark that is an instant, not a position — everything stamped at or before it is done.
 
-    `mark_of` cannot be used at the end of a turn: a hook can read the transcript before
-    Claude Code has written the turn's last message to it, so the mark lands one message
-    short and that message leaks into the next snapshot. An instant covers it, because a
-    message is stamped when it is produced and the hook always runs after that.
+    Only use a timestamp for material already consolidated. Ordinary capture and snapshots
+    use `mark_of_exchanges`, so a message that reaches the file late remains eligible.
     """
     when = when or datetime.now(timezone.utc)
     stamp = when.astimezone(timezone.utc).isoformat(timespec="milliseconds")
@@ -163,7 +161,7 @@ def write_mark(path: Path, mark: dict) -> None:
 
 
 def arm(flag_path: Path, at: datetime | None = None) -> None:
-    """Announce that a sleep just finished, so the hooks discard their own noise.
+    """Record the instant consolidation reached; later work must still be captured.
 
     The instant is written into the flag because the flag is a **latch on disk with no owner**:
     `lts stm clear` sets it and only the next `Stop` clears it, so nothing bounds how long it
@@ -239,31 +237,31 @@ def note_written_since(vault_root: Path, mark: dict) -> bool:
 
 def armed_recently(flag_path: Path, now: datetime | None = None,
                    max_age: timedelta = SLEEP_FLAG_MAX_AGE) -> bool:
-    """Is this flag a sleep finishing *now*, rather than a latch left on disk?
+    """Whether a flag has a usable consolidation boundary within the age limit."""
+    return bool(armed_mark(flag_path, now, max_age))
 
-    Both hooks ask this one question so they cannot drift apart — `pre_compact.py` advances the
-    sleep mark on the armed path too, so a rule enforced in only one of them would leave the other
-    able to move the frontier on its own.
 
-    `False` for every state that is not a readable stamp inside `[now, now - max_age]`: no flag, no
-    stamp (`armed_at` explains why that is ordinary), an unparseable stamp, an age past the bound,
-    and an age **below zero**. A flag stamped in the future is as unverifiable as one with no stamp:
-    the two clocks are the same clock, so the only ways to get there are a rewritten file or a
-    machine whose time moved, and neither is evidence that a sleep is in progress.
+def armed_mark(flag_path: Path, now: datetime | None = None,
+               max_age: timedelta = SLEEP_FLAG_MAX_AGE) -> dict:
+    """Read and validate one flag, returning its arming instant in canonical mark form.
+
+    Never substitute the hook's time: the model may have resumed ordinary work after
+    clearing STM. No stamp, invalid/future stamps and expired flags return an empty mark.
+    Read once so validation and the returned boundary refer to the same flag contents.
     """
     stamp = armed_at(flag_path)
     if stamp is None:
-        return False
+        return {}
     try:
         when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:
-        return False
+        return {}
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    return timedelta(0) <= now - when <= max_age
+    return mark_at(when) if timedelta(0) <= now - when <= max_age else {}
 
 
 def disarm(flag_path: Path) -> None:

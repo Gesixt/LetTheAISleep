@@ -39,10 +39,8 @@ def capture(event: dict, *, root: Path | None = None, now: datetime | None = Non
     already captured, so turns are never duplicated or missed — and, unlike a bare count,
     it stays correct when the next session opens a different, shorter transcript.
 
-    When `/sleep` has just armed the sleep flag, this turn *is* the sleep: its narration is
-    discarded rather than written into the buffer it just emptied, and the sleep mark is
-    advanced so the `/compact` that follows has nothing left to snapshot. That mark is the
-    instant this hook runs, not the last exchange in the file — see `watermark.mark_at`.
+    A sleep flag covers only material through its arming instant. Work after that instant
+    is captured normally, even if the model continued working in the same turn as the sleep.
 
     Returns the number of newly captured exchanges (0 if there is no project here —
     we never create a sidecar outside a configured root).
@@ -59,31 +57,31 @@ def capture(event: dict, *, root: Path | None = None, now: datetime | None = Non
     paths.ensure_sidecar(cfg, client)
     transcript_path = Path(event.get("transcript_path") or "")
 
+    frontier = _capture_mark(cfg, client)
     flag = paths.sleep_flag_file(cfg, client)
+    boundary = watermark.armed_mark(flag, now)
     if watermark.is_armed(flag):
-        if watermark.armed_recently(flag, now):
-            here = watermark.mark_at(now)
-            watermark.write_mark(paths.capture_mark_file(cfg, client), here)
-            watermark.write_mark(paths.sleep_mark_file(cfg), here)
-            watermark.write_mark(paths.consolidation_mark_file(cfg, client), here)
-            # Stop is the only hook that knows the turn has ended, so it owns disarming.
+        if boundary:
+            frontier = watermark.later_of(frontier, boundary)
+            for mark_file in (paths.sleep_mark_file(cfg), paths.consolidation_mark_file(cfg, client)):
+                watermark.write_mark(mark_file, watermark.later_of(watermark.read_mark(mark_file), boundary))
+            # Keep the boundary even if the transcript cannot be read on this attempt.
+            watermark.write_mark(paths.capture_mark_file(cfg, client), frontier)
             watermark.disarm(flag)
-            log_note("stop.py", "sleep just finished; dropped this turn instead of refilling STM")
-            return 0
-        # A latch nobody consumed. Honouring it would advance the sleep mark to *now* and mark
-        # everything behind it consolidated — the 2026-10-16 incident, where that span was ~20
-        # hours and 90 buffered exchanges that no note held. See `watermark.SLEEP_FLAG_MAX_AGE`.
-        stale = watermark.armed_at(flag)
-        watermark.disarm(flag)
-        log_note("stop.py", f"sleep flag armed at {stale or 'an unrecorded time'} is past "
-                            f"{watermark.SLEEP_FLAG_MAX_AGE}; ignored it and captured normally")
+            log_note("stop.py", "sleep boundary recorded; capturing material after consolidation")
+        else:
+            # Unknown/expired flags retain the conservative normal capture path.
+            stale = watermark.armed_at(flag)
+            watermark.disarm(flag)
+            log_note("stop.py", f"sleep flag armed at {stale or 'an unrecorded time'} is past "
+                                f"{watermark.SLEEP_FLAG_MAX_AGE}; ignored it and captured normally")
 
     # Parsed once, by the running client's own reader, and kept: `new` is the tail to capture and
     # `exchanges` is what the new mark is measured against. Both from the same parse, so the mark
     # can only ever name an exchange that reached the buffer — a second read of the file could see
     # a message Claude Code appended in between and mark it captured when it was not.
     exchanges = adapter.read_exchanges(transcript_path)
-    new = watermark.exchanges_after(exchanges, _capture_mark(cfg, client))
+    new = watermark.exchanges_after(exchanges, frontier)
     buf = paths.stm_file(cfg)
     for ex in new:
         text = " ".join(ex["text"].split())  # flatten to one line per exchange
@@ -91,6 +89,10 @@ def capture(event: dict, *, root: Path | None = None, now: datetime | None = Non
             text = text[:_MAX_CHARS].rstrip() + " …[truncated]"
         stm.append(buf, f"[{ex['role']}] {text}")
     here = watermark.mark_of_exchanges(exchanges)
-    if here:  # an unreadable/empty transcript must not reset the mark and replay everything
+    if boundary:
+        here = watermark.later_of(frontier, here)
+    # No new exchanges means no new position. In particular, a post-sleep retry must
+    # not replace the fixed boundary with an older message merely because it is last on disk.
+    if here and (new or boundary):
         watermark.write_mark(paths.capture_mark_file(cfg, client), here)
     return len(new)

@@ -155,9 +155,8 @@ def _run(args) -> int:
         elif args.op == "clear":
             client = clients.resolve(args.client).id
             stm.clear(f)
-            # Step 6 of /sleep runs mid-turn: tell the hooks that everything up to now is
-            # consolidated, or the Stop hook refills the buffer with the sleep's own
-            # narration and the following /compact snapshots a chapter already in notes.
+            # Step 6 of /sleep runs mid-turn: record what is consolidated as of this clear.
+            # Hooks preserve everything after this instant, even within the same turn.
             #
             # Only when a note was actually written, though. Arming is a claim about long-term
             # memory, and the skill's "clear **only after** the writes above succeeded" is a soft
