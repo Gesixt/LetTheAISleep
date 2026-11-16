@@ -146,10 +146,34 @@ def test_the_pressure_line_repeats_once_per_ten_percent_band():
     assert "91%" in higher
 
 
-def test_pressure_below_force_is_not_announced():
-    """`warn` is the model's business; the user is told when action is actually owed (spec §6.1)."""
+def test_warning_pressure_is_announced_directly_to_the_user():
+    """An ignored model reminder must not hide the warning from the user."""
     text, _ = notify.message([_ok("config")], _metrics(tokens=650_000, level="warn"), {})
-    assert text == ""
+    assert '65%' in text
+    assert '/sleep at the next natural break' in text
+    assert 'Run /sleep now' not in text
+
+
+def test_warning_escalates_and_resets_without_repeating_every_turn():
+    shown = {}
+    for tokens, level, expected in [
+        (590_000, 'none', False), (600_000, 'warn', True),
+        (620_000, 'warn', False), (700_000, 'warn', True),
+        (800_000, 'force', True), (820_000, 'force', False),
+        (300_000, 'none', False), (620_000, 'warn', True),
+    ]:
+        text, shown = notify.message([], _metrics(tokens=tokens, level=level), shown,
+                                     sleep_command='$sleep')
+        assert bool(text) == expected, (tokens, level, text)
+        if text:
+            assert '$sleep' in text and '/sleep' not in text
+
+
+def test_pressure_escalation_is_visible_even_inside_the_same_ten_percent_band():
+    # Configurable warn/force thresholds can both lie in the 60-69% band.
+    _, shown = notify.message([], _metrics(tokens=610_000, level='warn'), {})
+    text, shown = notify.message([], _metrics(tokens=650_000, level='force'), shown)
+    assert 'Run /sleep now' in text
 
 
 def test_an_impossible_percentage_is_never_printed():

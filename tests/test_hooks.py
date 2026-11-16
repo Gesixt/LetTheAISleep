@@ -371,8 +371,9 @@ def test_user_prompt_submit_states_the_figure_but_does_not_nudge_when_low(tmp_pa
     _usage_transcript(t, 100)  # 10% -> none
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
-    assert text == "Context window: 100/1,000 tokens (10%)"
-    assert "/sleep" not in text
+    assert "Context window: 100/1,000 tokens (10%)" in text
+    assert 'offer `/sleep`' in text
+    assert 'Context is filling up.' not in text and 'Context is nearly full.' not in text
 
 
 def test_pre_compact_runs_as_subprocess_without_pythonpath(tmp_path: Path):
@@ -757,7 +758,8 @@ def test_user_prompt_submit_always_states_the_measured_context(tmp_path: Path):
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
     assert "Context window" in text
     assert "28%" in text
-    assert "/sleep" not in text          # a figure, not a nudge: there is no pressure yet
+    assert 'offer `/sleep`' in text      # Chapter boundaries do not depend on pressure.
+    assert 'Context is filling up.' not in text
 
 
 def test_the_pressure_nudge_never_quotes_a_band_of_its_own(tmp_path: Path):
@@ -911,7 +913,8 @@ def test_user_prompt_submit_does_not_nudge_on_a_figure_it_has_just_disowned(tmp_
     ups = _load("user_prompt_submit", HOOKS / "user_prompt_submit.py")
     text = ups.build_context({"transcript_path": str(t)}, root=tmp_path)
     assert "impossible" in text
-    assert "/sleep" not in text
+    assert 'Context is filling up.' not in text and 'Context is nearly full.' not in text
+    assert 'offer `/sleep`' in text  # Only the independent chapter-boundary guidance remains.
 
 
 def test_session_start_still_delivers_the_anchor_when_the_health_path_raises(tmp_path: Path):

@@ -30,10 +30,15 @@ def test_codex_pressure_delivers_skill_syntax_to_model_and_user(tmp_path, tokens
     context = output['hookSpecificOutput']['additionalContext']
     notice = output['systemMessage']
     assert f'({tokens // 10}%)' in context
-    assert ('Consider running `$sleep` soon' in context) == (level == 'warn')
-    assert ('run `$sleep` now' in context) == (level == 'force')
+    assert 'offer `$sleep`' in context  # Chapter boundaries apply even below pressure thresholds.
+    assert ('Context is filling up.' in context) == (level == 'warn')
+    assert ('strongly recommend `$sleep` now' in context) == (level == 'force')
+    if level != 'none':
+        assert 'Tell the user the measured context usage' in context
     assert '$sleep writes them into long-term notes.' in notice
     assert ('Run $sleep now' in notice) == (level == 'force')
+    assert ('Consider $sleep at the next natural break' in notice) == (level == 'warn')
+    assert ('Context window at' in notice) == (level != 'none')
     assert '/sleep' not in context + notice
 
 
@@ -102,6 +107,21 @@ def test_codex_sync_preserves_other_hooks_and_is_idempotent(tmp_path):
     assert '$sleep' in (root / 'AGENTS.md').read_text()
     assert not (root / '.claude').exists()
     assert not sync.sync(ROOT, cfg, check=True)['stale']
+
+
+def test_chapter_offer_is_delivered_even_without_a_context_measurement(tmp_path):
+    from lts.hookimpl.user_prompt_submit import build_context
+    cfg = load_config(make_project(tmp_path, '\n[clients]\nenabled = ["codex"]\n'))
+    sync.sync(ROOT, cfg)
+    instructions = ' '.join((tmp_path / 'AGENTS.md').read_text().split())
+    assert 'offer `$sleep` in your closing reply' in instructions
+    assert 'even below the context warning threshold' in instructions
+    assert 'allow_implicit_invocation: false' in (
+        tmp_path / '.agents/skills/sleep/agents/openai.yaml').read_text()
+    context = build_context({'cwd': str(tmp_path), 'transcript_path': None}, client='codex')
+    assert 'offer `$sleep`' in context
+    assert 'Context window:' not in context  # No invented usage to justify the offer.
+    assert 'Context is filling up.' not in context
 
 
 def test_codex_stop_captures_once_even_when_claude_sleep_is_armed(tmp_path):
