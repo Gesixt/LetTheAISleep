@@ -92,6 +92,11 @@ Codex and projects configured for both clients use the local frontier for PreCom
 and mark comparisons: another client's sleep cannot claim their unflushed messages.
 The shared sleep mark still records project-level evidence of consolidation.
 
+The sleep frontier is fixed at `stm clear` time, taken from the flag's timestamp. `Stop`
+captures and `PreCompact` snapshots messages after it, including work that resumes in the
+same turn. Neither moves consolidation to its own execution time. A closing sleep reply
+may consequently appear in STM: preserving it is safer than dropping a new result.
+
 On upgrade, a missing client-local frontier can cause a conservative re-snapshot of
 older dialogue. This is preferable to skipping material that no note contains.
 Concurrent sessions of the same client still share state; concurrent buffer clear/
