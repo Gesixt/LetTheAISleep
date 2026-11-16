@@ -50,6 +50,20 @@ client selection only. `hook_trust: skip` explicitly means this version does not
 verify Codex's persisted trust state; inspect `/hooks` and actual capture. An all-green
 filesystem check is not proof that Codex executed a hook.
 
+## Sleep commands and reminders
+
+`Unrecognized command '/sleep'` means the Claude skill syntax was entered in Codex.
+Use `$sleep` in the Codex prompt. The skill consolidates notes through the model;
+hooks separately capture exchanges, inject context and recommend when to sleep.
+The command error alone does not show whether hooks ran.
+
+The model receives measured context usage on each prompt when the rollout supplies it.
+With the default `[sleep] pressure_warn = 0.60` and `pressure_force = 0.80`, it receives
+a reminder at 60% and an urgent instruction at 80%. The direct user notification for
+context pressure starts at 80%; it is deduplicated until the ten-percent band changes.
+Pending STM material can also produce a sleep notification independently of context usage.
+Both model instructions and user notifications use `$sleep` for Codex.
+
 ## Transcript and lifecycle contracts
 
 Only `response_item` records of type `message`, role `user` or `assistant`, are

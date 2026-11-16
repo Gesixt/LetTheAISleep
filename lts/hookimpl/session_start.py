@@ -166,7 +166,9 @@ def build_blocks(event: dict, *, root: Path | None = None,
         #
         # Last in the guarded block, after `journal.append`, so a raise here costs the user's line
         # and not the health record as well.
-        system_message = notify.message(checks, metrics, {})[0]
+        system_message = notify.message(
+            checks, metrics, {}, sleep_command="$sleep" if client == "codex" else "/sleep"
+        )[0]
     except Exception:
         pass
     return "\n\n".join(body for _name, body in blocks if body), system_message
