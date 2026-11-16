@@ -57,10 +57,18 @@ Use `$sleep` in the Codex prompt. The skill consolidates notes through the model
 hooks separately capture exchanges, inject context and recommend when to sleep.
 The command error alone does not show whether hooks ran.
 
+After a substantive task, review or investigation finishes, the model is instructed to
+offer `$sleep` in its closing reply even below the context warning threshold. This guidance
+is in `AGENTS.md` and repeated by `UserPromptSubmit`; recognizing a chapter boundary and
+following the instruction still depend on the model.
+
 The model receives measured context usage on each prompt when the rollout supplies it.
-With the default `[sleep] pressure_warn = 0.60` and `pressure_force = 0.80`, it receives
-a reminder at 60% and an urgent instruction at 80%. The direct user notification for
-context pressure starts at 80%; it is deduplicated until the ten-percent band changes.
+With the default `[sleep] pressure_warn = 0.60` and `pressure_force = 0.80`, it is explicitly
+told to report usage and offer sleep at 60%, and strongly recommend sleep before new large
+tasks at 80%. The hook also emits a direct user notification starting at 60%, independently
+of the model's reply. It repeats when the ten-percent band or urgency changes, and resets
+when pressure falls below the warning threshold. A reminder alone does not start sleep;
+Codex's explicit-only skill policy remains unchanged.
 Pending STM material can also produce a sleep notification independently of context usage.
 Both model instructions and user notifications use `$sleep` for Codex.
 

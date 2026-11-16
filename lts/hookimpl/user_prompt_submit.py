@@ -16,12 +16,20 @@ from lts.hooklog import log_error
 # a /compact while the turn's own usage record said 276,013 tokens, i.e. 27.6%. The measured line
 # below carries the number; these two only say what to do about it.
 _WARN = (
-    "Context is filling up. Consider running `/sleep` soon, or at the next "
-    "natural break, so nothing is lost."
+    "Context is filling up. Tell the user the measured context usage above and explicitly "
+    "offer `/sleep` at the next natural break. Include the offer in this response; "
+    "do not silently defer it."
 )
 _FORCE = (
-    "Context is nearly full. You should run `/sleep` now to consolidate this "
-    "session into long-term notes before context is compacted."
+    "Context is nearly full. Tell the user the measured context usage above and strongly "
+    "recommend `/sleep` now, before starting another large task or compacting context."
+)
+_CHAPTER = (
+    "Memory checkpoint: when a substantive task, review or investigation finishes, offer "
+    "`/sleep` in your closing reply before switching topics, even below the context warning "
+    "threshold. Do not repeat a declined offer without significant new work. A reminder alone "
+    "does not request consolidation; if the user already requested sleep, perform it instead "
+    "of asking again."
 )
 
 
@@ -65,7 +73,7 @@ def _context_line(tokens: int, window: int, source: str = transcript.USAGE) -> s
 
 def build_context(event: dict, *, root: Path | None = None,
                   client: str = clients.DEFAULT) -> str:
-    """The memory map, then the sleep-pressure nudge — whichever of the two has anything to say.
+    """Memory entry points, chapter guidance and measured pressure for the current prompt.
 
     The map goes first because it is context for answering the prompt that follows; the nudge is
     about what to do next, so it sits closest to the prompt. This hook is the only one that runs
@@ -85,7 +93,7 @@ def build_context(event: dict, *, root: Path | None = None,
     # "unknown" (tokens > window) falls through to "": a nudge derived from a figure the line
     # above disowns would be two verdicts on one measurement, the second contradicting the first.
     pressure = _FORCE if level == "force" else (_WARN if level == "warn" else "")
-    blocks = (memorymap.render(cfg),
+    blocks = (memorymap.render(cfg), _CHAPTER if cfg.configured else "",
               _context_line(tokens, window, source), pressure)
     return "\n\n".join(b for b in blocks if b).replace("/sleep", "$sleep" if client == "codex" else "/sleep")
 

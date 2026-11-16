@@ -510,7 +510,11 @@ own are left alone; only the ones the clone ships are overwritten.
 **Daily flow**
 
 1. Work normally. Every exchange is captured to the STM buffer automatically by the `Stop` hook — like human short-term memory, you don't decide what to remember.
-2. As context fills, the `UserPromptSubmit` hook nudges you (~60%) and then insists (~80%) to sleep.
+2. At the end of a substantive task or investigation, the assistant should offer sleep even
+   below the context warning threshold. At ~60% the hook explicitly asks it to report usage
+   and offer sleep, and at ~80% to strongly recommend sleep before another large task.
+   Direct user notifications also start at ~60%, repeating when urgency or the ten-percent
+   band changes. Chapter recognition and the assistant's response remain model decisions.
 3. Run **`/sleep`** (Codex: **`$sleep`**) at a natural break (or when nudged). It consolidates STM → linked long-term notes,
    rebuilds embeddings, clears STM, and you can `/compact`.
 4. Next session, the `SessionStart` hook injects the **anchor** (a tiny table of contents). Ask a

@@ -90,9 +90,16 @@ do not let findings evaporate:
 - **STM fills automatically.** A `Stop` hook captures each exchange into the short-term buffer
   after every turn — you do not need to remember to record things. (To add a deliberate highlight
   you may still `lts stm append --text "..."`, but it is optional.)
-- **Sleep at the end of a chapter.** When a task or investigation wraps up (or context is
-  filling), run the `/sleep` skill to consolidate the STM buffer + the conversation into linked
-  long-term notes; it then clears STM. Offer `/sleep` before the user moves on.
+- **Offer sleep at chapter boundaries.** When a substantive task, review or investigation
+  finishes, offer `/sleep` in your closing reply before moving to another topic, even below the
+  context warning threshold. Name the completed work worth saving. Keep the offer brief; do not
+  repeat a declined offer without significant new work. If the user already requested sleep,
+  perform it instead of asking again.
+- **Act on context reminders.** When the hook reports warning pressure, tell the user the
+  measured usage and offer `/sleep` at the next natural break in this response. At urgent
+  pressure, strongly recommend sleep before starting another large task or compacting context.
+  A reminder alone does not request consolidation. Quote the hook's figure with any estimate or
+  unknown label; do not invent a percentage.
 - **Recall before re-deriving.** Every turn carries a **memory map** — the titles of every note
   in the vault. If a question touches anything the map names, read that note instead of working
   it out again; `/recall` when you need ranking and linked neighbours, `read_note` when a title

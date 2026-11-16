@@ -99,11 +99,12 @@ def _sleep(metrics: dict, command: str) -> tuple[str, str]:
 
 def _pressure(metrics: dict, command: str) -> tuple[str, str]:
     pr = metrics.get("pressure") or {}
-    if pr.get("level") != "force":
+    level = pr.get("level")
+    if level not in ("warn", "force"):
         return "", ""
     tokens = int(pr.get("tokens") or 0)
     window = int(pr.get("window") or 0)
-    if window <= 0 or tokens > window:
+    if window <= 0 or tokens < 0 or tokens > window:
         # The rule `user_prompt_submit._context_line` already enforces: a percentage above 100 is
         # never real, so it is not printed. The account of the real reading is in
         # `healthchecks._check_pressure` — an estimate of 45,413,420 tokens divided by a hardcoded
@@ -119,15 +120,17 @@ def _pressure(metrics: dict, command: str) -> tuple[str, str]:
         # is why it states the numbers there and this states none here.
         #
         # Neither state can arrive from `status.collect`: `transcript.pressure_level` returns
-        # "unknown" for `tokens > window` and "none" for `window <= 0`, so `level == "force"` is
-        # impossible beside them. The guard is for a caller that builds its own metrics dict, which
+        # "unknown" for `tokens > window`, so warning/urgent pressure is impossible beside it.
+        # The guard is for a caller that builds its own metrics dict, which
         # the tests do and a second producer would.
         return "", ""
     pct = round(tokens / window * 100)
+    action = (f"Run {command} now, before a compaction decides for you." if level == "force"
+              else f"Consider {command} at the next natural break to save this chapter.")
+    # Urgency matters independently of the band: configured thresholds may share a band.
     return (
-        f"{pct // 10}",
-        f"Context window at {pct}% ({tokens:,}/{window:,} tokens). "
-        f"Run {command} now, before a compaction decides for you.",
+        f"{level}:{pct // 10}",
+        f"Context window at {pct}% ({tokens:,}/{window:,} tokens). {action}",
     )
 
 
