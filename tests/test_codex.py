@@ -3,12 +3,53 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from lts import clients, paths, sync, status
 from lts.config import load_config
 from tests.helpers import make_project
 
 FIXTURE = Path(__file__).parent / 'fixtures/codex-0.169.0.jsonl'
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize('tokens,level', [(500, 'none'), (600, 'warn'), (800, 'force')])
+def test_codex_pressure_delivers_skill_syntax_to_model_and_user(tmp_path, tokens, level):
+    """Exercise the real entry point without changing the live project's hook state."""
+    cfg = load_config(make_project(tmp_path, '\n[clients]\nenabled = ["codex"]\n'))
+    paths.ensure_sidecar(cfg, 'codex')
+    paths.stm_file(cfg).write_text('[user] Keep this decision.\n')
+    rollout = tmp_path / 'usage.jsonl'
+    rollout.write_text(json.dumps({'type': 'event_msg', 'payload': {
+        'type': 'token_count', 'info': {
+            'last_token_usage': {'input_tokens': tokens}, 'model_context_window': 1000}}}) + '\n')
+    event = {'cwd': str(tmp_path), 'transcript_path': str(rollout), 'session_id': 'pressure'}
+    result = subprocess.run([sys.executable, str(ROOT / 'codex/hooks/user_prompt_submit.py')],
+                            input=json.dumps(event), text=True, capture_output=True, check=True)
+    output = json.loads(result.stdout)
+    context = output['hookSpecificOutput']['additionalContext']
+    notice = output['systemMessage']
+    assert f'({tokens // 10}%)' in context
+    assert ('Consider running `$sleep` soon' in context) == (level == 'warn')
+    assert ('run `$sleep` now' in context) == (level == 'force')
+    assert '$sleep writes them into long-term notes.' in notice
+    assert ('Run $sleep now' in notice) == (level == 'force')
+    assert '/sleep' not in context + notice
+
+
+@pytest.mark.parametrize('client,folder,command', [
+    ('codex', 'codex', '$sleep'), ('claude_code', 'claude', '/sleep'),
+])
+def test_session_start_sleep_notice_matches_client(tmp_path, client, folder, command):
+    cfg = load_config(make_project(tmp_path))
+    paths.ensure_sidecar(cfg, client)
+    paths.stm_file(cfg).write_text('[user] Pending decision.\n')
+    result = subprocess.run([sys.executable, str(ROOT / folder / 'hooks/session_start.py')],
+                            input=json.dumps({'cwd': str(tmp_path)}),
+                            text=True, capture_output=True, check=True)
+    output = json.loads(result.stdout)
+    assert f'`{command}` skill' in output['hookSpecificOutput']['additionalContext']
+    assert f'{command} writes them into long-term notes.' in output['systemMessage']
 
 
 def test_recorded_rollout_excludes_harness_and_reasoning():

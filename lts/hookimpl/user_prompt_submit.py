@@ -128,7 +128,10 @@ def _notification(cfg, transcript_path: Path, session_id: str | None, client: st
     metrics = status.collect(cfg, transcript_path=transcript_path, client=client)
     checks = health.run(cfg, metrics=metrics, turn=state, ids=health.PER_TURN_IDS,
                         transcript_path=transcript_path, client=client)
-    text, shown = notify.message(checks, metrics, state.get("shown") or {})
+    text, shown = notify.message(
+        checks, metrics, state.get("shown") or {},
+        sleep_command="$sleep" if client == "codex" else "/sleep",
+    )
     state["shown"] = shown
     turnstate.write(paths.turn_state_file(cfg, client), state)
     return text

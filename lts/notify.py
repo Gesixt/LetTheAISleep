@@ -84,7 +84,7 @@ def _health(checks: list[Check]) -> tuple[str, str]:
     )
 
 
-def _sleep(metrics: dict) -> tuple[str, str]:
+def _sleep(metrics: dict, command: str) -> tuple[str, str]:
     stm = (metrics.get("stm") or {}).get("lines") or 0
     snaps = (metrics.get("pending") or {}).get("snapshots") or 0
     if not stm and not snaps:
@@ -93,11 +93,11 @@ def _sleep(metrics: dict) -> tuple[str, str]:
         f"{_magnitude(stm)}/{_magnitude(snaps)}",
         f"Unconsolidated memory: {stm} STM {_plural(stm, 'entry', 'entries')} and {snaps} pending "
         f"{_plural(snaps, 'snapshot', 'snapshots')} are waiting. "
-        "/sleep writes them into long-term notes.",
+        f"{command} writes them into long-term notes.",
     )
 
 
-def _pressure(metrics: dict) -> tuple[str, str]:
+def _pressure(metrics: dict, command: str) -> tuple[str, str]:
     pr = metrics.get("pressure") or {}
     if pr.get("level") != "force":
         return "", ""
@@ -127,24 +127,26 @@ def _pressure(metrics: dict) -> tuple[str, str]:
     return (
         f"{pct // 10}",
         f"Context window at {pct}% ({tokens:,}/{window:,} tokens). "
-        "Run /sleep now, before a compaction decides for you.",
+        f"Run {command} now, before a compaction decides for you.",
     )
 
 
-def current(checks: list[Check], metrics: dict) -> dict[str, tuple[str, str]]:
+def current(checks: list[Check], metrics: dict, *,
+            sleep_command: str = "/sleep") -> dict[str, tuple[str, str]]:
     """Subject → `(fingerprint, line)`, for the subjects that have something to say right now.
 
     The keys are a subset of `SUBJECTS`, which is what the callers iterate.
     """
     built = {
         "health": _health(checks),
-        "sleep": _sleep(metrics),
-        "pressure": _pressure(metrics),
+        "sleep": _sleep(metrics, sleep_command),
+        "pressure": _pressure(metrics, sleep_command),
     }
     return {subject: pair for subject, pair in built.items() if pair[1]}
 
 
-def message(checks: list[Check], metrics: dict, shown: dict) -> tuple[str, dict]:
+def message(checks: list[Check], metrics: dict, shown: dict, *,
+            sleep_command: str = "/sleep") -> tuple[str, dict]:
     """The text to put in front of the user, and the fingerprints to remember.
 
     `""` when every subject is either silent or unchanged since `shown` — which is the common case,
@@ -159,7 +161,7 @@ def message(checks: list[Check], metrics: dict, shown: dict) -> tuple[str, dict]
     again instead of a silent repeat.
     """
     shown = shown if isinstance(shown, dict) else {}
-    now = current(checks, metrics)
+    now = current(checks, metrics, sleep_command=sleep_command)
     lines = [line for subject, (print_, line) in now.items() if shown.get(subject) != print_]
     remembered = {subject: print_ for subject, (print_, _line) in now.items()}
     return "\n".join(lines), remembered
