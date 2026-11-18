@@ -10,13 +10,16 @@ from lts import anchor, clients, digest, health, journal, notify, paths, pending
 from lts.config import load_config
 from lts.hooklog import log_error
 
-_FORCE_MSG = (
-    "## Unfinished sleep detected\n"
-    "Un-consolidated memory is waiting: {stm} STM entries, {snapshots} pending snapshot(s).\n"
-    "This is new material only — everything already consolidated sits behind the sleep mark "
-    "and was never written here, so it is not a duplicate of notes you already hold. Do not "
-    "spend a turn checking. Before doing anything else, run the `/sleep` skill to "
-    "finish sleeping this material into long-term notes, then continue."
+_BACKLOG_MSG = (
+    "## Buffered memory available\n"
+    "Retained: {stm} STM entries, {snapshots} pending snapshot(s).\n"
+    "These are storage counts, not evidence of an interrupted sleep. STM and snapshots may "
+    "overlap and may contain the closing reply after a successful sleep. "
+    "Continue the user's current request; do not start another `/sleep` solely because "
+    "this buffer is nonempty. Keep the material for the next requested consolidation. "
+    "A sleep/compact closing reply is not a new chapter that needs another sleep. "
+    "If the user explicitly requests sleep now, consolidate the substantive material without "
+    "creating notes just to record that the previous sleep succeeded."
 )
 
 _UNCONFIGURED_MSG = (
@@ -61,7 +64,7 @@ def build_blocks(event: dict, *, root: Path | None = None,
     stm_text = stm.read(paths.stm_file(cfg))
     stm_entries = len([ln for ln in stm_text.splitlines() if ln.strip()])
 
-    # The sleep demand is one block among several, never a replacement for them. It used to
+    # The backlog notice is one block among several, never a replacement for them. It used to
     # return early — "one demand at a time" — which assumed sessions end often. A session that
     # runs for months on /sleep + /compact never has an empty buffer, so the anchor and the
     # digest were withheld permanently and the model had no idea which notes existed.
@@ -70,7 +73,8 @@ def build_blocks(event: dict, *, root: Path | None = None,
     blocks: list[tuple[str, str]] = []
     if snapshots or stm_entries:
         blocks.append(
-            ("sleep_demand", _FORCE_MSG.format(stm=stm_entries, snapshots=len(snapshots)).replace("/sleep", "$sleep" if client == "codex" else "/sleep"))
+            # Retain the historical journal key; this block is informational, not a demand.
+            ("sleep_demand", _BACKLOG_MSG.format(stm=stm_entries, snapshots=len(snapshots)).replace("/sleep", "$sleep" if client == "codex" else "/sleep"))
         )
 
     # The digest scans the vault (e.g. note.stat()), which can raise on a dangling symlink or

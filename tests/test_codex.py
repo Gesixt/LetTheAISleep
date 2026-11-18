@@ -35,7 +35,7 @@ def test_codex_pressure_delivers_skill_syntax_to_model_and_user(tmp_path, tokens
     assert ('strongly recommend `$sleep` now' in context) == (level == 'force')
     if level != 'none':
         assert 'Tell the user the measured context usage' in context
-    assert '$sleep writes them into long-term notes.' in notice
+    assert 'Retained for the next $sleep' in notice
     assert ('Run $sleep now' in notice) == (level == 'force')
     assert ('Consider $sleep at the next natural break' in notice) == (level == 'warn')
     assert ('Context window at' in notice) == (level != 'none')
@@ -53,8 +53,8 @@ def test_session_start_sleep_notice_matches_client(tmp_path, client, folder, com
                             input=json.dumps({'cwd': str(tmp_path)}),
                             text=True, capture_output=True, check=True)
     output = json.loads(result.stdout)
-    assert f'`{command}` skill' in output['hookSpecificOutput']['additionalContext']
-    assert f'{command} writes them into long-term notes.' in output['systemMessage']
+    assert f'another `{command}` solely' in output['hookSpecificOutput']['additionalContext']
+    assert f'Retained for the next {command}' in output['systemMessage']
 
 
 def test_recorded_rollout_excludes_harness_and_reasoning():

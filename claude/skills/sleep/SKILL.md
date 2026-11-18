@@ -36,13 +36,18 @@ Never run `git fetch`, `git pull`, `git commit` or `git push` yourself. Publishi
   `lts pending list` → prints the absolute path of each snapshot (nothing if there are none).
   Read those paths with your file tools.
 
-  A snapshot holds **only material that neither a note nor an earlier snapshot already holds** —
-  `PreCompact` starts from whichever is later of the sleep mark and its own snapshot mark, and
-  keeps everything behind it out. So treat a snapshot as new material and consolidate it. Do not
-  open the session's notes to check whether it duplicates them; it does not, and that check used
-  to burn a whole turn every session. (Both marks are the hooks' own bookkeeping inside the
-  sidecar; this skill never reads them, and `lts doctor` is what reports on them.)
+  A snapshot holds text after the consolidation/snapshot frontier. It can overlap STM and
+  include the previous sleep's closing reply. Reconcile these sources during the requested
+  sleep; their existence alone does not mean an earlier sleep was interrupted.
+  Preserve substantive new material without creating a new note merely to restate that
+  memory was saved and `/compact` is available. Do not discard a message just because it is
+  the only entry: a closing reply can also contain real decisions or new work.
 - Add the significant remaining conversation context (exclude noise).
+
+If the collected material contains only acknowledgements of the previous successful sleep
+and no new facts, decisions or work, do not manufacture a session note. Leave the harmless tail
+for the next substantive consolidation and report that no new sleep is needed. Do not clear it
+or advance a mark merely to make the buffer empty.
 
 ## 2. Extract (with preservation, never compress)
 Pull out: key decisions, **ALL numbers**, names, architectural choices, contentious points, open questions. Rule: every number, name, and rationale is carried over **verbatim**. When in doubt, carry it over.
@@ -116,4 +121,6 @@ Re-scan the dialogue and STM for key entities (numbers, proper nouns). For each,
   Do not do it for them.
 - Then run `/compact` to clear context.
 
-If interrupted before step 6, leave the session note `status: pending` and do **not** clear STM — the next session's SessionStart hook will resume this.
+If interrupted before step 6, leave the session note `status: pending` and do **not** clear STM.
+The retained material is available for resuming the requested sleep; SessionStart reports its
+presence without interpreting every nonempty buffer as an interrupted operation.

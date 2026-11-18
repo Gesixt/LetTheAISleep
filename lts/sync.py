@@ -95,6 +95,10 @@ do not let findings evaporate:
   context warning threshold. Name the completed work worth saving. Keep the offer brief; do not
   repeat a declined offer without significant new work. If the user already requested sleep,
   perform it instead of asking again.
+- **Do not sleep in a loop.** A nonempty STM buffer or pending snapshot after sleep/compact
+  is not evidence of an interrupted sleep: it may hold the previous closing reply. Continue
+  the user's task and retain that material for the next requested consolidation. Do not run or
+  offer another sleep just to record that the previous sleep succeeded.
 - **Act on context reminders.** When the hook reports warning pressure, tell the user the
   measured usage and offer `/sleep` at the next natural break in this response. At urgent
   pressure, strongly recommend sleep before starting another large task or compacting context.
