@@ -27,7 +27,8 @@ _FORCE = (
 _CHAPTER = (
     "Memory checkpoint: when a substantive task, review or investigation finishes, offer "
     "`/sleep` in your closing reply before switching topics, even below the context warning "
-    "threshold. Do not repeat a declined offer without significant new work. A reminder alone "
+    "threshold. A closing reply after sleep/compact is not a new chapter. "
+    "Do not repeat a declined offer without significant new work. A reminder alone "
     "does not request consolidation; if the user already requested sleep, perform it instead "
     "of asking again."
 )

@@ -91,9 +91,9 @@ def _sleep(metrics: dict, command: str) -> tuple[str, str]:
         return "", ""
     return (
         f"{_magnitude(stm)}/{_magnitude(snaps)}",
-        f"Unconsolidated memory: {stm} STM {_plural(stm, 'entry', 'entries')} and {snaps} pending "
-        f"{_plural(snaps, 'snapshot', 'snapshots')} are waiting. "
-        f"{command} writes them into long-term notes.",
+        f"Buffered memory: {stm} STM {_plural(stm, 'entry', 'entries')} and {snaps} pending "
+        f"{_plural(snaps, 'snapshot', 'snapshots')}. "
+        f"Retained for the next {command}; not an instruction to sleep now.",
     )
 
 

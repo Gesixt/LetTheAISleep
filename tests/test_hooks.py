@@ -318,10 +318,10 @@ def test_session_start_injects_anchor_when_clean(tmp_path: Path):
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert "[[N1]]" in text
-    assert "finish sleeping" not in text.lower()
+    assert "Buffered memory" not in text
 
 
-def test_session_start_forces_completion_when_pending(tmp_path: Path):
+def test_session_start_reports_retained_snapshots(tmp_path: Path):
     make_project(tmp_path)
     from lts.config import load_config
     from lts import paths, pending
@@ -329,7 +329,7 @@ def test_session_start_forces_completion_when_pending(tmp_path: Path):
     pending.dump_snapshot(paths.pending_dir(cfg), "s", "raw")
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
-    assert "finish sleeping" in text.lower()
+    assert "Buffered memory" in text
 
 
 def test_session_start_run_wraps_context(tmp_path: Path):
@@ -341,7 +341,7 @@ def test_session_start_run_wraps_context(tmp_path: Path):
     ss = _load("session_start", HOOKS / "session_start.py")
     out = ss.run({"session_id": "s", "source": "startup"}, root=tmp_path)
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-    assert "finish sleeping" in out["hookSpecificOutput"]["additionalContext"].lower()
+    assert "Buffered memory" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def _usage_transcript(path: Path, ctx_tokens: int):
@@ -391,7 +391,7 @@ def test_pre_compact_runs_as_subprocess_without_pythonpath(tmp_path: Path):
     assert len(snaps) == 1
 
 
-def test_session_start_forces_completion_when_stm_present(tmp_path: Path):
+def test_session_start_reports_retained_stm(tmp_path: Path):
     make_project(tmp_path)
     from lts.config import load_config
     from lts import paths, stm
@@ -400,7 +400,7 @@ def test_session_start_forces_completion_when_stm_present(tmp_path: Path):
     stm.append(paths.stm_file(cfg), "uncommitted fact")
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
-    assert "finish sleeping" in text.lower()
+    assert "Buffered memory" in text
 
 
 def test_stop_auto_captures_exchanges(tmp_path: Path):
@@ -537,7 +537,7 @@ def test_session_start_keeps_the_anchor_when_the_digest_blows_up(tmp_path: Path)
     assert "[[N1]]" in text
 
 
-def test_session_start_shows_the_digest_while_a_sleep_is_owed(tmp_path: Path):
+def test_session_start_shows_the_digest_alongside_buffered_memory(tmp_path: Path):
     make_project(tmp_path)
     from lts.config import load_config
     from lts import anchor, paths, pending
@@ -553,13 +553,12 @@ def test_session_start_shows_the_digest_while_a_sleep_is_owed(tmp_path: Path):
 
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
-    assert "finish sleeping" in text.lower()
+    assert "Buffered memory" in text
     assert "Cart Service" in text                 # a teammate's work is not worth hiding
 
 
-def test_session_start_says_exactly_what_is_owed(tmp_path: Path):
-    # A bare "unfinished sleep" made every session open by investigating whether the
-    # material was a duplicate. It never is any more, so say so and give the size.
+def test_session_start_reports_storage_counts_without_claiming_unique_content(tmp_path: Path):
+    # Counts describe storage, not unique notes or proof that consolidation failed.
     make_project(tmp_path)
     from lts import paths, pending, stm
     from lts.config import load_config
@@ -571,10 +570,11 @@ def test_session_start_says_exactly_what_is_owed(tmp_path: Path):
 
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "startup"}, root=tmp_path)
-    assert "finish sleeping" in text.lower()
+    assert "Buffered memory" in text
     assert "2 STM" in text
     assert "1 pending snapshot" in text
-    assert "duplicate" in text.lower()   # tells the model not to re-check for one
+    assert "may overlap" in text
+    assert "not evidence of an interrupted sleep" in text
 
 
 def test_sleep_does_not_hide_a_late_flushed_closing_message(tmp_path: Path):
@@ -699,10 +699,10 @@ def test_session_start_shows_the_anchor_even_when_a_sleep_is_owed(tmp_path: Path
     ss = _load("session_start", HOOKS / "session_start.py")
     text = ss.build_context({"session_id": "s", "source": "compact"}, root=tmp_path)
 
-    assert "finish sleeping" in text.lower()          # the demand still stands
+    assert "Buffered memory" in text          # the backlog is still reported
     assert "Session_2026-09-25_1000" in text          # …and no longer hides the anchor
     assert "knowledge-base/Architecture" in text
-    assert text.index("finish sleeping") < text.index("Session_2026-09-25_1000")
+    assert text.index("Buffered memory") < text.index("Session_2026-09-25_1000")
 
 
 def _vault_note(root: Path, folder: str, title: str) -> None:
@@ -1192,11 +1192,11 @@ def test_session_start_shows_an_outstanding_sleep_to_the_user(tmp_path: Path):
     # The whole line, not a substring: on a quiet project this is the only subject with anything to
     # say, so anything else in the field would be the fixture talking.
     assert out["systemMessage"] == (
-        "Unconsolidated memory: 1 STM entry and 0 pending snapshots are waiting. "
-        "/sleep writes them into long-term notes."
+        "Buffered memory: 1 STM entry and 0 pending snapshots. "
+        "Retained for the next /sleep; not an instruction to sleep now."
     )
-    # and the model's half is untouched
-    assert "Unfinished sleep" in out["hookSpecificOutput"]["additionalContext"]
+    # and the model receives the same informational policy
+    assert "Buffered memory" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_session_start_says_nothing_to_the_user_when_all_is_well(tmp_path: Path):

@@ -72,6 +72,12 @@ Codex's explicit-only skill policy remains unchanged.
 Pending STM material can also produce a sleep notification independently of context usage.
 Both model instructions and user notifications use `$sleep` for Codex.
 
+After sleep and `/compact`, one closing reply may appear in both STM and a pending snapshot.
+SessionStart reports these storage counts without treating them as a failed sleep or requiring
+consolidation before the user's new task. Retain the tail for the next substantive sleep;
+do not create another session note just to acknowledge the previous successful sleep. Real work
+after consolidation remains protected by the fixed frontier described below.
+
 ## Transcript and lifecycle contracts
 
 Only `response_item` records of type `message`, role `user` or `assistant`, are

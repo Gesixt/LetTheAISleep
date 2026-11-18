@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from lts import paths, stm, watermark
+from lts import anchor, paths, stm, sync, watermark
 from lts.config import load_config
-from lts.hookimpl import pre_compact, stop
+from lts.hookimpl import pre_compact, session_start, stop
 from tests.helpers import make_project
 
 
@@ -98,3 +98,47 @@ def test_armed_sleep_does_not_rewind_a_later_capture(chapter):
     watermark.write_mark(paths.capture_mark_file(cfg, client), later)
     assert stop.capture(event, now=boundary + timedelta(seconds=30), client=client) == 0
     assert watermark.read_mark(paths.capture_mark_file(cfg, client)) == later
+
+
+@pytest.mark.parametrize('tail', [
+    'Saved the chapter; memory and index updated. You can /compact.',
+    'New review result: queue and snapshot must commit in one transaction.',
+])
+def test_compact_after_sleep_keeps_the_tail_without_forcing_another_sleep(chapter, tail):
+    """A single buffered reply can be narration OR important work; preserve both safely."""
+    from pathlib import Path
+
+    cfg, client, boundary, write, event = chapter
+    sync.sync(Path(__file__).resolve().parents[1], cfg)
+    note = paths.vault_root(cfg) / 'session-memory' / 'Saved chapter.md'
+    note.parent.mkdir(parents=True)
+    note.write_text('# Saved chapter\nThe earlier work is consolidated.\n')
+    anchor.write_anchor(paths.anchor_file(cfg), updated='2026-11-16 09:07',
+                        last_session='Saved chapter', active_topics=['Completed work'],
+                        active_notes=['session-memory/Saved chapter'])
+    write((-10, 'already saved'), (10, tail))
+    now = boundary + timedelta(seconds=20)
+    assert stop.capture(event, now=now, client=client) == 1
+    pre_compact.run(event, now=now, client=client)
+    snapshots = list(paths.pending_dir(cfg).glob('*.md'))
+    assert len(snapshots) == 1
+    before = (paths.stm_file(cfg).read_bytes(), snapshots[0].read_bytes(),
+              paths.capture_mark_file(cfg, client).read_bytes(),
+              paths.consolidation_mark_file(cfg, client).read_bytes())
+
+    for _ in range(2):
+        out = session_start.run({**event, 'source': 'compact'}, client=client)
+        context = out['hookSpecificOutput']['additionalContext']
+        assert 'Buffered memory' in context
+        assert "Continue the user's current request" in context
+        assert 'not evidence of an interrupted sleep' in context
+        assert 'Saved chapter' in context  # The anchor still arrives alongside the backlog.
+        assert 'Unfinished sleep detected' not in context
+        assert 'Before doing anything else, run' not in context
+        assert 'not an instruction to sleep now' in out['systemMessage']
+
+    after = (paths.stm_file(cfg).read_bytes(), snapshots[0].read_bytes(),
+             paths.capture_mark_file(cfg, client).read_bytes(),
+             paths.consolidation_mark_file(cfg, client).read_bytes())
+    assert after == before  # No deletion, count threshold, semantic filtering or frontier jump.
+    assert tail in snapshots[0].read_text()

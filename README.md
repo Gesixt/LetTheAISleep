@@ -26,7 +26,7 @@ Skill names below use Claude's `/sleep`, `/recall`, `/memory-status`; in Codex u
 - **`/recall`** retrieves by graph priority (anchor links first) + semantic search, loading only what's relevant.
 - **`/memory-status`** shows a dashboard of both tiers and flags when to sleep or reindex.
 - **Hooks** (run by the selected client automatically once activated): `PreCompact` snapshots un-consolidated material as
-  a backstop, `SessionStart` injects the anchor or forces an unfinished sleep to complete,
+  a backstop, `SessionStart` injects the anchor and reports retained memory without forcing a sleep,
   `UserPromptSubmit` states the measured context occupancy on every turn and adds escalating
   "time to sleep" pressure as it fills.
 
@@ -111,7 +111,7 @@ Skill names below use Claude's `/sleep`, `/recall`, `/memory-status`; in Codex u
 >
 > `PreCompact` snapshots the tail that neither claim covers, i.e. whatever follows the later of the
 > two marks — so a compact that finds nothing new writes no snapshot, nothing already consolidated
-> is dumped twice, and `SessionStart` only demands a sleep that is really owed. Material written
+> is dumped twice, and `SessionStart` reports what is retained for later consolidation. Material written
 > after the consolidation boundary is eligible even when it belongs to the same turn.
 >
 > Until 2026-10-30 one file carried both claims, and `PreCompact`'s ordinary path wrote the
@@ -134,6 +134,11 @@ Skill names below use Claude's `/sleep`, `/recall`, `/memory-status`; in Codex u
 > amount of sleep narration may appear in STM or a snapshot; the hook cannot safely classify it
 > as disposable. Ordinary capture and snapshot marks still name only the last message actually
 > read, so later flushes cannot be skipped. Claude Code's compaction bookkeeping is filtered out.
+>
+> Buffered entries and pending snapshots do not prove a sleep was interrupted. SessionStart
+> reports their counts without ordering another sleep before the user's task. A closing reply
+> after a successful sleep can appear in both stores; it is retained for the next substantive
+> consolidation, without generating a cycle of notes about having just saved memory.
 >
 > **The mark is not moved by `lts stm clear` itself.** The command sets a flag, and the next hook to
 > run — `Stop`, or `PreCompact` if an auto-compact beats it — is what writes the mark. That flag is a
